@@ -20,7 +20,7 @@ Pipeline dữ liệu lớn cho giao dịch ngân hàng mô phỏng (tiểu luậ
 - Kiểm tra quy tắc: `python scripts/check_rules.py`
 - Lint: `ruff check . && ruff format --check .`
 - Unit test: `pytest tests/unit -q`
-- Integration: [cập nhật sau T05]
+- Integration: `bash scripts/smoke.sh` (hoặc `pytest tests/integration -q`)
 
 ## Quy tắc cứng
 - Chỉ làm task được giao. Không làm việc của task khác, không thêm tính năng ngoài thẻ task.
