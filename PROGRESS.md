@@ -20,7 +20,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 |---|---|---|---|---|---|
 | T00 | C | TODO | | | |
 | T01 | C | TODO | | | |
-| T02 | C | TODO | | | |
+| T02 | C | IN_REVIEW | | `pytest tests/integration/test_compose_core.py` (4/4 PASS), `verify_contract.py` (14/14 PASS) | Docker Compose profile `core` (Kafka, MinIO, Postgres 4 DB, Spark) |
 | T03 | C | TODO | | | |
 | T04 | A | TODO | | | |
 | T05 | A | TODO | | | |
@@ -53,3 +53,5 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 ## Nhật ký phiên
 
 Mỗi phiên agent thêm một dòng: ngày, task, việc đã làm, quyết định, vướng mắc.
+
+- 2026-11-22 | T02 | Thêm `docker-compose.yml` (profile `core` với Kafka 3.7.2, MinIO, Postgres 16.6, Spark 3.5.8), script idempotent `infra/postgres/init/01-init-databases.sh` tạo 4 DB/user riêng, cập nhật `.env.example`, `infra/README.md` và `tests/integration/test_compose_core.py` | Dùng KRaft cho Kafka với 2 listener INTERNAL (9092) / EXTERNAL (19092) khớp `default.toml` và `test.toml` | WSL hiện chưa bật Docker CLI nên chưa chạy `docker compose up -d` trực tiếp.
