@@ -8,12 +8,37 @@
 
 **Quy tắc:** Không dùng tag `latest`. Không tải dependency từ Internet lúc chạy job.
 
-## Cấu trúc hiện có (sau T04)
+## Cấu trúc hiện có (sau T02 & T04)
 
+- `docker-compose.yml` (ở thư mục gốc repo): Cấu hình Docker Compose profile `core` cho 4 dịch vụ hạ tầng lõi (`kafka`, `minio`, `postgres`, `spark`) với healthcheck, named volume (`n06_kafka_data`, `n06_minio_data`, `n06_postgres_data`, `n06_spark_data`) và biến môi trường từ `.env`.
+- `infra/postgres/init/01-init-databases.sh`: Script khởi tạo idempotent tạo 4 role và 4 database riêng biệt (`n06_mart`, `n06_control`, `n06_airflow`, `n06_metabase`), cô lập quyền truy cập và schema `public` giữa các database.
 - `infra/spark/Dockerfile`: Dựng image Spark `3.5.8` (kèm Hadoop `3.3.4`, Scala `2.12.18`) trên nền `python:3.11.11-slim-bookworm` và `openjdk-17-jre-headless`. Tải sẵn và kiểm tra checksum cho 6 JAR connector S3A và Kafka 0-10.
 - `infra/spark/jars.sha1`: Danh sách mã băm SHA-1 chính thức từ Maven Central của 6 JAR connector được kiểm tra bằng `sha1sum -c` trong quá trình `docker build`.
 
-## Cách build và kiểm tra image Spark
+## Vận hành Docker Compose (Profile `core`)
+
+```bash
+# 1. Tạo file .env từ mẫu (hoặc dùng `n06 init-local` sau T03)
+cp .env.example .env
+
+# 2. Kiểm tra cấu hình Compose hợp lệ
+docker compose --profile core config
+
+# 3. Khởi động 4 dịch vụ lõi và chờ trạng thái healthy
+docker compose --profile core up -d --wait
+docker compose --profile core ps
+
+# 4. Chạy lại script khởi tạo PostgreSQL (idempotent — chạy nhiều lần không lỗi)
+docker compose --profile core exec -T postgres bash /docker-entrypoint-initdb.d/01-init-databases.sh
+
+# 5. Dừng container nhưng giữ nguyên dữ liệu trong named volume
+docker compose --profile core down
+
+# 6. Dừng và xóa toàn bộ named volume
+docker compose --profile core down -v
+```
+
+## Cách build và kiểm tra riêng image Spark
 
 ```bash
 # Build image từ thư mục gốc repository

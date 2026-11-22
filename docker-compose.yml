@@ -1,0 +1,171 @@
+# Docker Compose hạ tầng lõi N06 (TASK T02)
+# Tuân thủ docs/spec.md Phần I mục 2 & 3, docs/adr/0001-bo-phien-ban.md.
+# - Không dùng tag `latest`; ghim phiên bản tất cả image.
+# - Không hardcode secret; mọi mật khẩu/key bắt buộc đọc từ biến môi trường (.env).
+# - Mỗi service có healthcheck và dùng named volume để bảo toàn dữ liệu qua `down`/`up`.
+# - PostgreSQL tách riêng 4 database và 4 user cho mart, control, airflow, metabase.
+
+name: n06
+
+services:
+  kafka:
+    image: apache/kafka:3.7.2
+    profiles:
+      - core
+    hostname: kafka
+    networks:
+      - n06-net
+    ports:
+      - "${N06_KAFKA_HOST_PORT:-19092}:19092"
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://localhost:${N06_KAFKA_HOST_PORT:-19092}"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    volumes:
+      - n06_kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092 > /dev/null 2>&1"
+      interval: 5s
+      timeout: 10s
+      retries: 15
+      start_period: 15s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    profiles:
+      - core
+    hostname: minio
+    networks:
+      - n06-net
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "${N06_MINIO_API_HOST_PORT:-19000}:9000"
+      - "${N06_MINIO_CONSOLE_HOST_PORT:-19001}:9001"
+    environment:
+      MINIO_ROOT_USER: "${N06_OBJECT_STORE_ACCESS_KEY:?N06_OBJECT_STORE_ACCESS_KEY is required in .env}"
+      MINIO_ROOT_PASSWORD: "${N06_OBJECT_STORE_SECRET_KEY:?N06_OBJECT_STORE_SECRET_KEY is required in .env}"
+    volumes:
+      - n06_minio_data:/data
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl -fsS http://127.0.0.1:9000/minio/health/live > /dev/null"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16.6-bookworm
+    profiles:
+      - core
+    hostname: postgres
+    networks:
+      - n06-net
+    ports:
+      - "${N06_POSTGRES_HOST_PORT:-15432}:5432"
+    environment:
+      POSTGRES_USER: "${N06_POSTGRES_SUPERUSER:-n06_admin}"
+      POSTGRES_PASSWORD: "${N06_POSTGRES_SUPERUSER_PASSWORD:?N06_POSTGRES_SUPERUSER_PASSWORD is required in .env}"
+      POSTGRES_DB: "${N06_POSTGRES_BOOTSTRAP_DB:-postgres}"
+      N06_POSTGRES_MART_DB: "${N06_POSTGRES_MART_DB:-n06_mart}"
+      N06_POSTGRES_MART_USER: "${N06_POSTGRES_MART_USER:-n06_mart_user}"
+      N06_POSTGRES_MART_PASSWORD: "${N06_POSTGRES_MART_PASSWORD:?N06_POSTGRES_MART_PASSWORD is required in .env}"
+      N06_POSTGRES_CONTROL_DB: "${N06_POSTGRES_CONTROL_DB:-n06_control}"
+      N06_POSTGRES_CONTROL_USER: "${N06_POSTGRES_CONTROL_USER:-n06_control_user}"
+      N06_POSTGRES_CONTROL_PASSWORD: "${N06_POSTGRES_CONTROL_PASSWORD:?N06_POSTGRES_CONTROL_PASSWORD is required in .env}"
+      N06_POSTGRES_AIRFLOW_DB: "${N06_POSTGRES_AIRFLOW_DB:-n06_airflow}"
+      N06_POSTGRES_AIRFLOW_USER: "${N06_POSTGRES_AIRFLOW_USER:-n06_airflow_user}"
+      N06_POSTGRES_AIRFLOW_PASSWORD: "${N06_POSTGRES_AIRFLOW_PASSWORD:?N06_POSTGRES_AIRFLOW_PASSWORD is required in .env}"
+      N06_POSTGRES_METABASE_DB: "${N06_POSTGRES_METABASE_DB:-n06_metabase}"
+      N06_POSTGRES_METABASE_USER: "${N06_POSTGRES_METABASE_USER:-n06_metabase_user}"
+      N06_POSTGRES_METABASE_PASSWORD: "${N06_POSTGRES_METABASE_PASSWORD:?N06_POSTGRES_METABASE_PASSWORD is required in .env}"
+    volumes:
+      - n06_postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init/01-init-databases.sh:/docker-entrypoint-initdb.d/01-init-databases.sh:ro
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -h 127.0.0.1 &&
+          psql -U "$${POSTGRES_USER}" -d "$${N06_POSTGRES_MART_DB}" -h 127.0.0.1 -tAc "SELECT 1" | grep -q 1 &&
+          psql -U "$${POSTGRES_USER}" -d "$${N06_POSTGRES_CONTROL_DB}" -h 127.0.0.1 -tAc "SELECT 1" | grep -q 1 &&
+          psql -U "$${POSTGRES_USER}" -d "$${N06_POSTGRES_AIRFLOW_DB}" -h 127.0.0.1 -tAc "SELECT 1" | grep -q 1 &&
+          psql -U "$${POSTGRES_USER}" -d "$${N06_POSTGRES_METABASE_DB}" -h 127.0.0.1 -tAc "SELECT 1" | grep -q 1
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  spark:
+    image: n06-spark:3.5.8-py311
+    build:
+      context: .
+      dockerfile: infra/spark/Dockerfile
+    profiles:
+      - core
+    hostname: spark
+    networks:
+      - n06-net
+    ports:
+      - "${N06_SPARK_UI_HOST_PORT:-18080}:8080"
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_MASTER_HOST: "spark"
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    command:
+      - "/opt/spark/bin/spark-class"
+      - "org.apache.spark.deploy.master.Master"
+      - "--host"
+      - "spark"
+      - "--port"
+      - "7077"
+      - "--webui-port"
+      - "8080"
+    volumes:
+      - n06_spark_data:/workspace/data
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          curl -fsS http://127.0.0.1:8080 > /dev/null &&
+          test -f /opt/spark/jars/hadoop-aws-3.3.4.jar &&
+          test -f /opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar &&
+          test -f /opt/spark/jars/spark-sql-kafka-0-10_2.12-3.5.8.jar
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  n06-net:
+    name: n06_network
+    driver: bridge
+
+volumes:
+  n06_kafka_data:
+    name: n06_kafka_data
+  n06_minio_data:
+    name: n06_minio_data
+  n06_postgres_data:
+    name: n06_postgres_data
+  n06_spark_data:
+    name: n06_spark_data
