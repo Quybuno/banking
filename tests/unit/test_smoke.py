@@ -36,4 +36,3 @@ def test_verify_contract_subprocess_passes() -> None:
 
     assert result.returncode == 0, f"verify_contract.py thất bại:\n{result.stderr}\n{result.stdout}"
     assert "14 check groups passed." in result.stdout
-
