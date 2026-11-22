@@ -51,6 +51,39 @@ uv sync --extra dev
 
 *(Hoặc nếu đã kích hoạt sẵn môi trường ảo Python 3.11: `pip install -e ".[dev]"`).*
 
+## CLI (`n06`)
+
+Sau khi cài đặt gói (`uv sync --extra dev` hoặc `pip install -e ".[dev]"`), toàn bộ thao tác vận hành đi qua lệnh `n06`:
+
+```bash
+# Xem danh sách lệnh và bảng mã thoát
+n06 --help
+
+# Sinh file .env cục bộ từ .env.example với secret ngẫu nhiên an toàn (không lộ secret ra màn hình)
+n06 init-local --profile demo
+
+# Kiểm tra toàn diện cấu hình, Python 3.11, CPU/RAM/disk, Docker và 4 service (kafka, minio, postgres, spark)
+n06 doctor --profile demo
+n06 doctor --profile demo --json
+```
+
+### Bảng mã thoát (`ExitCode`) của `n06`
+
+| Mã thoát | Tên mã | Ý nghĩa |
+|---|---|---|
+| `0` | `OK` | Mọi kiểm tra hoặc thao tác thành công |
+| `2` | `CLI_USAGE_ERROR` | Sai cú pháp dòng lệnh hoặc tham số CLI không hợp lệ |
+| `10` | `CONFIG_ERROR` | Lỗi thiếu biến môi trường bắt buộc, thiếu `.env`, hoặc cấu hình `config/*.toml` sai |
+| `11` | `PYTHON_ENV_ERROR` | Phiên bản Python không thuộc nhánh `3.11.x` theo `ADR-0001` |
+| `12` | `RESOURCE_ERROR` | Tài nguyên máy chủ thấp hơn ngưỡng tối thiểu (`CPU >= 2 cores`, `RAM >= 4.0 GiB`, `Disk trống >= 5.0 GiB`) |
+| `13` | `DOCKER_ERROR` | Thiếu Docker CLI, thiếu plugin `docker compose`, hoặc Docker daemon chưa chạy |
+| `14` | `SERVICE_ERROR` | Một hoặc nhiều service (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, hoặc không mở port |
+
+### Giới hạn tài nguyên máy thực tế (Milestone M0)
+
+- **Tối thiểu để chạy profile `demo` / `test` (`n06 doctor` kiểm tra):** `>= 2 CPU cores`, `>= 4.0 GiB RAM`, `>= 5.0 GiB` ổ đĩa trống, Python `3.11.x`, Docker Engine + Compose v2.
+- **Khuyến nghị khi chạy profile `benchmark` (1.000.000+ giao dịch):** `>= 4 CPU cores`, `>= 8.0 GiB RAM` khả dụng cho WSL2/Docker; tắt Airflow và Metabase (`airflow_enabled = false`, `metabase_enabled = false` trong `config/benchmark.toml`) để dành RAM cho Spark và Kafka.
+
 ## Kiểm tra hiện có
 
 ```bash
@@ -59,6 +92,7 @@ python scripts/check_rules.py                                      # quy tắc c
 ruff check .                                                       # lint
 ruff format --check .                                              # kiểm tra định dạng
 pytest tests/unit -q                                               # unit test
+bash scripts/smoke.sh                                              # smoke test S3A + Kafka
 ```
 
 ## Thiết lập GitHub (làm một lần)
@@ -67,3 +101,4 @@ pytest tests/unit -q                                               # unit test
 2. Settings → Branches → bảo vệ `main`: bắt buộc PR, bắt buộc check `ci / checks` xanh, bắt buộc review từ code owner.
 3. Tạo nhãn `contract-change` cho PR được phép sửa `contracts/` hoặc `tests/fixtures/`.
 4. Commit đầu tiên chứa `contracts/` nên chạy với `N06_ALLOW_CONTRACT_CHANGE=1` nếu chạy `check_rules.py` cục bộ.
+

@@ -16,6 +16,9 @@ dev = [
     "ruff>=0.9.0,<1.0.0",
 ]
 
+[project.scripts]
+n06 = "n06.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["n06*"]
