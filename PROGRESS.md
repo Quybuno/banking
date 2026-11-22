@@ -18,9 +18,9 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 
 | ID | Người | Trạng thái | PR | Bằng chứng | Ghi chú |
 |---|---|---|---|---|---|
-| T00 | C | TODO | | | |
+| T00 | C | DONE | `8f6dd2b` | `verify_contract.py` (14/14 PASS), `ruff check`, `pytest tests/unit/test_smoke.py` (2/2 PASS) | Khung `pyproject.toml`, `uv.lock`, cấu hình ruff/pytest, smoke test |
 | T01 | C | TODO | | | |
-| T02 | C | IN_REVIEW | | `pytest tests/integration/test_compose_core.py` (4/4 PASS), `verify_contract.py` (14/14 PASS) | Docker Compose profile `core` (Kafka, MinIO, Postgres 4 DB, Spark) |
+| T02 | C | DONE | `task/T02-docker-compose` | `pytest tests/integration/test_compose_core.py` (4/4 PASS), `verify_contract.py` (14/14 PASS) | Docker Compose profile `core` (Kafka, MinIO, Postgres 4 DB, Spark) |
 | T03 | C | TODO | | | |
 | T04 | A | TODO | | | |
 | T05 | A | TODO | | | |
