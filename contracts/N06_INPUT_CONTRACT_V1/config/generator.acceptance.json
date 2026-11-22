@@ -1,0 +1,24 @@
+{
+  "contract_version": "1.0.0",
+  "profile": "acceptance-fixed",
+  "dataset_id": "n06-acceptance-v1",
+  "business_timezone": "Asia/Ho_Chi_Minh",
+  "allowed_lateness_seconds": 86400,
+  "amount_tolerance_minor": 0,
+  "fixture_root": "fixtures/acceptance",
+  "mode": "READ_FIXED_FIXTURE",
+  "snapshots": [
+    {
+      "name": "early",
+      "as_of_time": "2026-01-02T04:00:00Z"
+    },
+    {
+      "name": "after_cutoff",
+      "as_of_time": "2026-01-02T18:00:00Z"
+    },
+    {
+      "name": "late_corrected",
+      "as_of_time": "2026-01-03T01:00:00Z"
+    }
+  ]
+}

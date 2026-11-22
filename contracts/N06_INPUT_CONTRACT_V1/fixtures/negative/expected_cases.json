@@ -1,0 +1,9 @@
+{
+  "event_id_conflict": "EVENT_ID_CONFLICT",
+  "business_key_conflict": "BUSINESS_KEY_CONFLICT",
+  "unbalanced_ledger": "LEDGER_UNBALANCED",
+  "missing_ledger_side": "LEDGER_INCOMPLETE",
+  "malformed_payloads": "INVALID_JSON",
+  "reconciliation_for_conflicts": "DUPLICATE_OR_CONFLICT",
+  "isolation": "Each file is a separate scenario on top of clean account/transaction context; do not concatenate all files."
+}

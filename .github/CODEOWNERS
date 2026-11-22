@@ -1,0 +1,22 @@
+# Thay <github-A>, <github-B>, <github-C> bằng tài khoản GitHub thật của Mạnh, Quang, Quý.
+*                         <github-A> <github-B> <github-C>
+/contracts/               <github-A> <github-B> <github-C>
+/tests/fixtures/          <github-A> <github-B> <github-C>
+/src/n06/domain/          <github-A>
+/src/n06/generator/       <github-A>
+/src/n06/producer/        <github-A>
+/src/n06/ingestion/       <github-A> <github-B>
+/src/n06/spark_jobs/      <github-B>
+/src/n06/quality/         <github-B>
+/src/n06/reconciliation/  <github-B>
+/src/n06/storage/         <github-B>
+/tests/harness/           <github-B>
+/tests/integration/       <github-B>
+/tests/e2e/               <github-B>
+/src/n06/warehouse/       <github-C> <github-B>
+/src/n06/observability/   <github-C>
+/infra/                   <github-C> <github-A>
+/config/                  <github-C>
+/sql/                     <github-C> <github-B>
+/dags/                    <github-C>
+/docs/adr/                <github-A> <github-B> <github-C>

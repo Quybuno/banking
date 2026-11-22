@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+data/
+spark-warehouse/
+metastore_db/
+checkpoints/
+reports/raw/
+.claude/settings.local.json

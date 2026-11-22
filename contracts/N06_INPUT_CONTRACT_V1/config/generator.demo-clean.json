@@ -1,0 +1,52 @@
+{
+  "contract_version": "1.0.0",
+  "profile": "demo-clean",
+  "seed": 42,
+  "dataset_id": "n06-demo-clean",
+  "business_timezone": "Asia/Ho_Chi_Minh",
+  "from_date": "2026-01-01",
+  "to_date": "2026-01-03",
+  "transaction_count": 10000,
+  "account_count": 100,
+  "currency": "VND",
+  "currency_exponents": {
+    "VND": 0,
+    "USD": 2
+  },
+  "opening_balance_minor_per_account": 1000000000,
+  "amount_min_minor": 100,
+  "amount_max_minor": 100000,
+  "amount_distribution": "UNIFORM_INTEGER",
+  "success_basis_points": 9500,
+  "channel_weights_basis_points": {
+    "SIM_CHANNEL_A": 7000,
+    "SIM_CHANNEL_B": 3000
+  },
+  "account_selection": "UNIFORM_DISTINCT_PAIR",
+  "hot_account_count": 0,
+  "hot_account_basis_points": 0,
+  "time_distribution": "UNIFORM_SECONDS_WITHIN_BUSINESS_DAY",
+  "allowed_lateness_seconds": 86400,
+  "amount_tolerance_minor": 0,
+  "seed_namespace": "ef2331f9-2c98-5cc5-b955-09c647d87cb0",
+  "faults": {
+    "policy": "EXACT_DISJOINT_COUNTS_V1",
+    "event_replay_basis_points": 0,
+    "business_replay_basis_points": 0,
+    "missing_internal_basis_points": 0,
+    "missing_external_basis_points": 0,
+    "statement_duplicate_basis_points": 0,
+    "amount_mismatch_basis_points": 0,
+    "currency_mismatch_basis_points": 0,
+    "status_mismatch_basis_points": 0,
+    "late_within_deadline_basis_points": 0,
+    "late_after_deadline_basis_points": 0
+  },
+  "generation_chunk_rows": 10000,
+  "normal_statement_delay_seconds": 60,
+  "statement_file_window_seconds": 3600,
+  "late_within_delay_after_day_end_seconds": 43200,
+  "late_after_delay_after_day_end_seconds": 108000,
+  "insufficient_funds_policy": "MARK_FAILED",
+  "notes": "Runtime endpoints, credentials, topic names and paths come from separate application configuration."
+}

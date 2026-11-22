@@ -1,0 +1,79 @@
+# Profile test: cô lập tài nguyên cho kiểm thử tự động.
+
+profile = "test"
+
+[services]
+airflow_enabled = false
+metabase_enabled = false
+
+[kafka]
+bootstrap_servers = "localhost:19092"
+events_topic = "n06.test.events.v1"
+num_partitions = 1
+consumer_group = "n06-test-consumer"
+max_offsets_per_trigger = 5000
+trigger_interval_seconds = 1
+
+[object_store]
+endpoint = "http://localhost:19000"
+bucket = "n06-test-lakehouse"
+path_style_access = true
+
+[postgres.mart]
+host = "localhost"
+port = 15432
+database = "n06_test_mart"
+user = "n06_test_mart_user"
+
+[postgres.control]
+host = "localhost"
+port = 15432
+database = "n06_test_control"
+user = "n06_test_control_user"
+
+[postgres.airflow]
+host = "localhost"
+port = 15432
+database = "n06_test_airflow"
+user = "n06_test_airflow_user"
+
+[postgres.metabase]
+host = "localhost"
+port = 15432
+database = "n06_test_metabase"
+user = "n06_test_metabase_user"
+
+[spark]
+master = "local[2]"
+shuffle_partitions = 4
+cores = 2
+driver_memory = "1g"
+executor_memory = "1g"
+event_log_enabled = false
+
+[producer]
+rate = 0
+key_strategy = "transaction_id"
+
+[dataset]
+dataset_id = "n06-test-suite"
+seed = 42
+from_date = "2026-01-01"
+to_date = "2026-01-02"
+transaction_count = 100
+account_count = 10
+currency = "VND"
+allowed_lateness_seconds = 86400
+
+[paths]
+raw_prefix = "test-raw"
+bronze_prefix = "test-bronze"
+silver_prefix = "test-silver"
+gold_prefix = "test-gold"
+quarantine_prefix = "test-quarantine"
+statements_prefix = "test-statements"
+checkpoints_prefix = "test-checkpoints"
+benchmark_prefix = "test-benchmark"
+generator_output_dir = "data/test-generated"
+reports_dir = "reports/test"
+

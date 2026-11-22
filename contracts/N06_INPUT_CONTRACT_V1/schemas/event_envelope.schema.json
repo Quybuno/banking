@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "event_envelope.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "TRANSACTION_CREATED",
+        "LEDGER_ENTRY_CREATED"
+      ]
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{2,63}$"
+    },
+    "source_batch_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "event_time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "emitted_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "payload": {
+      "oneOf": [
+        {
+          "$ref": "transaction.schema.json"
+        },
+        {
+          "$ref": "ledger_entry.schema.json"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "dataset_id",
+    "source_batch_id",
+    "event_time",
+    "emitted_at",
+    "payload"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "TRANSACTION_CREATED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "transaction.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "LEDGER_ENTRY_CREATED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "ledger_entry.schema.json"
+          }
+        }
+      }
+    }
+  ]
+}

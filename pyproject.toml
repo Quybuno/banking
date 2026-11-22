@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "n06"
+version = "0.1.0"
+description = "N06 — Pipeline dữ liệu lớn cho giao dịch ngân hàng mô phỏng"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0,<9.0.0",
+    "ruff>=0.9.0,<1.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["n06*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = [
+    "*.md",
+    "contracts",
+    "scripts/check_rules.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra -q"

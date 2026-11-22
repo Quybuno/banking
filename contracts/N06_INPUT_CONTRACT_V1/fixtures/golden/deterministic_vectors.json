@@ -1,0 +1,196 @@
+{
+  "contract_version": "1.0.0",
+  "seed": 42,
+  "dataset_id": "n06-demo-clean",
+  "seed_namespace": "ef2331f9-2c98-5cc5-b955-09c647d87cb0",
+  "note": "Computed by a reference implementation that follows contract section 5.2 literally. draw: SHA-256 over canonical JSON [contract_version, seed, label, ordinal, retry_counter]. uuid: UUIDv5(seed_namespace, canonical JSON [contract_version, dataset_id, seed, entity, ordinal, discriminator]). The retry branch of draw is practically unreachable for these widths and is not covered by a vector.",
+  "draw": [
+    {
+      "label": "amount",
+      "ordinal": 0,
+      "low": 100,
+      "high": 100000,
+      "value": 41563
+    },
+    {
+      "label": "amount",
+      "ordinal": 1,
+      "low": 100,
+      "high": 100000,
+      "value": 78337
+    },
+    {
+      "label": "amount",
+      "ordinal": 9999,
+      "low": 100,
+      "high": 100000,
+      "value": 10741
+    },
+    {
+      "label": "day-second",
+      "ordinal": 0,
+      "low": 0,
+      "high": 86399,
+      "value": 57527
+    },
+    {
+      "label": "day-second",
+      "ordinal": 7,
+      "low": 0,
+      "high": 86399,
+      "value": 73354
+    },
+    {
+      "label": "status",
+      "ordinal": 0,
+      "low": 0,
+      "high": 9999,
+      "value": 8660
+    },
+    {
+      "label": "status",
+      "ordinal": 3,
+      "low": 0,
+      "high": 9999,
+      "value": 2802
+    },
+    {
+      "label": "channel",
+      "ordinal": 0,
+      "low": 0,
+      "high": 9999,
+      "value": 7897
+    },
+    {
+      "label": "account-from",
+      "ordinal": 0,
+      "low": 0,
+      "high": 99,
+      "value": 99
+    },
+    {
+      "label": "account-to-slot",
+      "ordinal": 0,
+      "low": 0,
+      "high": 98,
+      "value": 65
+    },
+    {
+      "label": "hot-from",
+      "ordinal": 0,
+      "low": 0,
+      "high": 9999,
+      "value": 8283
+    },
+    {
+      "label": "account-from-hot",
+      "ordinal": 0,
+      "low": 0,
+      "high": 9,
+      "value": 9
+    },
+    {
+      "label": "amount",
+      "ordinal": 0,
+      "low": 1,
+      "high": 1000000000000,
+      "value": 422670058762
+    }
+  ],
+  "uuid": [
+    {
+      "entity": "account",
+      "ordinal": 0,
+      "discriminator": "original",
+      "value": "4ba0f669-baf1-5992-8ddb-f72a0a452a1a"
+    },
+    {
+      "entity": "account",
+      "ordinal": 99,
+      "discriminator": "original",
+      "value": "7a61e190-e337-5ad8-9e1d-c56ce269ca28"
+    },
+    {
+      "entity": "transaction",
+      "ordinal": 0,
+      "discriminator": "original",
+      "value": "137d7b44-1903-5184-96da-3cfa3b667980"
+    },
+    {
+      "entity": "transaction",
+      "ordinal": 1,
+      "discriminator": "original",
+      "value": "bc16faf3-680b-55f5-a8b9-2c72bae4645a"
+    },
+    {
+      "entity": "ledger_entry",
+      "ordinal": 0,
+      "discriminator": "DEBIT",
+      "value": "4be68fd3-75a0-5026-b07b-9971e3dbb304"
+    },
+    {
+      "entity": "ledger_entry",
+      "ordinal": 0,
+      "discriminator": "CREDIT",
+      "value": "0d856b65-2aee-51de-ae11-38d9b746a65c"
+    },
+    {
+      "entity": "event",
+      "ordinal": 0,
+      "discriminator": "TRANSACTION_CREATED:original",
+      "value": "ae4e0850-6e13-5463-9d86-701c51081e21"
+    },
+    {
+      "entity": "event",
+      "ordinal": 0,
+      "discriminator": "LEDGER_ENTRY_CREATED:DEBIT",
+      "value": "379a69b1-9e56-5836-98bd-df909a7036b3"
+    },
+    {
+      "entity": "event",
+      "ordinal": 0,
+      "discriminator": "LEDGER_ENTRY_CREATED:CREDIT",
+      "value": "49c8d572-fcae-582e-82c6-3f5412c8012c"
+    },
+    {
+      "entity": "event",
+      "ordinal": 0,
+      "discriminator": "TRANSACTION_CREATED:business-replay",
+      "value": "1e4bd7f1-14e6-5d0e-b083-d963c643054a"
+    },
+    {
+      "entity": "statement_record",
+      "ordinal": 0,
+      "discriminator": "original",
+      "value": "2c940e63-20cd-5a7c-9b5a-163fd5c5d5fc"
+    },
+    {
+      "entity": "statement_record",
+      "ordinal": 0,
+      "discriminator": "duplicate",
+      "value": "7bef1ac0-ae2c-5e2d-bad0-a2e0ac99252b"
+    },
+    {
+      "entity": "source_batch",
+      "ordinal": 0,
+      "discriminator": "original",
+      "value": "0b91f7fa-cea4-5297-aef2-aecf6cdc79a9"
+    },
+    {
+      "entity": "source_batch",
+      "ordinal": 490945,
+      "discriminator": "statement:SIM_CHANNEL_A",
+      "value": "8a3a81a1-e3a3-5bf8-bbc8-3344b5d3bc31"
+    }
+  ],
+  "external_reference": [
+    {
+      "transaction_ordinal": 0,
+      "value": "REF-137D7B441903518496DA3CFA3B667980"
+    },
+    {
+      "transaction_ordinal": 1,
+      "value": "REF-BC16FAF3680B55F5A8B92C72BAE4645A"
+    }
+  ]
+}

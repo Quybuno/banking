@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "transaction.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{2,63}$"
+    },
+    "transaction_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "external_reference": {
+      "type": "string",
+      "pattern": "^REF-[A-Z0-9-]{1,80}$"
+    },
+    "account_from": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "account_to": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "amount_minor": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000
+    },
+    "currency": {
+      "type": "string",
+      "enum": [
+        "VND",
+        "USD"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "SUCCESS",
+        "FAILED"
+      ]
+    },
+    "transaction_type": {
+      "const": "INTERNAL_TRANSFER"
+    },
+    "channel": {
+      "type": "string",
+      "enum": [
+        "SIM_CHANNEL_A",
+        "SIM_CHANNEL_B"
+      ]
+    },
+    "event_time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "business_date": {
+      "type": "string",
+      "format": "date"
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "transaction_id",
+    "external_reference",
+    "account_from",
+    "account_to",
+    "amount_minor",
+    "currency",
+    "status",
+    "transaction_type",
+    "channel",
+    "event_time",
+    "business_date"
+  ]
+}

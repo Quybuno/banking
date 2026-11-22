@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "dataset_id": "n06-acceptance-v1",
+  "source_batch_id": "e61aeae7-a61d-5e1f-b52a-d5321d4cd0d9",
+  "files": [
+    {
+      "path": "fixtures/acceptance/accounts.jsonl",
+      "sha256": "7ab1c2131edcda5cea489ff012839e561796388d62148b880b088c9a6047ee66",
+      "physical_rows": 2
+    },
+    {
+      "path": "fixtures/acceptance/control_report.json",
+      "sha256": "df79f5320a78b071d3a207e0898e238fc8d3178cf992fc6cd8e8e9ce8628a4c8",
+      "physical_rows": 1
+    },
+    {
+      "path": "fixtures/acceptance/events.jsonl",
+      "sha256": "7e154ff6b1e87ba140ca5f5996b4a36f0979bf03eaf64642db37a125e4aae4a2",
+      "physical_rows": 36
+    },
+    {
+      "path": "fixtures/acceptance/ledger_entries.jsonl",
+      "sha256": "07dbe679dfbbdcf29b3fb2489dd4a07f9da8fb7399f5af25e32622791e97286b",
+      "physical_rows": 22
+    },
+    {
+      "path": "fixtures/acceptance/statement_batch_00.jsonl",
+      "sha256": "ed2340b9c97916eeef4dc2fb2cbb4325b5bfdbca35b77b6240365021094ab1dc",
+      "physical_rows": 10
+    },
+    {
+      "path": "fixtures/acceptance/statement_batch_01.jsonl",
+      "sha256": "088be32439598a6a056bc7d2d593455316e8f567a05ba7d9faa92f998e93a170",
+      "physical_rows": 1
+    },
+    {
+      "path": "fixtures/acceptance/statement_batch_02.jsonl",
+      "sha256": "d3aef7e4ab130f1875d3419b478f0adbaf0bca91d619f3aed0c4fea9cf53b257",
+      "physical_rows": 1
+    },
+    {
+      "path": "fixtures/acceptance/statement_batch_03.jsonl",
+      "sha256": "e6e7f1eafe56ec699e8b9a9dc6940a27ac1199180ef3e566ffbcfbe705186056",
+      "physical_rows": 1
+    },
+    {
+      "path": "fixtures/acceptance/statement_deliveries.jsonl",
+      "sha256": "c8a0f531fd4130ca50e087ec72ca4d6038d364d32ef421edf34fb055948a1d6a",
+      "physical_rows": 13
+    },
+    {
+      "path": "fixtures/acceptance/statements.jsonl",
+      "sha256": "546c3e1fc3ed1f29d23c00be24bb8c364cfc960697bda8d857a61965436ab51d",
+      "physical_rows": 13
+    },
+    {
+      "path": "fixtures/acceptance/transactions.jsonl",
+      "sha256": "6e2be5a04100dd5c2a2269551a414426ea5f7fca7b6bf23a78dfad9ef6351169",
+      "physical_rows": 12
+    }
+  ]
+}

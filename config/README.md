@@ -1,0 +1,39 @@
+# config/
+
+**Mục đích:** Cấu hình mặc định và profile `demo`/`benchmark`/`test`. Không chứa secret.
+
+**Người sở hữu:** C (Quý)
+
+**Đặc tả liên quan (docs/spec.md):** Phần I mục 2, 3, 10
+
+**Quy tắc:** Mọi endpoint, bucket, topic, ngày, seed, quy mô, partition, executor đều nằm ở đây hoặc biến môi trường, không nằm trong `src/`.
+
+## Các tệp cấu hình
+
+- `default.toml`: Cấu hình nền cho toàn bộ hệ thống.
+- `demo.toml`: Profile cho kịch bản chạy demo end-to-end (bật Airflow/Metabase, 10.000 giao dịch).
+- `benchmark.toml`: Profile cho đo hiệu năng (tắt Airflow/Metabase để giảm RAM, producer `rate = 0` không giới hạn, 1.000.000 giao dịch).
+- `test.toml`: Profile cô lập endpoint/bucket/topic/prefix cho kiểm thử tự động.
+
+## Thứ tự ưu tiên 4 tầng (thấp → cao)
+
+1. `config/default.toml`
+2. `config/<profile>.toml` (chọn qua `N06_PROFILE`, tham số `profile` hoặc `cli_overrides["profile"]`)
+3. Biến môi trường (`N06_*` trong `.env.example` và cú pháp phân cấp `N06__<SECTION>__<KEY>`)
+4. Tham số ghi đè từ CLI (`cli_overrides` truyền vào `n06.config.load_config`)
+
+## Quản lý Credential
+
+- Các trường nhạy cảm (`object_store.access_key`, `object_store.secret_key`, `postgres.mart.password`, `postgres.control.password`, `postgres.airflow.password`, `postgres.metabase.password`) **chỉ được nạp từ biến môi trường** (xem `.env.example`).
+- Nếu bất kỳ file `.toml` nào trong `config/` khai báo password hoặc secret_key, `load_config()` sẽ ném `ConfigValidationError` và dừng ngay khi khởi động.
+
+## Cách dùng trong Python
+
+```python
+from n06.config import load_config
+
+cfg = load_config(
+    profile="demo",
+    cli_overrides={"producer.key_strategy": "transaction_id"},
+)
+```

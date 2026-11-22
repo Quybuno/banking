@@ -1,0 +1,31 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # cập nhật theo ADR-001
+      - name: Hợp đồng dữ liệu (14 nhóm kiểm tra)
+        run: python contracts/N06_INPUT_CONTRACT_V1/tools/verify_contract.py
+      - name: Báo cáo kiểm tra không bị đổi sau khi chạy
+        run: git diff --exit-code -- contracts/
+      - name: Quy tắc cứng và bảo vệ contracts/, tests/fixtures/
+        env:
+          N06_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          N06_ALLOW_CONTRACT_CHANGE: ${{ contains(github.event.pull_request.labels.*.name, 'contract-change') && '1' || '0' }}
+        run: python scripts/check_rules.py
+      - name: Lint và unit test (bật sau T00)
+        if: hashFiles('pyproject.toml') != ''
+        run: |
+          pip install -e ".[dev]"
+          ruff check .
+          ruff format --check .
+          pytest tests/unit -q

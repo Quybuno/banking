@@ -1,0 +1,20 @@
+{
+  "business_date": "2026-01-01",
+  "allowed_lateness_seconds": 86400,
+  "cutoff_utc": "2026-01-02T17:00:00Z",
+  "reference": "REF-T006",
+  "cases": [
+    {
+      "as_of_time": "2026-01-02T16:59:59Z",
+      "expected_status": "PENDING"
+    },
+    {
+      "as_of_time": "2026-01-02T17:00:00Z",
+      "expected_status": "MISSING_EXTERNAL"
+    },
+    {
+      "as_of_time": "2026-01-02T17:00:01Z",
+      "expected_status": "MISSING_EXTERNAL"
+    }
+  ]
+}

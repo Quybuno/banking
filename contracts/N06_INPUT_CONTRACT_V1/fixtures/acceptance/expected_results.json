@@ -1,0 +1,148 @@
+{
+  "schema_version": "1.0.0",
+  "dataset_id": "n06-acceptance-v1",
+  "note": "Hand-authored reconciliation cases and balance arithmetic; pipeline must not read this file.",
+  "counts": {
+    "accounts": 2,
+    "transactions": 12,
+    "success_transactions": 11,
+    "failed_transactions": 1,
+    "ledger_entries": 22,
+    "physical_events": 36,
+    "unique_event_ids": 35,
+    "unique_business_records": 34,
+    "statement_business_records_all_released": 13,
+    "match_keys": 13
+  },
+  "totals": {
+    "transactions_VND_minor": 6850,
+    "success_transactions_VND_minor": 6650,
+    "ledger_debit_VND_minor": 6650,
+    "ledger_credit_VND_minor": 6650,
+    "statement_VND_minor_all_released": 7951,
+    "statement_USD_minor_all_released": 400
+  },
+  "balances": [
+    {
+      "business_date": "2026-01-01",
+      "account_id": "9a583596-945e-58a9-8a0c-ae060d161569",
+      "currency": "VND",
+      "opening_minor": 100000,
+      "debit_minor": 6400,
+      "credit_minor": 0,
+      "closing_minor": 93600
+    },
+    {
+      "business_date": "2026-01-01",
+      "account_id": "2362a3bf-4d28-507a-8938-92fafe632fca",
+      "currency": "VND",
+      "opening_minor": 50000,
+      "debit_minor": 0,
+      "credit_minor": 6400,
+      "closing_minor": 56400
+    },
+    {
+      "business_date": "2026-01-02",
+      "account_id": "9a583596-945e-58a9-8a0c-ae060d161569",
+      "currency": "VND",
+      "opening_minor": 93600,
+      "debit_minor": 0,
+      "credit_minor": 250,
+      "closing_minor": 93850
+    },
+    {
+      "business_date": "2026-01-02",
+      "account_id": "2362a3bf-4d28-507a-8938-92fafe632fca",
+      "currency": "VND",
+      "opening_minor": 56400,
+      "debit_minor": 250,
+      "credit_minor": 0,
+      "closing_minor": 56150
+    }
+  ],
+  "snapshots": [
+    {
+      "name": "early",
+      "as_of_time": "2026-01-02T04:00:00Z",
+      "expected_status_by_reference": {
+        "REF-T001": "MATCHED",
+        "REF-T002": "MATCHED",
+        "REF-T003": "AMOUNT_MISMATCH",
+        "REF-T004": "CURRENCY_MISMATCH",
+        "REF-T005": "STATUS_MISMATCH",
+        "REF-T006": "PENDING",
+        "REF-T007": "PENDING",
+        "REF-T008": "PENDING",
+        "REF-T009": "DUPLICATE_OR_CONFLICT",
+        "REF-T010": "MATCHED",
+        "REF-T011": "MATCHED",
+        "REF-T013": "MATCHED",
+        "REF-X012": "PENDING"
+      },
+      "expected_counts": {
+        "AMOUNT_MISMATCH": 1,
+        "CURRENCY_MISMATCH": 1,
+        "DUPLICATE_OR_CONFLICT": 1,
+        "MATCHED": 5,
+        "PENDING": 4,
+        "STATUS_MISMATCH": 1
+      }
+    },
+    {
+      "name": "after_cutoff",
+      "as_of_time": "2026-01-02T18:00:00Z",
+      "expected_status_by_reference": {
+        "REF-T001": "MATCHED",
+        "REF-T002": "MATCHED",
+        "REF-T003": "AMOUNT_MISMATCH",
+        "REF-T004": "CURRENCY_MISMATCH",
+        "REF-T005": "STATUS_MISMATCH",
+        "REF-T006": "MISSING_EXTERNAL",
+        "REF-T007": "MATCHED",
+        "REF-T008": "MISSING_EXTERNAL",
+        "REF-T009": "DUPLICATE_OR_CONFLICT",
+        "REF-T010": "MATCHED",
+        "REF-T011": "MATCHED",
+        "REF-T013": "MATCHED",
+        "REF-X012": "MISSING_INTERNAL"
+      },
+      "expected_counts": {
+        "AMOUNT_MISMATCH": 1,
+        "CURRENCY_MISMATCH": 1,
+        "DUPLICATE_OR_CONFLICT": 1,
+        "MATCHED": 6,
+        "MISSING_EXTERNAL": 2,
+        "MISSING_INTERNAL": 1,
+        "STATUS_MISMATCH": 1
+      }
+    },
+    {
+      "name": "late_corrected",
+      "as_of_time": "2026-01-03T01:00:00Z",
+      "expected_status_by_reference": {
+        "REF-T001": "MATCHED",
+        "REF-T002": "MATCHED",
+        "REF-T003": "AMOUNT_MISMATCH",
+        "REF-T004": "CURRENCY_MISMATCH",
+        "REF-T005": "STATUS_MISMATCH",
+        "REF-T006": "MISSING_EXTERNAL",
+        "REF-T007": "MATCHED",
+        "REF-T008": "MATCHED",
+        "REF-T009": "DUPLICATE_OR_CONFLICT",
+        "REF-T010": "MATCHED",
+        "REF-T011": "MATCHED",
+        "REF-T013": "MATCHED",
+        "REF-X012": "MISSING_INTERNAL"
+      },
+      "expected_counts": {
+        "AMOUNT_MISMATCH": 1,
+        "CURRENCY_MISMATCH": 1,
+        "DUPLICATE_OR_CONFLICT": 1,
+        "MATCHED": 7,
+        "MISSING_EXTERNAL": 1,
+        "MISSING_INTERNAL": 1,
+        "STATUS_MISMATCH": 1
+      }
+    }
+  ]
+}

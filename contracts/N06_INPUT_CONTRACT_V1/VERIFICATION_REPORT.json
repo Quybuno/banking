@@ -1,0 +1,68 @@
+{
+  "status": "PASS",
+  "scope": "Contract package only; no generator/Kafka/Spark/PostgreSQL execution verified",
+  "checks": [
+    "Manifest SHA-256, physical rows, UTF-8/LF and safe paths",
+    "All positive fixture records satisfy package schema subset with format checks",
+    "Generator config schemas and cross-field constraints",
+    "Business keys, account references, currencies, dates and chronology",
+    "Envelope consistency; replay dedup yields exact reference business records",
+    "Ledger completeness, balanced sides and transaction linkage",
+    "Hand-authored expected counts and per-currency control totals",
+    "Hand-authored control report: schema, row rules and per-group totals",
+    "Two-day opening/movement/closing arithmetic and no overdraft",
+    "Actual statement batches and delivery schedule equal reference without early release",
+    "All three reconciliation snapshots match every key and expected histograms",
+    "Before, exactly at and after cutoff use an unambiguous inclusive deadline",
+    "Negative records, ID conflicts, incomplete/unbalanced ledger and malformed JSON",
+    "Golden vectors for draw(), UUIDv5 identities and external_reference"
+  ],
+  "counts": {
+    "accounts": 2,
+    "transactions": 12,
+    "success_transactions": 11,
+    "failed_transactions": 1,
+    "ledger_entries": 22,
+    "physical_events": 36,
+    "unique_event_ids": 35,
+    "unique_business_records": 34,
+    "statement_business_records_all_released": 13,
+    "match_keys": 13
+  },
+  "totals": {
+    "transactions_VND_minor": 6850,
+    "success_transactions_VND_minor": 6650,
+    "ledger_debit_VND_minor": 6650,
+    "ledger_credit_VND_minor": 6650,
+    "statement_VND_minor_all_released": 7951,
+    "statement_USD_minor_all_released": 400
+  },
+  "snapshot_histograms": {
+    "early": {
+      "AMOUNT_MISMATCH": 1,
+      "CURRENCY_MISMATCH": 1,
+      "DUPLICATE_OR_CONFLICT": 1,
+      "MATCHED": 5,
+      "PENDING": 4,
+      "STATUS_MISMATCH": 1
+    },
+    "after_cutoff": {
+      "AMOUNT_MISMATCH": 1,
+      "CURRENCY_MISMATCH": 1,
+      "DUPLICATE_OR_CONFLICT": 1,
+      "MATCHED": 6,
+      "MISSING_EXTERNAL": 2,
+      "MISSING_INTERNAL": 1,
+      "STATUS_MISMATCH": 1
+    },
+    "late_corrected": {
+      "AMOUNT_MISMATCH": 1,
+      "CURRENCY_MISMATCH": 1,
+      "DUPLICATE_OR_CONFLICT": 1,
+      "MATCHED": 7,
+      "MISSING_EXTERNAL": 1,
+      "MISSING_INTERNAL": 1,
+      "STATUS_MISMATCH": 1
+    }
+  }
+}

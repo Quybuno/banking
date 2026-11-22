@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control_report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{2,63}$"
+    },
+    "totals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "entity": {
+            "type": "string",
+            "enum": [
+              "transaction",
+              "ledger_entry"
+            ]
+          },
+          "business_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "VND",
+              "USD"
+            ]
+          },
+          "status_or_side": {
+            "type": "string",
+            "enum": [
+              "SUCCESS",
+              "FAILED",
+              "DEBIT",
+              "CREDIT"
+            ]
+          },
+          "record_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "amount_minor_total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "entity",
+          "business_date",
+          "currency",
+          "status_or_side",
+          "record_count",
+          "amount_minor_total"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "totals"
+  ]
+}

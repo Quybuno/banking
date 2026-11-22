@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source_manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{2,63}$"
+    },
+    "source_batch_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "physical_rows": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "physical_rows"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "source_batch_id",
+    "files"
+  ]
+}

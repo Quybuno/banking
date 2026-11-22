@@ -1,0 +1,33 @@
+# Profile demo: chạy minh họa end-to-end với quy mô vừa phải, bật Airflow và Metabase.
+
+profile = "demo"
+
+[services]
+airflow_enabled = true
+metabase_enabled = true
+
+[kafka]
+num_partitions = 3
+max_offsets_per_trigger = 10000
+
+[spark]
+master = "local[2]"
+shuffle_partitions = 16
+cores = 2
+driver_memory = "2g"
+executor_memory = "2g"
+
+[producer]
+rate = 5000
+key_strategy = "transaction_id"
+
+[dataset]
+dataset_id = "n06-demo-clean"
+seed = 42
+from_date = "2026-01-01"
+to_date = "2026-01-03"
+transaction_count = 10000
+account_count = 100
+currency = "VND"
+allowed_lateness_seconds = 86400
+

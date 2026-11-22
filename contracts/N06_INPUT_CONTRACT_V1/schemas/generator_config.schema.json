@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "generator_config.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {
+      "const": "1.0.0"
+    },
+    "profile": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{2,63}$"
+    },
+    "business_timezone": {
+      "const": "Asia/Ho_Chi_Minh"
+    },
+    "from_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "to_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "transaction_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "account_count": {
+      "type": "integer",
+      "minimum": 2
+    },
+    "currency": {
+      "type": "string",
+      "enum": [
+        "VND",
+        "USD"
+      ]
+    },
+    "currency_exponents": {
+      "const": {
+        "VND": 0,
+        "USD": 2
+      }
+    },
+    "opening_balance_minor_per_account": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9000000000000000
+    },
+    "amount_min_minor": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000
+    },
+    "amount_max_minor": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000
+    },
+    "amount_distribution": {
+      "const": "UNIFORM_INTEGER"
+    },
+    "success_basis_points": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "channel_weights_basis_points": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "SIM_CHANNEL_A": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "SIM_CHANNEL_B": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      },
+      "required": [
+        "SIM_CHANNEL_A",
+        "SIM_CHANNEL_B"
+      ]
+    },
+    "account_selection": {
+      "type": "string",
+      "enum": [
+        "UNIFORM_DISTINCT_PAIR",
+        "HOT_ACCOUNT_V1"
+      ]
+    },
+    "hot_account_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "hot_account_basis_points": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "time_distribution": {
+      "const": "UNIFORM_SECONDS_WITHIN_BUSINESS_DAY"
+    },
+    "allowed_lateness_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "amount_tolerance_minor": {
+      "const": 0
+    },
+    "seed_namespace": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "faults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": {
+          "const": "EXACT_DISJOINT_COUNTS_V1"
+        },
+        "event_replay_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "business_replay_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "missing_internal_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "missing_external_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "statement_duplicate_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "amount_mismatch_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "currency_mismatch_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "status_mismatch_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "late_within_deadline_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "late_after_deadline_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        }
+      },
+      "required": [
+        "policy",
+        "event_replay_basis_points",
+        "business_replay_basis_points",
+        "missing_internal_basis_points",
+        "missing_external_basis_points",
+        "statement_duplicate_basis_points",
+        "amount_mismatch_basis_points",
+        "currency_mismatch_basis_points",
+        "status_mismatch_basis_points",
+        "late_within_deadline_basis_points",
+        "late_after_deadline_basis_points"
+      ]
+    },
+    "generation_chunk_rows": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "normal_statement_delay_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "statement_file_window_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "late_within_delay_after_day_end_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "late_after_delay_after_day_end_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "insufficient_funds_policy": {
+      "const": "MARK_FAILED"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract_version",
+    "profile",
+    "seed",
+    "dataset_id",
+    "business_timezone",
+    "from_date",
+    "to_date",
+    "transaction_count",
+    "account_count",
+    "currency",
+    "currency_exponents",
+    "opening_balance_minor_per_account",
+    "amount_min_minor",
+    "amount_max_minor",
+    "amount_distribution",
+    "success_basis_points",
+    "channel_weights_basis_points",
+    "account_selection",
+    "hot_account_count",
+    "hot_account_basis_points",
+    "time_distribution",
+    "allowed_lateness_seconds",
+    "amount_tolerance_minor",
+    "seed_namespace",
+    "faults",
+    "generation_chunk_rows",
+    "normal_statement_delay_seconds",
+    "statement_file_window_seconds",
+    "late_within_delay_after_day_end_seconds",
+    "late_after_delay_after_day_end_seconds",
+    "insufficient_funds_policy",
+    "notes"
+  ]
+}
