@@ -1,6 +1,6 @@
 # ADR-0001: Bộ phiên bản Spark, Hadoop, AWS SDK, Kafka Connector, Java và Python
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: C (Quý — khởi tạo Python tại T00), A (Mạnh — hoàn thiện và kiểm chứng bộ phiên bản tại T04)
 - Người duyệt: B (Quang), C (Quý)
 - Ngày: 2026-11-22

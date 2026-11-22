@@ -19,10 +19,10 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | ID | Người | Trạng thái | PR | Bằng chứng | Ghi chú |
 |---|---|---|---|---|---|
 | T00 | C | DONE | `8f6dd2b` | `verify_contract.py` (14/14 PASS), `ruff check`, `pytest tests/unit/test_smoke.py` (2/2 PASS) | Khung `pyproject.toml`, `uv.lock`, cấu hình ruff/pytest, smoke test |
-| T01 | C | TODO | | | |
+| T01 | C | DONE | `8f6dd2b` | `pytest tests/unit/config/test_config.py` (11/11 PASS), `verify_contract.py` (14/14 PASS) | Hệ thống cấu hình 4 tầng (`default`/`demo`/`benchmark`/`test`), validate kiểu, không secret trong git |
 | T02 | C | DONE | `task/T02-docker-compose` | `pytest tests/integration/test_compose_core.py` (4/4 PASS), `verify_contract.py` (14/14 PASS) | Docker Compose profile `core` (Kafka, MinIO, Postgres 4 DB, Spark) |
 | T03 | C | TODO | | | |
-| T04 | A | TODO | | | |
+| T04 | A | DONE | `8fbc36a` | `ADR-0001` (Accepted), `docs/compatibility-matrix.md`, image `n06-spark:3.5.8-py311` | Chốt bộ phiên bản Spark 3.5.8, Hadoop 3.3.4, AWS SDK 1.12.262, Kafka 0-10 3.5.8, JDK 17, Python 3.11 |
 | T05 | A | DONE | `task/T05-smoke-s3a-kafka` | `bash scripts/smoke.sh` (2/2 PASS x 2 lần liên tiếp), `verify_contract.py` (14/14 PASS) | Smoke test Spark <-> MinIO (S3A Parquet) và Spark <-> Kafka batch read |
 | T10 | A | TODO | | | |
 | T11 | A | TODO | | | |
