@@ -34,6 +34,7 @@ from n06.cli.init_local import (
     parse_dotenv_file,
     run_init_local,
 )
+from n06.cli.publish import run_publish
 from n06.cli.validate import parse_as_of_time_utc, run_validate
 
 __all__ = [
@@ -55,6 +56,7 @@ __all__ = [
     "redact_secrets",
     "run_doctor",
     "run_init_local",
+    "run_publish",
     "run_validate",
 ]
 
@@ -70,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         "  12 (RESOURCE_ERROR)    : Không đủ tài nguyên máy chủ (CPU / RAM / Disk)\n"
         "  13 (DOCKER_ERROR)      : Thiếu Docker CLI, Compose hoặc Docker daemon chưa chạy\n"
         "  14 (SERVICE_ERROR)     : Một hoặc nhiều service (kafka/minio/postgres/spark) lỗi"
+        "\n  15 (KAFKA_DELIVERY_ERROR): Lỗi giao nhận Kafka khi publish (không retry được)"
     )
     parser = argparse.ArgumentParser(
         prog="n06",
@@ -81,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor,validate}",
+        metavar="{init-local,doctor,validate,publish}",
     )
 
     # Lệnh 1: n06 init-local
@@ -200,6 +203,70 @@ def build_parser() -> argparse.ArgumentParser:
         help="In kết quả dạng JSON có cấu trúc.",
     )
 
+    # Lệnh 4: n06 publish
+    publish_parser = subparsers.add_parser(
+        "publish",
+        help="Gửi events từ nguồn do generator sinh lên Kafka bằng producer idempotent.",
+        description=(
+            "Đọc file events theo manifest của source/, kiểm sha256 và số dòng, rồi gửi lên "
+            "topic Kafka bằng producer idempotent. Topic, tốc độ và chiến lược key lấy từ cấu "
+            "hình T01 và ghi đè được bằng tham số."
+        ),
+    )
+    publish_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình (default | demo | benchmark | test).",
+    )
+    publish_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    publish_parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=None,
+        help="Thư mục nguồn chứa manifests/ và events/ (mặc định: <generator_output_dir>/source).",
+    )
+    publish_parser.add_argument(
+        "--topic", default=None, help="Ghi đè kafka.events_topic (tên topic)."
+    )
+    publish_parser.add_argument(
+        "--rate",
+        type=int,
+        default=None,
+        help="Ghi đè producer.rate: message/giây, 0 là không giới hạn.",
+    )
+    publish_parser.add_argument(
+        "--key-strategy",
+        choices=("transaction_id", "account_from"),
+        default=None,
+        help="Ghi đè producer.key_strategy (mặc định transaction_id; account_from cho E6).",
+    )
+    publish_parser.add_argument(
+        "--allow-non-empty-topic",
+        action="store_true",
+        help="Cho phép publish vào topic đã có message (phát lại có chủ ý).",
+    )
+    publish_parser.add_argument(
+        "--manifests-dir", default=None, help="Tên thư mục manifest dưới thư mục nguồn."
+    )
+    publish_parser.add_argument(
+        "--events-dir", default=None, help="Tên thư mục events dưới thư mục nguồn."
+    )
+    publish_parser.add_argument(
+        "--flush-timeout-seconds",
+        type=float,
+        default=None,
+        help="Thời gian chờ tối đa khi flush producer.",
+    )
+    publish_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
+    )
+
     return parser
 
 
@@ -259,6 +326,29 @@ def main(
             harness_module=parsed.harness_module,
             as_json=parsed.as_json,
             out=stdout,
+        )
+
+    if parsed.command == "publish":
+        publish_kwargs = {
+            key: value
+            for key, value in {
+                "manifests_dir": parsed.manifests_dir,
+                "events_dir": parsed.events_dir,
+                "flush_timeout_seconds": parsed.flush_timeout_seconds,
+            }.items()
+            if value is not None
+        }
+        return run_publish(
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            source_dir=parsed.source_dir,
+            topic=parsed.topic,
+            rate=parsed.rate,
+            key_strategy=parsed.key_strategy,
+            allow_non_empty_topic=parsed.allow_non_empty_topic,
+            as_json=parsed.as_json,
+            out=stdout,
+            **publish_kwargs,
         )
 
     parser.print_help(file=stdout)

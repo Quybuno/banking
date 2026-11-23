@@ -49,6 +49,7 @@ class ExitCode(IntEnum):
     RESOURCE_ERROR = 12
     DOCKER_ERROR = 13
     SERVICE_ERROR = 14
+    KAFKA_DELIVERY_ERROR = 15
 
 
 @dataclass(frozen=True)
