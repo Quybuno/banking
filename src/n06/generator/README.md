@@ -14,7 +14,7 @@
 |---|---|---|
 | `determinism/` | `canonical_json`, `draw()`, UUIDv5, `external_reference` | T11 |
 | `scenario.py`, `external_sort.py` | Kịch bản gốc (accounts, transactions, ledger) và external sort `(event_time, ordinal)` | T12 |
-| `params.py` | `DatasetParams` (định danh, delay, cửa sổ), `FaultConfigError`, `check_statement_delays` (normal delay phải giữ statement trước cutoff, mục 5.1) | T13 |
+| `params.py` | `DatasetParams` (định danh, delay, cửa sổ), `FaultConfigError`, `check_statement_delays` (normal delay cộng cửa sổ file phải giữ statement trước cutoff, mục 5.1, ADR-0011) | T13 |
 | `layout.py` | `OutputLayout` / `DEFAULT_LAYOUT`: nơi duy nhất định nghĩa tên thư mục và file đầu ra; `build_dataset(..., layout=...)` | T13 |
 | `canonical.py` | Đọc lại kịch bản gốc kèm ordinal, đối chiếu `transaction_id` | T13 |
 | `fault.py` | Số lỗi `floor(S * bp / 10000)`, xếp hạng SHA-256, cắt đoạn theo thứ tự cố định (mục 5.3) | T13 |
