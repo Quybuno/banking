@@ -1,7 +1,7 @@
 # ADR-0009: Manifest ordinal 0, bản trùng sao kê, thứ tự lịch giao và phạm vi fault assignment (T13)
 
-- Trạng thái: Proposed
-- Người viết: agent (task T13), chờ người duyệt chuyển sang Accepted
+- Trạng thái: Accepted
+- Người viết: agent (task T13), duyệt bởi <TÊN NGƯỜI DUYỆT>, 2026-11-23
 - Người duyệt:
 - Ngày: 2026-11-23
 - Mục đặc tả liên quan (docs/spec.md): Phần II mục 2, mục 4, mục 5.2, mục 5.3
