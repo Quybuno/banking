@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from pathlib import Path
+from string import Formatter
 
 from n06.generator.params import FaultConfigError
 
@@ -48,6 +49,59 @@ class OutputLayout:
         if self.source_dirname == self.ground_truth_dirname:
             raise FaultConfigError(
                 "Bố cục đầu ra: thư mục nguồn và thư mục ground truth phải khác nhau."
+            )
+        self._check_templates()
+        self._check_unique_names()
+
+    def _check_templates(self) -> None:
+        """Mỗi mẫu tên phải có đúng các trường bắt buộc, nếu thiếu thì nhiều file bị ghi đè."""
+        required = {
+            "events_file_template": {"shard"},
+            "events_manifest_template": {"shard"},
+            "statements_file_template": {"window"},
+            "statements_manifest_template": {"channel", "window"},
+        }
+        for name, expected in required.items():
+            template = getattr(self, name)
+            found = [field for _, field, _, _ in Formatter().parse(template) if field is not None]
+            names = {field.split("!")[0].split(":")[0] for field in found}
+            if names != expected:
+                raise FaultConfigError(
+                    f"Bố cục đầu ra: {name}={template!r} phải chứa đúng các trường "
+                    f"{sorted(expected)}, nhận {sorted(names)}."
+                )
+
+    def _check_unique_names(self) -> None:
+        """Tên cùng cấp trong một thư mục không được trùng nhau (nếu trùng sẽ ghi đè im lặng)."""
+        groups = {
+            "source/": [
+                self.events_dirname,
+                self.statements_dirname,
+                self.manifests_dirname,
+                self.accounts_filename,
+                self.control_report_filename,
+                self.deliveries_filename,
+            ],
+            "ground_truth/": [
+                self.canonical_dirname,
+                self.fault_assignment_filename,
+                self.statement_rows_filename,
+                self.fault_counts_filename,
+                self.canonical_index_filename,
+            ],
+        }
+        for where, names in groups.items():
+            duplicated = sorted({n for n in names if names.count(n) > 1})
+            if duplicated:
+                raise FaultConfigError(
+                    f"Bố cục đầu ra: tên trùng nhau trong {where}: {duplicated}."
+                )
+        # Hai manifest cùng nằm trong một thư mục: mẫu events và statements phải cho tên khác nhau.
+        events_manifest = self.events_manifest_template.format(shard=0)
+        statements_manifest = self.statements_manifest_template.format(channel="C", window=0)
+        if events_manifest == statements_manifest:
+            raise FaultConfigError(
+                "Bố cục đầu ra: mẫu tên manifest của events và statements cho cùng một tên."
             )
 
     def events_relpath(self, shard: int) -> str:
