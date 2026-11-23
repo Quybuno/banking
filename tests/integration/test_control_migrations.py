@@ -1,39 +1,122 @@
 """Integration tests cho migration Control DB (TASK T21).
 
-Yêu cầu PostgreSQL control DB đang chạy (profile `test`) và có `psycopg`/`psycopg2`
-hoặc `psql` CLI. Nếu môi trường chưa có Postgres/driver, test sẽ skip với lý do rõ ràng.
+Yêu cầu PostgreSQL control DB đang chạy (profile `test` / `docker compose --profile core up -d`)
+và có `psycopg`/`psycopg2`, `psql` trên host, hoặc `docker compose exec` vào container `postgres`.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import socket
+import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
 
-from n06.config import load_config
+from n06.cli import parse_dotenv_file
+from n06.config import PostgresDbConfig, load_config
 from n06.control import (
     DEFAULT_CONTROL_MIGRATIONS_DIR,
     MigrationError,
+    SqlExecutor,
     connect_control_db,
     get_applied_versions,
     migrate_down,
     migrate_up,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
+ENV_FILE = REPO_ROOT / ".env"
 
-def _control_executor_or_skip():
+
+class _DockerComposePsqlExecutor:
+    """Chạy `psql` bên trong container `postgres` qua `docker compose exec`."""
+
+    def __init__(self, docker_bin: str, db_config: PostgresDbConfig) -> None:
+        self._docker_bin = docker_bin
+        self._db_config = db_config
+
+    def _run_psql(self, sql: str, *, tuples_only: bool = False) -> str:
+        cmd = [
+            self._docker_bin,
+            "compose",
+            "-f",
+            str(COMPOSE_FILE),
+            "exec",
+            "-T",
+            "-e",
+            f"PGPASSWORD={self._db_config.password}",
+            "postgres",
+            "psql",
+            "-X",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            self._db_config.user,
+            "-d",
+            self._db_config.database,
+        ]
+        if tuples_only:
+            cmd.extend(["-t", "-A"])
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=REPO_ROOT,
+                input=sql,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            raise MigrationError(
+                f"psql trong container thất bại (exit {exc.returncode}): {stderr}"
+            ) from exc
+        return proc.stdout
+
+    def execute_in_transaction(self, statements: list[str]) -> None:
+        body = "\n".join(stmt.strip() for stmt in statements if stmt.strip())
+        if not body:
+            return
+        self._run_psql(f"BEGIN;\n{body}\nCOMMIT;\n")
+
+    def query_versions(self, sql: str) -> list[str]:
+        output = self._run_psql(sql, tuples_only=True)
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _control_executor_or_skip() -> SqlExecutor:
+    dotenv_vars = parse_dotenv_file(ENV_FILE) if ENV_FILE.is_file() else {}
     env = {
+        **dotenv_vars,
         **os.environ,
         "N06_PROFILE": "test",
-        "N06_OBJECT_STORE_ACCESS_KEY": os.environ.get("N06_OBJECT_STORE_ACCESS_KEY", "test_ak"),
-        "N06_OBJECT_STORE_SECRET_KEY": os.environ.get("N06_OBJECT_STORE_SECRET_KEY", "test_sk"),
-        "N06_POSTGRES_MART_PASSWORD": os.environ.get("N06_POSTGRES_MART_PASSWORD", "test_pw"),
-        "N06_POSTGRES_CONTROL_PASSWORD": os.environ.get("N06_POSTGRES_CONTROL_PASSWORD", "test_pw"),
-        "N06_POSTGRES_AIRFLOW_PASSWORD": os.environ.get("N06_POSTGRES_AIRFLOW_PASSWORD", "test_pw"),
-        "N06_POSTGRES_METABASE_PASSWORD": os.environ.get(
-            "N06_POSTGRES_METABASE_PASSWORD", "test_pw"
+        "N06_OBJECT_STORE_ACCESS_KEY": (
+            os.environ.get("N06_OBJECT_STORE_ACCESS_KEY")
+            or dotenv_vars.get("N06_OBJECT_STORE_ACCESS_KEY", "test_ak")
+        ),
+        "N06_OBJECT_STORE_SECRET_KEY": (
+            os.environ.get("N06_OBJECT_STORE_SECRET_KEY")
+            or dotenv_vars.get("N06_OBJECT_STORE_SECRET_KEY", "test_sk")
+        ),
+        "N06_POSTGRES_MART_PASSWORD": (
+            os.environ.get("N06_POSTGRES_MART_PASSWORD")
+            or dotenv_vars.get("N06_POSTGRES_MART_PASSWORD", "test_pw")
+        ),
+        "N06_POSTGRES_CONTROL_PASSWORD": (
+            os.environ.get("N06_POSTGRES_CONTROL_PASSWORD")
+            or dotenv_vars.get("N06_POSTGRES_CONTROL_PASSWORD", "test_pw")
+        ),
+        "N06_POSTGRES_AIRFLOW_PASSWORD": (
+            os.environ.get("N06_POSTGRES_AIRFLOW_PASSWORD")
+            or dotenv_vars.get("N06_POSTGRES_AIRFLOW_PASSWORD", "test_pw")
+        ),
+        "N06_POSTGRES_METABASE_PASSWORD": (
+            os.environ.get("N06_POSTGRES_METABASE_PASSWORD")
+            or dotenv_vars.get("N06_POSTGRES_METABASE_PASSWORD", "test_pw")
         ),
     }
     cfg = load_config(profile="test", env=env).postgres.control
@@ -47,6 +130,9 @@ def _control_executor_or_skip():
     try:
         return connect_control_db(cfg)
     except MigrationError as exc:
+        docker_bin = shutil.which("docker")
+        if docker_bin is not None:
+            return _DockerComposePsqlExecutor(docker_bin, cfg)
         pytest.skip(f"Không có driver/CLI để kết nối control DB: {exc}")
 
 
@@ -90,6 +176,20 @@ def test_control_migrations_up_down_up_and_unique_constraints() -> None:
             f"SELECT COUNT(*)::text FROM ingest_batches WHERE dataset_id = '{dataset_id}';"
         )
         assert batch_count == ["1"]
+
+        # Chèn trùng không có ON CONFLICT phải bị chặn bởi unique constraint
+        dup_batch_sql = f"""
+        INSERT INTO ingest_batches (
+            query_name, batch_id, dataset_id, ingestion_date,
+            topic_offsets, record_count, raw_path, bronze_path
+        ) VALUES (
+            'q_{dataset_id}', 42, '{dataset_id}', DATE '2026-01-01',
+            '{{"events": {{"0": [0, 10]}}}}'::jsonb, 10,
+            'raw/p1', 'bronze/p1'
+        );
+        """
+        with pytest.raises(MigrationError):
+            executor.execute_in_transaction([dup_batch_sql])
 
         # 3. Kiểm tra unique constraint (dataset_id, layer, entity, business_date)
         insert_run_sql = f"""
