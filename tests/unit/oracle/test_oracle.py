@@ -174,7 +174,7 @@ def test_cli_validate_command() -> None:
     assert cli_main(["--help"], out=out_help, err=err_help) == 0
     assert "validate" in out_help.getvalue()
 
-    # Chạy validate --against-ground-truth với snapshot early
+    # Chạy validate --against-ground-truth với snapshot early (truyền --harness-module rõ ràng)
     out_ok = io.StringIO()
     err_ok = io.StringIO()
     code_ok = cli_main(
@@ -185,6 +185,8 @@ def test_cli_validate_command() -> None:
             "--against-ground-truth",
             "--as-of-time",
             "2026-01-02T04:00:00Z",
+            "--harness-module",
+            "tests.harness.oracle",
             "--json",
         ],
         out=out_ok,
@@ -195,6 +197,23 @@ def test_cli_validate_command() -> None:
     assert payload["match_key_count"] == 13
     assert payload["counts_by_status"]["PENDING"] == 4
     assert payload["counts_by_status"]["MATCHED"] == 5
+
+    # Khi không cấu hình harness (môi trường cài đặt thật không có tests/) -> CONFIG_ERROR (10)
+    out_no_harness = io.StringIO()
+    err_no_harness = io.StringIO()
+    code_no_harness = cli_main(
+        [
+            "validate",
+            "--dataset-id",
+            "n06-acceptance-v1",
+            "--against-ground-truth",
+            "--as-of-time",
+            "2026-01-02T04:00:00Z",
+        ],
+        out=out_no_harness,
+        err=err_no_harness,
+    )
+    assert code_no_harness == int(ExitCode.CONFIG_ERROR)
 
     # Thiếu múi giờ UTC ở --as-of-time -> CLI_USAGE_ERROR (2)
     out_bad_ts = io.StringIO()

@@ -189,6 +189,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="File JSON/JSONL kết quả đối soát thực tế để đối chiếu.",
     )
     validate_parser.add_argument(
+        "--harness-module",
+        default=None,
+        help="Tên module Python của test harness (hoặc đặt qua N06_VALIDATE_HARNESS_MODULE).",
+    )
+    validate_parser.add_argument(
         "--json",
         action="store_true",
         dest="as_json",
@@ -251,6 +256,7 @@ def main(
             allowed_lateness_seconds=parsed.allowed_lateness_seconds,
             fixture_dir=parsed.fixture_dir,
             actual_file=parsed.actual_file,
+            harness_module=parsed.harness_module,
             as_json=parsed.as_json,
             out=stdout,
         )

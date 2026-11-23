@@ -34,8 +34,15 @@ def parse_as_of_time_utc(value: str) -> datetime:
     return dt.astimezone(UTC)
 
 
-def _default_harness_module() -> str:
-    return os.environ.get("N06_VALIDATE_HARNESS_MODULE") or ".".join(("tests", "harness", "oracle"))
+def _resolve_harness_module(harness_module: str | None) -> str:
+    """Lấy tên module harness từ tham số hoặc biến môi trường (không hardcode `tests/`)."""
+    resolved = (harness_module or os.environ.get("N06_VALIDATE_HARNESS_MODULE") or "").strip()
+    if not resolved:
+        raise ValueError(
+            "Chưa cấu hình harness đối chiếu (--harness-module hoặc "
+            "N06_VALIDATE_HARNESS_MODULE); gói cài đặt production không bao gồm bộ test harness."
+        )
+    return resolved
 
 
 def _run_harness_subprocess(
@@ -45,12 +52,14 @@ def _run_harness_subprocess(
     allowed_lateness_seconds: int,
     fixture_dir: Path | None,
     actual_file: Path | None,
+    harness_module: str | None,
 ) -> tuple[int, dict[str, Any]]:
-    """Gọi test harness qua tiến trình con độc lập để tránh import chéo từ `src/` sang `tests/`."""
+    """Gọi test harness qua tiến trình con độc lập theo module được cấu hình."""
+    module_name = _resolve_harness_module(harness_module)
     cmd = [
         sys.executable,
         "-m",
-        _default_harness_module(),
+        module_name,
         "--dataset-id",
         dataset_id,
         "--as-of-time",
@@ -80,6 +89,7 @@ def run_validate(
     allowed_lateness_seconds: int = 86_400,
     fixture_dir: Path | None = None,
     actual_file: Path | None = None,
+    harness_module: str | None = None,
     as_json: bool = False,
     out: TextIO | None = None,
     oracle_runner: OracleRunner | None = None,
@@ -124,6 +134,7 @@ def run_validate(
                 allowed_lateness_seconds=allowed_lateness_seconds,
                 fixture_dir=fixture_dir,
                 actual_file=actual_file,
+                harness_module=harness_module,
             )
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         if as_json:

@@ -28,7 +28,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T11 | A | DONE | `task/T11-determinism-primitives` | `pytest tests/unit/generator/test_determinism.py` (34/34 PASS), `verify_contract.py` (14/14 PASS) | `canonical_json`, `draw()`, UUIDv5, `external_reference` khớp 29/29 golden vectors |
 | T12 | A | TODO | | | |
 | T13 | A | TODO | | | |
-| T14 | B | DONE | `task/T14-oracle-validate` | `pytest tests/unit -q` (69/69 PASS), `check_rules.py` OK, `verify_contract.py` (14/14 PASS) | Test harness oracle trong `tests/harness/oracle.py` và khung CLI `n06 validate --against-ground-truth` |
+| T14 | B | DONE | `task/T14-oracle-validate` | `pytest tests/unit/oracle/test_oracle.py` (5/5 PASS: 3 snapshot, T007/T008, `discrepancy_age_seconds`, `cutoff_cases`), `pytest tests/unit -q` (69/69 PASS), `check_rules.py` OK, `verify_contract.py` (14/14 PASS) | Test harness oracle trong `tests/harness/oracle.py` và khung CLI `n06 validate --against-ground-truth` (không tham chiếu `tests/` trong `src/`) |
 | T20 | A | TODO | | | |
 | T21 | B | IN_REVIEW | task/T21-control-migrations | verify_contract.py (14/14 PASS), check_rules.py OK, ruff (T21 files PASS), pytest tests/unit (64/64 PASS); integration test chờ Postgres thật | ADR-0003, sql/migrations/control/0001_init_control_schema.{up,down}.sql, src/n06/control/ |
 | T22 | A | TODO | | | |
