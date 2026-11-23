@@ -93,7 +93,7 @@ def _control_executor_or_skip() -> SqlExecutor:
     env = {
         **dotenv_vars,
         **os.environ,
-        "N06_PROFILE": "test",
+        "N06_PROFILE": dotenv_vars.get("N06_PROFILE") or os.environ.get("N06_PROFILE", "demo"),
         "N06_OBJECT_STORE_ACCESS_KEY": (
             os.environ.get("N06_OBJECT_STORE_ACCESS_KEY")
             or dotenv_vars.get("N06_OBJECT_STORE_ACCESS_KEY", "test_ak")
@@ -119,7 +119,17 @@ def _control_executor_or_skip() -> SqlExecutor:
             or dotenv_vars.get("N06_POSTGRES_METABASE_PASSWORD", "test_pw")
         ),
     }
-    cfg = load_config(profile="test", env=env).postgres.control
+    # Đảm bảo khớp host port và database/user đã khởi tạo trong Compose từ .env
+    if "N06_POSTGRES_CONTROL_DB" in env:
+        env.setdefault("N06__POSTGRES__CONTROL__DATABASE", env["N06_POSTGRES_CONTROL_DB"])
+    if "N06_POSTGRES_CONTROL_USER" in env:
+        env.setdefault("N06__POSTGRES__CONTROL__USER", env["N06_POSTGRES_CONTROL_USER"])
+    env.setdefault("N06__POSTGRES__CONTROL__HOST", "localhost")
+    env.setdefault(
+        "N06__POSTGRES__CONTROL__PORT",
+        env.get("N06_POSTGRES_HOST_PORT", "15432"),
+    )
+    cfg = load_config(profile=env["N06_PROFILE"], env=env).postgres.control
 
     try:
         with socket.create_connection((cfg.host, cfg.port), timeout=1.5):
