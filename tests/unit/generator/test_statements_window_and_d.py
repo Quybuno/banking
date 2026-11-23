@@ -62,17 +62,15 @@ def test_d_around_midnight_event_times() -> None:
 
 
 @pytest.mark.parametrize(
-    ("available_at", "window", "w", "file_available_at"),
+    ("available_at", "window", "w"),
     [
-        ("2026-01-01T00:00:00Z", 3600, "2026-01-01T01:00:00Z", None),
-        ("2026-01-01T00:59:59Z", 3600, "2026-01-01T01:00:00Z", None),
-        ("2026-01-01T01:00:00Z", 3600, "2026-01-01T02:00:00Z", None),
-        ("2026-12-31T23:59:59Z", 3600, "2027-01-01T00:00:00Z", None),
+        ("2026-01-01T00:00:00Z", 3600, "2026-01-01T01:00:00Z"),
+        ("2026-01-01T00:59:59Z", 3600, "2026-01-01T01:00:00Z"),
+        ("2026-01-01T01:00:00Z", 3600, "2026-01-01T02:00:00Z"),
+        ("2026-12-31T23:59:59Z", 3600, "2027-01-01T00:00:00Z"),
     ],
 )
-def test_window_end_is_strictly_after_available_at(
-    available_at: str, window: int, w: str, file_available_at: Any
-) -> None:
+def test_window_end_is_strictly_after_available_at(available_at: str, window: int, w: str) -> None:
     index, file_at = statement_window(available_at, window)
     assert file_at == w
     assert file_at > available_at

@@ -64,3 +64,32 @@ class DatasetParams:
 
     def statement_source_batch_id(self, window: int, channel: str) -> str:
         return self.uuid("source_batch", window, f"statement:{channel}")
+
+
+# Giao dịch muộn nhất của ngày nghiệp vụ (địa phương 23:59:59) cách mốc D đúng 1 giây.
+_LAST_EVENT_SECOND_BEFORE_D = 1
+
+
+def check_statement_delays(params: DatasetParams) -> None:
+    """Phần II mục 5.1: "Normal delay phải giữ statement trước cutoff".
+
+    Cutoff = D + allowed_lateness (mục 1.10); đúng cutoff đã quá hạn. Giao dịch muộn nhất của một
+    ngày có event_time = D - 1 giây nên statement bình thường có
+    `available_at = D - 1 + normal_delay`, phải < D + allowed_lateness, tức
+    `normal_delay <= allowed_lateness`. Nếu bằng `allowed_lateness + 1` thì rơi đúng cutoff.
+    """
+    if params.normal_statement_delay_seconds < 0:
+        raise FaultConfigError(
+            "normal_statement_delay_seconds không được âm: "
+            f"{params.normal_statement_delay_seconds}."
+        )
+    worst_case_after_d = params.normal_statement_delay_seconds - _LAST_EVENT_SECOND_BEFORE_D
+    if worst_case_after_d >= params.allowed_lateness_seconds:
+        raise FaultConfigError(
+            "normal_statement_delay_seconds="
+            f"{params.normal_statement_delay_seconds} đưa statement của giao dịch cuối ngày tới "
+            f"D + {worst_case_after_d} giây, không trước cutoff = D + "
+            f"allowed_lateness_seconds ({params.allowed_lateness_seconds}); "
+            "đúng cutoff đã quá hạn. "
+            f"Yêu cầu normal_statement_delay_seconds <= {params.allowed_lateness_seconds}."
+        )

@@ -21,6 +21,7 @@ from n06.generator.fault import (
     compute_fault_counts,
     fault_rank_key,
 )
+from n06.generator.layout import DEFAULT_LAYOUT, OutputLayout
 from n06.generator.params import FaultConfigError
 from n06.generator.scenario import (
     ScenarioConfigError,
@@ -39,6 +40,8 @@ from n06.generator.statements import (
 )
 
 __all__ = [
+    "DEFAULT_LAYOUT",
+    "OutputLayout",
     "FAULT_ORDER",
     "ControlTotals",
     "DatasetSummary",

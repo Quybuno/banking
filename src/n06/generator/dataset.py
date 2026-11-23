@@ -38,8 +38,9 @@ from n06.generator.ground_truth import (
     stream_sha256_and_rows,
     write_json,
 )
+from n06.generator.layout import DEFAULT_LAYOUT, OutputLayout
 from n06.generator.manifest import build_manifest, write_manifest
-from n06.generator.params import DatasetParams, FaultConfigError
+from n06.generator.params import DatasetParams, FaultConfigError, check_statement_delays
 from n06.generator.scenario import generate_base_scenario
 from n06.generator.statements import build_statement_rows, statement_window
 
@@ -59,6 +60,7 @@ class DatasetSummary:
     statement_file_count: int
     event_shard_count: int
     business_checksum: str
+    layout: OutputLayout = DEFAULT_LAYOUT
 
 
 def _check(
@@ -75,17 +77,17 @@ class _ShardedEventWriter:
     Tên và nội dung file chỉ phụ thuộc shard nên `generation_chunk_rows` chỉ ảnh hưởng I/O.
     """
 
-    def __init__(self, directory: Path, chunk_rows: int) -> None:
-        self._dir = directory
+    def __init__(self, source_dir: Path, layout: OutputLayout, chunk_rows: int) -> None:
+        self._source = source_dir
+        self._layout = layout
         self._chunk_rows = chunk_rows
         self._buffers: dict[int, list[str]] = defaultdict(list)
         self._buffered = 0
         self.shards: set[int] = set()
-        directory.mkdir(parents=True, exist_ok=True)
+        (source_dir / layout.events_dirname).mkdir(parents=True, exist_ok=True)
 
-    @staticmethod
-    def name(shard: int) -> str:
-        return f"events_batch_{shard:05d}.jsonl"
+    def relpath(self, shard: int) -> str:
+        return self._layout.events_relpath(shard)
 
     def write(self, shard: int, line: str) -> None:
         self._buffers[shard].append(line)
@@ -96,7 +98,9 @@ class _ShardedEventWriter:
 
     def flush(self) -> None:
         for shard, lines in self._buffers.items():
-            with (self._dir / self.name(shard)).open("a", encoding="utf-8", newline="\n") as fh:
+            with (self._source / self.relpath(shard)).open(
+                "a", encoding="utf-8", newline="\n"
+            ) as fh:
                 fh.write("".join(f"{line}\n" for line in lines))
         self._buffers.clear()
         self._buffered = 0
@@ -109,6 +113,7 @@ class _StatementFileSplitter:
         self,
         *,
         params: DatasetParams,
+        layout: OutputLayout,
         source_dir: Path,
         truth_rows: IO[str],
         deliveries: IO[str],
@@ -116,6 +121,7 @@ class _StatementFileSplitter:
         validate: bool,
     ) -> None:
         self._p = params
+        self._layout = layout
         self._src = source_dir
         self._truth = truth_rows
         self._deliveries = deliveries
@@ -129,10 +135,6 @@ class _StatementFileSplitter:
         self.record_count = 0
         self.file_count = 0
 
-    @staticmethod
-    def relative_path(channel: str, window: int) -> str:
-        return f"statements/{channel}/statements_w{window:09d}.jsonl"
-
     def add(self, item: Mapping[str, Any]) -> None:
         row = item["row"]
         meta = item["meta"]
@@ -145,7 +147,7 @@ class _StatementFileSplitter:
             self._file_available_at = file_available_at
         channel = row["channel"]
         if channel not in self._handles:
-            path = self._src / self.relative_path(channel, window)
+            path = self._src / self._layout.statements_relpath(channel, window)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._handles[channel] = path.open("w", encoding="utf-8", newline="\n")
         if self._validate:
@@ -162,7 +164,7 @@ class _StatementFileSplitter:
         window = self._window
         for channel in sorted(self._handles):
             self._handles[channel].close()
-            rel = self.relative_path(channel, window)
+            rel = self._layout.statements_relpath(channel, window)
             manifest = build_manifest(
                 contract_version=self._p.contract_version,
                 dataset_id=self._p.dataset_id,
@@ -173,8 +175,7 @@ class _StatementFileSplitter:
             if self._validate:
                 _check(self._registry, manifest, "source_manifest", f"manifest {rel}")
             write_manifest(
-                self._src / "manifests" / f"statements_{channel}_w{window:09d}.manifest.json",
-                manifest,
+                self._src / self._layout.statements_manifest_relpath(channel, window), manifest
             )
             for entry in self._pending[channel]:
                 delivery = {
@@ -219,6 +220,7 @@ def build_dataset(
     *,
     validate_outputs: bool = True,
     registry: ContractSchemaRegistry | None = None,
+    layout: OutputLayout = DEFAULT_LAYOUT,
 ) -> DatasetSummary:
     """Sinh kịch bản gốc (T12), tiêm lỗi, ghi events/sao kê/manifest/control report/ground truth."""
     reg = registry or get_default_schema_registry()
@@ -227,10 +229,11 @@ def build_dataset(
         detail = "; ".join(f"{i.code.value}@{i.field_path}: {i.message}" for i in cfg_res.issues)
         raise FaultConfigError(f"Cấu hình generator vi phạm ràng buộc: {detail}")
     params = DatasetParams.from_config(config)
+    check_statement_delays(params)
     basis_points = fault_basis_points(config)
 
-    source_dir = out_root / "source"
-    truth_dir = out_root / "ground_truth"
+    source_dir = layout.source_dir(out_root)
+    truth_dir = layout.ground_truth_dir(out_root)
     for directory in (source_dir, truth_dir):
         if directory.exists() and any(directory.iterdir()):
             raise FaultConfigError(f"Thư mục đầu ra phải trống: {directory}")
@@ -238,7 +241,10 @@ def build_dataset(
     truth_dir.mkdir(parents=True, exist_ok=True)
 
     scenario = generate_base_scenario(
-        config, truth_dir / "canonical", validate_records=validate_outputs, registry=reg
+        config,
+        truth_dir / layout.canonical_dirname,
+        validate_records=validate_outputs,
+        registry=reg,
     )
 
     def canonical() -> Iterator[tuple[int, dict[str, Any], list[dict[str, Any]]]]:
@@ -268,11 +274,15 @@ def build_dataset(
     )
 
     accounts = {a["account_id"]: a for a in iter_jsonl_files([scenario.accounts_file])}
-    writer = _ShardedEventWriter(source_dir / "events", params.chunk_rows)
+    writer = _ShardedEventWriter(source_dir, layout, params.chunk_rows)
+    allowed_batch_ids = {
+        params.events_source_batch_id(shard)
+        for shard in range(params.event_shard(int(config["transaction_count"]) - 1) + 1)
+    }
     totals = ControlTotals()
     counters = {"events": 0}
 
-    with (truth_dir / "fault_assignment.jsonl").open(
+    with (truth_dir / layout.fault_assignment_filename).open(
         "w", encoding="utf-8", newline="\n"
     ) as gt_faults:
 
@@ -300,7 +310,9 @@ def build_dataset(
                 envelopes = build_event_envelopes(tx, entries, ordinal, fault, params)
                 for env in envelopes:
                     if validate_outputs:
-                        res = validate_event_envelope(env, accounts=accounts)
+                        res = validate_event_envelope(
+                            env, accounts=accounts, allowed_source_batch_ids=allowed_batch_ids
+                        )
                         if not res.is_valid:
                             raise OutputValidationError(f"Envelope không hợp lệ: {res.issues}")
                     writer.write(shard, canonical_json(env))
@@ -334,15 +346,15 @@ def build_dataset(
         control = totals.to_report(params.contract_version, params.dataset_id)
         if validate_outputs:
             _check(reg, control, "control_report", "control_report.json")
-        write_control_report(source_dir / "control_report.json", control)
-        shutil.copyfile(scenario.accounts_file, source_dir / "accounts.jsonl")
+        write_control_report(source_dir / layout.control_report_filename, control)
+        shutil.copyfile(scenario.accounts_file, source_dir / layout.accounts_filename)
 
         for shard in sorted(writer.shards | {0}):
             rels = []
             if shard in writer.shards:
-                rels.append(f"events/{writer.name(shard)}")
+                rels.append(writer.relpath(shard))
             if shard == 0:
-                rels += ["accounts.jsonl", "control_report.json"]
+                rels += [layout.accounts_filename, layout.control_report_filename]
             manifest = build_manifest(
                 contract_version=params.contract_version,
                 dataset_id=params.dataset_id,
@@ -352,20 +364,19 @@ def build_dataset(
             )
             if validate_outputs:
                 _check(reg, manifest, "source_manifest", f"manifest events shard {shard}")
-            write_manifest(
-                source_dir / "manifests" / f"events_batch_{shard:05d}.manifest.json", manifest
-            )
+            write_manifest(source_dir / layout.events_manifest_relpath(shard), manifest)
 
         with (
-            (truth_dir / "statement_rows.jsonl").open(
+            (truth_dir / layout.statement_rows_filename).open(
                 "w", encoding="utf-8", newline="\n"
             ) as gt_rows,
-            (source_dir / "statement_deliveries.jsonl").open(
+            (source_dir / layout.deliveries_filename).open(
                 "w", encoding="utf-8", newline="\n"
             ) as dlv,
         ):
             splitter = _StatementFileSplitter(
                 params=params,
+                layout=layout,
                 source_dir=source_dir,
                 truth_rows=gt_rows,
                 deliveries=dlv,
@@ -377,7 +388,7 @@ def build_dataset(
             splitter.close()
 
     write_json(
-        truth_dir / "fault_counts.json",
+        truth_dir / layout.fault_counts_filename,
         fault_counts_document(
             contract_version=params.contract_version,
             dataset_id=params.dataset_id,
@@ -388,7 +399,7 @@ def build_dataset(
         ),
     )
     write_json(
-        truth_dir / "canonical_index.json",
+        truth_dir / layout.canonical_index_filename,
         {
             "business_checksum": scenario.business_checksum,
             "accounts": stream_sha256_and_rows([scenario.accounts_file]),
@@ -406,4 +417,5 @@ def build_dataset(
         statement_file_count=splitter.file_count,
         event_shard_count=len(writer.shards),
         business_checksum=scenario.business_checksum,
+        layout=layout,
     )
