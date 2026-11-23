@@ -34,6 +34,7 @@ from n06.cli.init_local import (
     parse_dotenv_file,
     run_init_local,
 )
+from n06.cli.validate import parse_as_of_time_utc, run_validate
 
 __all__ = [
     "CheckItem",
@@ -49,10 +50,12 @@ __all__ = [
     "format_doctor_report_text",
     "generate_local_env",
     "main",
+    "parse_as_of_time_utc",
     "parse_dotenv_file",
     "redact_secrets",
     "run_doctor",
     "run_init_local",
+    "run_validate",
 ]
 
 
@@ -78,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor}",
+        metavar="{init-local,doctor,validate}",
     )
 
     # Lệnh 1: n06 init-local
@@ -145,6 +148,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="In báo cáo kiểm tra dạng JSON có cấu trúc.",
     )
 
+    # Lệnh 3: n06 validate
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help="Đối chiếu kết quả đối soát với oracle tại một as_of_time.",
+        description="Khung kiểm tra và đối chiếu kết quả đối soát với oracle theo as_of_time.",
+    )
+    validate_parser.add_argument(
+        "--dataset-id",
+        required=True,
+        help="Mã dataset cần đối chiếu.",
+    )
+    validate_parser.add_argument(
+        "--against-ground-truth",
+        action="store_true",
+        dest="against_oracle",
+        help="Kích hoạt đối chiếu qua test harness oracle độc lập.",
+    )
+    validate_parser.add_argument(
+        "--as-of-time",
+        required=True,
+        help="Thời điểm đánh giá UTC dạng YYYY-MM-DDTHH:MM:SSZ.",
+    )
+    validate_parser.add_argument(
+        "--allowed-lateness-seconds",
+        type=int,
+        default=86_400,
+        help="Thời gian trễ cho phép tính bằng giây (mặc định: 86400).",
+    )
+    validate_parser.add_argument(
+        "--fixture-dir",
+        type=Path,
+        default=None,
+        help="Thư mục dữ liệu tham chiếu (mặc định dùng bộ nghiệm thu).",
+    )
+    validate_parser.add_argument(
+        "--actual-file",
+        type=Path,
+        default=None,
+        help="File JSON/JSONL kết quả đối soát thực tế để đối chiếu.",
+    )
+    validate_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
+    )
+
     return parser
 
 
@@ -189,6 +239,18 @@ def main(
             profile=parsed.profile,
             env_file=parsed.env_file,
             skip_services=parsed.skip_services,
+            as_json=parsed.as_json,
+            out=stdout,
+        )
+
+    if parsed.command == "validate":
+        return run_validate(
+            dataset_id=parsed.dataset_id,
+            against_oracle=parsed.against_oracle,
+            as_of_time=parsed.as_of_time,
+            allowed_lateness_seconds=parsed.allowed_lateness_seconds,
+            fixture_dir=parsed.fixture_dir,
+            actual_file=parsed.actual_file,
             as_json=parsed.as_json,
             out=stdout,
         )
