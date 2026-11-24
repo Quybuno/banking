@@ -29,7 +29,9 @@ Lệnh CLI nằm ở `src/n06/cli/publish.py`: `n06 publish [--source-dir DIR] [
 - Producer idempotent chỉ khử trùng trong một phiên. Việc retry giữ nguyên byte được bảo đảm theo cấu hình và cấu trúc, chưa kiểm chứng bằng chèn lỗi mạng (ADR-0010 mục 8).
 - Mã thoát: 0 thành công; 10 cấu hình hoặc dữ liệu nguồn sai; 14 không kết nối được broker; 15 lỗi giao nhận.
 - Không đọc thư mục ground truth và không import oracle; chỉ đọc manifests/ và events/ của nguồn.
-- `config/` chưa có khóa riêng cho flush timeout và tên thư mục con; mặc định nằm trong `source.py` và `cli/publish.py`, ghi đè bằng tham số CLI.
+- `config/` chưa có khóa riêng cho flush timeout và tên thư mục con; mặc định nằm trong `source.py` và `cli/publish.py`, ghi đè bằng tham số CLI. `--flush-timeout-seconds` phải > 0 và hữu hạn.
+- Toàn bộ nguồn được kiểm trong một lượt đọc trước khi gửi message đầu tiên: sha256 và số dòng khớp manifest, mọi dòng có LF cuối, không trống, JSON hợp lệ, đủ `payload.transaction_id` (và `account_from` khi dùng key đó), `event_type` hợp lệ, không có orphan ledger, kích thước key + value không vượt `message.max.bytes` trừ biên, đường dẫn trong manifest nằm trong thư mục nguồn. Lỗi dữ liệu nguồn thoát mã 10 mà topic chưa nhận message nào.
+- Lỗi producer từ chối đồng bộ (ví dụ `MSG_SIZE_TOO_LARGE`) và lỗi giao nhận thoát mã 15; `retries < 1` hoặc cấu hình producer bị librdkafka từ chối thoát mã 10; `replication_factor` hoặc số partition cụm broker từ chối thoát mã 10; lỗi metadata tạm thời được thử lại có hạn rồi thoát 14.
 
 ## Giả định về bố cục nguồn (quyết định T20)
 
@@ -43,3 +45,15 @@ Lệnh CLI nằm ở `src/n06/cli/publish.py`: `n06 publish [--source-dir DIR] [
    Giới hạn: từ shard 100000 (khoảng 10^9 giao dịch) chuỗi 6 chữ số sắp sai; khi đó phải đổi cách sắp thứ tự
    cùng với hợp đồng T13. Các ca biên (9/10, 99/100, 9999/10000, 99999) được kiểm trong
    `tests/unit/publish/test_source_shard_order.py`.
+
+## Chạy test và đọc kết quả
+
+- **Test integration cần `.env`.** `tests/integration/test_publish_kafka.py` nạp `.env` ở gốc repo vì cấu hình T01 bắt buộc secret của MinIO và Postgres ngay cả khi chỉ publish (`n06 init-local` sinh file này). Không có `.env` thì lệnh thoát 10 và test fail. Test cũng cần Kafka chạy (`docker compose --profile core up -d`) và fail, không skip, nếu thiếu.
+- **E6: partitioner mặc định của librdkafka là `consistent_random` (CRC32), khác murmur2 của client Java.** Phân bố key theo partition do đó khác một client Java dùng cùng key; phải nêu rõ khi báo cáo E6.
+- **`RateLimiter` bám lịch tuyệt đối nên bù bằng cách bắn dồn:** sau khi bị trễ, các message đến hạn được gửi liên tiếp, tốc độ trung bình đúng nhưng tốc độ tức thời có thể vượt mục tiêu (`test_rate.py::test_limiter_catches_up_after_slow_send`).
+- **Độ trễ p50/p95/p99 là độ trễ giao nhận của producer**, không phải độ trễ end-to-end của pipeline.
+
+## Tồn đọng
+
+- Chưa kiểm chứng retry của producer bằng chèn lỗi mạng trong test tự động (xem ADR-0010 mục 8); đã kiểm tay một lần bằng `docker pause`.
+- Một lượt đọc kiểm nguồn rồi một lượt đọc để gửi: dữ liệu bị parse JSON hai lần. Chấp nhận được ở quy mô demo, chưa đo ở quy mô lớn.
