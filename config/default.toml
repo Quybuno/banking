@@ -88,3 +88,23 @@ benchmark_prefix = "benchmark"
 generator_output_dir = "data/generated"
 reports_dir = "reports"
 
+
+[limits]
+# Giới hạn theo dung lượng máy (CFG-scale-guard). GB = 10^9 byte, KB = 10^3 byte.
+# Chỉ thêm khóa mới; không đổi mức quy mô của đặc tả (dataset.transaction_count và profile).
+#
+# Chỗ trống tối thiểu phải còn lại sau khi ghi (dự trữ). Giá trị chọn cho máy phát triển này,
+# nơi đĩa ảo WSL và Docker cùng nằm trên một ổ Windows nhỏ; đặt lại theo máy bằng
+# N06__LIMITS__MIN_FREE_DISK_GB_RESERVE.
+min_free_disk_gb_reserve = 8
+# Số byte generator ghi cho mỗi giao dịch (source + ground truth). Số ĐO THẬT: 3980,0 B/giao
+# dịch ở 20.000 và 3992,8 B/giao dịch ở 100.000 giao dịch (làm tròn lên 4000). Nguồn và cách
+# tái hiện: docs/measurements/generator-bytes-per-tx.md.
+generator_bytes_per_tx = 4000
+# Không đặt các khóa sau thì nhận giá trị None:
+#   max_transactions      trần số giao dịch cho máy này (không đặt = không giới hạn thêm);
+#                         đặt qua N06__LIMITS__MAX_TRANSACTIONS.
+#   pipeline_bytes_per_tx số byte Kafka, MinIO và Postgres tốn cho mỗi giao dịch. CHƯA ĐO nên
+#                         không đặt; khi chưa đặt, kiểm tra dung lượng chỉ cảnh báo, không PASS đủ.
+#   disk_probe_path       thư mục trên ổ Windows chứa đĩa ảo WSL (ví dụ /mnt/d); không đặt thì
+#                         tự xác định qua registry của WSL, không xác định được thì từ chối chạy.

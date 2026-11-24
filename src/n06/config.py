@@ -125,6 +125,11 @@ FIELD_TYPES: dict[str, type] = {
     "paths.benchmark_prefix": str,
     "paths.generator_output_dir": str,
     "paths.reports_dir": str,
+    "limits.max_transactions": int,
+    "limits.min_free_disk_gb_reserve": int,
+    "limits.generator_bytes_per_tx": int,
+    "limits.pipeline_bytes_per_tx": int,
+    "limits.disk_probe_path": str,
 }
 
 
@@ -234,6 +239,21 @@ class PathsConfig:
 
 
 @dataclass(frozen=True)
+class LimitsConfig:
+    """Giới hạn theo dung lượng máy (CFG-scale-guard). GB = 10^9 byte, KB = 10^3 byte.
+
+    `max_transactions`, `pipeline_bytes_per_tx` và `disk_probe_path` là tùy chọn: `None` nghĩa là
+    không đặt (pipeline_bytes_per_tx = None nghĩa là phần pipeline CHƯA ĐO).
+    """
+
+    max_transactions: int | None
+    min_free_disk_gb_reserve: int
+    generator_bytes_per_tx: int
+    pipeline_bytes_per_tx: int | None
+    disk_probe_path: str | None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: str
     business_timezone: str
@@ -245,6 +265,7 @@ class AppConfig:
     producer: ProducerConfig
     dataset: DatasetConfig
     paths: PathsConfig
+    limits: LimitsConfig
 
 
 def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -414,6 +435,16 @@ def _require_typed(data: Mapping[str, Any], field_path: str) -> Any:
         if not value.strip():
             raise ConfigValidationError(field_path, value, "Giá trị chuỗi không được để trống.")
     return value
+
+
+def _optional_typed(data: Mapping[str, Any], field_path: str) -> Any:
+    """Lấy trường tùy chọn: vắng mặt trả `None`; có mặt thì kiểm kiểu như trường bắt buộc."""
+    found, value = _get_dotted(data, field_path)
+    if not found or value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None  # biến môi trường rỗng (`N06__LIMITS__X=`) nghĩa là không đặt
+    return _require_typed(data, field_path)
 
 
 def _require_min_int(field_path: str, value: int, minimum: int) -> int:
@@ -674,6 +705,32 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         reports_dir=_require_typed(merged, "paths.reports_dir"),
     )
 
+    max_transactions = _optional_typed(merged, "limits.max_transactions")
+    pipeline_bytes_per_tx = _optional_typed(merged, "limits.pipeline_bytes_per_tx")
+    limits = LimitsConfig(
+        max_transactions=(
+            None
+            if max_transactions is None
+            else _require_min_int("limits.max_transactions", max_transactions, 1)
+        ),
+        min_free_disk_gb_reserve=_require_min_int(
+            "limits.min_free_disk_gb_reserve",
+            _require_typed(merged, "limits.min_free_disk_gb_reserve"),
+            0,
+        ),
+        generator_bytes_per_tx=_require_min_int(
+            "limits.generator_bytes_per_tx",
+            _require_typed(merged, "limits.generator_bytes_per_tx"),
+            1,
+        ),
+        pipeline_bytes_per_tx=(
+            None
+            if pipeline_bytes_per_tx is None
+            else _require_min_int("limits.pipeline_bytes_per_tx", pipeline_bytes_per_tx, 1)
+        ),
+        disk_probe_path=_optional_typed(merged, "limits.disk_probe_path"),
+    )
+
     operational_prefixes = [
         paths.raw_prefix,
         paths.bronze_prefix,
@@ -702,6 +759,7 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         producer=producer,
         dataset=dataset,
         paths=paths,
+        limits=limits,
     )
 
 
