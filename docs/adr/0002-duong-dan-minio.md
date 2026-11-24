@@ -1,8 +1,8 @@
 # ADR-0002: Cấu trúc bucket và đường dẫn MinIO (Raw, Bronze, Silver, Gold, sao kê, benchmark)
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: agent (task ADR-002; người sở hữu trong docs/TASKS.md: A), các điểm 1–9 mục "Điểm đặc tả mơ hồ" đã được người giao task duyệt trong phiên lập kế hoạch 2026-11-24
-- Người duyệt: B (chờ duyệt, theo docs/TASKS.md)
+- Người duyệt: B (Quang), 2026-11-24; B cho phép agent chuyển trạng thái sang Accepted
 - Ngày: 2026-11-24
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 6 (Raw, Bronze, Silver), mục 8.1 và 8.2, mục 14.1; Phần II mục 4, mục 5.2, mục 7. Ngoài đặc tả: ADR-0003, ADR-0009, ADR-0010.
 
@@ -154,4 +154,4 @@ Object của run thất bại được giữ nguyên, không ai đọc; việc d
 - **`config/benchmark.toml`**: cần một task nhỏ thêm ghi đè `object_store.bucket` (và README của `config/`) trước khi chạy E1–E3, E5.
 - **Vị trí `accounts.jsonl` trên MinIO**: còn mở, thuộc task nạp accounts.
 - **Runbook (`docs/runbook.md`)**: khi viết hướng dẫn mất checkpoint, dùng `query_name` mới thì Raw/Bronze mới tự nằm ở cây thư mục mới, không cần đổi `paths.*_prefix`.
-- Chỉ ADR ở trạng thái Accepted mới được dùng làm căn cứ code; T22, T23 chưa được bắt đầu trước khi ADR này được B duyệt.
+- ADR này đã Accepted nên T22 và T23 được dùng làm căn cứ code. Sửa T24 và `config/benchmark.toml` theo các mục trên vẫn là việc của người sở hữu, chưa làm trong commit này.
