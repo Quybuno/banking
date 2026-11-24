@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import http.client
 import re
+import socket
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -37,6 +38,13 @@ _MAX_ERROR_BODY_BYTES = 65536
 # tên giống địa chỉ IP và vấn đề chứng chỉ).
 BUCKET_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 _S3_ERROR_CODE_PATTERN = re.compile(rb"<Code>([A-Za-z][A-Za-z0-9]{2,63})</Code>")
+# Tiền tố và hậu tố S3 dành riêng, không được dùng cho tên bucket.
+_RESERVED_BUCKET_PREFIXES = ("xn--", "sthree-")
+_RESERVED_BUCKET_SUFFIXES = ("-s3alias", "--ol-s3")
+# Region và credential đi vào header `Authorization`: chỉ nhận ký tự an toàn để không thể chèn
+# xuống dòng hay ký tự điều khiển vào header (và không làm lộ giá trị trong thông báo lỗi).
+_REGION_PATTERN = re.compile(r"^[a-z0-9-]{1,64}$")
+_CREDENTIAL_PATTERN = re.compile(r"^[\x21-\x7e]{1,256}$")
 
 STATUS_CREATED = "created"
 STATUS_EXISTS = "exists"
@@ -183,6 +191,11 @@ def validate_bucket_name(name: str) -> str:
             f"Tên bucket {name!r} không hợp lệ: cần 3-63 ký tự gồm chữ thường, số và dấu gạch "
             "ngang, bắt đầu và kết thúc bằng chữ hoặc số (object_store.bucket)."
         )
+    if name.startswith(_RESERVED_BUCKET_PREFIXES) or name.endswith(_RESERVED_BUCKET_SUFFIXES):
+        raise BucketNameError(
+            f"Tên bucket {name!r} dùng tiền tố hoặc hậu tố mà S3 dành riêng "
+            "(xn--, sthree-, -s3alias, --ol-s3) (object_store.bucket)."
+        )
     return name
 
 
@@ -202,8 +215,13 @@ def resolve_host_endpoint(
     )
     parsed = urlparse(host_cfg.object_store.endpoint)
     host = parsed.hostname or host_cfg.kafka.bootstrap_servers.partition(":")[0]
-    port = int(env.get("N06_MINIO_API_HOST_PORT", str(parsed.port or 0)))
-    return parsed.scheme or "http", host, port
+    raw_port = env.get("N06_MINIO_API_HOST_PORT", str(parsed.port or 0)).strip()
+    if not raw_port.isascii() or not raw_port.isdigit() or not 1 <= int(raw_port) <= 65535:
+        raise ObjectStoreConfigError(
+            "N06_MINIO_API_HOST_PORT phải là số nguyên từ 1 đến 65535 "
+            "(cổng MinIO truy cập từ host)."
+        )
+    return parsed.scheme or "http", host, int(raw_port)
 
 
 def target_from_config(
@@ -216,6 +234,17 @@ def target_from_config(
             "object_store.path_style_access=false chưa được hỗ trợ khi quản trị bucket "
             "(chỉ hỗ trợ path-style, đúng cấu hình MinIO của dự án)."
         )
+    # Chỉ nêu tên trường, không bao giờ in giá trị (access_key và secret_key là secret).
+    for field_path, value, pattern in (
+        ("object_store.region", store.region, _REGION_PATTERN),
+        ("object_store.access_key", store.access_key, _CREDENTIAL_PATTERN),
+        ("object_store.secret_key", store.secret_key, _CREDENTIAL_PATTERN),
+    ):
+        if not pattern.fullmatch(value):
+            raise ObjectStoreConfigError(
+                f"{field_path} chứa ký tự không hợp lệ hoặc có độ dài ngoài giới hạn "
+                "(chỉ nhận ký tự ASCII in được, không khoảng trắng)."
+            )
     scheme, host, port = resolve_host_endpoint(env, config_dir=config_dir)
     return ObjectStoreTarget(
         scheme=scheme,
@@ -281,12 +310,28 @@ def _send(
         connection.close()
 
 
-def _unreachable(target: ObjectStoreTarget, bucket: str, exc: Exception) -> BucketResult:
+def _transport_failure(target: ObjectStoreTarget, bucket: str, exc: Exception) -> BucketResult:
+    """Phân loại lỗi truyền tải; thông báo chỉ có tên loại lỗi, không có nội dung ngoại lệ.
+
+    Chỉ "không có ai lắng nghe" (từ chối kết nối hoặc không phân giải được tên) mới là
+    `unreachable` (MinIO chưa chạy). Máy chủ có kết nối nhưng không trả lời đúng (timeout, phản
+    hồi rác, lỗi TLS, kết nối bị ngắt) là `error`, vì dịch vụ đang chạy mà hỏng.
+    """
+    where = f"{target.host}:{target.port} ({type(exc).__name__})"
+    if isinstance(exc, ConnectionRefusedError | socket.gaierror):
+        return BucketResult(
+            bucket,
+            STATUS_UNREACHABLE,
+            f"không kết nối được object store tại {where}; MinIO chưa chạy?",
+        )
+    if isinstance(exc, ValueError):  # kể cả UnicodeError: giá trị không gửi được qua HTTP
+        return BucketResult(
+            bucket, STATUS_ERROR, f"không gửi được yêu cầu tới object store ({type(exc).__name__})"
+        )
     return BucketResult(
         bucket,
-        STATUS_UNREACHABLE,
-        f"không kết nối được object store tại {target.host}:{target.port} "
-        f"({type(exc).__name__}); MinIO chưa chạy?",
+        STATUS_ERROR,
+        f"object store tại {where} không trả lời đúng (timeout, phản hồi lỗi hoặc lỗi TLS)",
     )
 
 
@@ -310,8 +355,8 @@ def head_bucket(
     validate_bucket_name(bucket)
     try:
         response = _send(target, "HEAD", bucket, timeout=timeout, now=now)
-    except (OSError, http.client.HTTPException) as exc:
-        return _unreachable(target, bucket, exc)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        return _transport_failure(target, bucket, exc)
     if response.status == 200:
         return BucketResult(bucket, STATUS_EXISTS, "bucket đã tồn tại")
     if response.status == 404:
@@ -331,8 +376,8 @@ def create_bucket(
     validate_bucket_name(bucket)
     try:
         response = _send(target, "PUT", bucket, timeout=timeout, now=now)
-    except (OSError, http.client.HTTPException) as exc:
-        return _unreachable(target, bucket, exc)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        return _transport_failure(target, bucket, exc)
     if response.status == 200:
         return BucketResult(bucket, STATUS_CREATED, "đã tạo bucket")
     if response.status == 409 and response.s3_code == "BucketAlreadyOwnedByYou":

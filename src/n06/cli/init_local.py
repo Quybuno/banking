@@ -187,8 +187,10 @@ def run_init_local(
         force=force,
     )
 
-    # Profile được chỉ định tường minh quyết định bucket cần tạo; nếu không thì theo `.env`.
-    bucket_profile = profile if profile is not None else result.profile
+    # Thứ tự quyết định bucket cần tạo, giống `doctor` và `load_config`: tham số tường minh, rồi
+    # biến môi trường N06_PROFILE, rồi giá trị trong `.env`.
+    env_profile = (env if env is not None else os.environ).get("N06_PROFILE", "").strip()
+    bucket_profile = profile if profile is not None else (env_profile or result.profile)
     buckets: list[BucketResult] = []
     config_problem: str | None = None
     if not skip_buckets:

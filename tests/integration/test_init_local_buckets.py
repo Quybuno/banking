@@ -134,7 +134,11 @@ def test_init_local_creates_bucket_idempotently_and_doctor_reports_it(
         assert head_bucket(target, bucket).status == STATUS_EXISTS
         created_at = _creation_date(target, bucket)
 
-        # Lần 2: không lỗi, không đổi gì (bucket giữ nguyên thời điểm tạo).
+        # Lần 2: không lỗi, không đổi gì (bucket giữ nguyên thời điểm tạo). Lưu ý: MinIO trả 409
+        # BucketAlreadyOwnedByYou cho PUT lặp và mã coi đó là `exists`, nên CreationDate không đổi
+        # cũng xảy ra khi có PUT thừa. Bằng chứng "không gửi PUT ở lần chạy lại" nằm ở unit test
+        # `test_init_local_creates_profile_bucket_then_second_run_changes_nothing`
+        # (chuỗi yêu cầu HEAD, PUT, HEAD); test này chứng minh hành vi cuối cùng trên MinIO thật.
         code2, text2 = _init_local(bucket)
         second = json.loads(text2)
         assert code2 == 0 and second["status"] == "OK", text2
@@ -187,3 +191,29 @@ def test_init_local_require_buckets_fails_when_minio_is_unreachable(tmp_path: Pa
     )
     assert warn == 0 and json.loads(out_warn.getvalue())["buckets"][0]["status"] == "unreachable"
     assert strict == 14 and json.loads(out_strict.getvalue())["status"] == "ERROR"
+
+
+def test_init_local_with_non_default_region_on_real_minio() -> None:
+    """Region lấy từ cấu hình và dùng để ký: MinIO thật chấp nhận region khác `us-east-1`."""
+    if not ENV_FILE.is_file():
+        pytest.fail(f"Thiếu {ENV_FILE}: chạy `bash scripts/smoke.sh` trước.")
+    bucket = f"n06-it-{uuid.uuid4().hex[:10]}"
+    env = _merged_env(bucket)
+    env["N06__OBJECT_STORE__REGION"] = "eu-west-1"
+    cfg = load_config(profile="benchmark", env=env)
+    assert cfg.object_store.region == "eu-west-1"
+    target = target_from_config(cfg, env)
+    assert target.region == "eu-west-1"
+    try:
+        out = io.StringIO()
+        code = run_init_local(
+            profile="benchmark", target_path=ENV_FILE, env=env, as_json=True, out=out
+        )
+        payload = json.loads(out.getvalue())
+        assert code == 0 and payload["status"] == "OK", out.getvalue()
+        assert [(b["name"], b["status"]) for b in payload["buckets"]] == [(bucket, "created")]
+        assert head_bucket(target, bucket).status == STATUS_EXISTS
+    finally:
+        if head_bucket(target, bucket).status == STATUS_EXISTS:
+            _signed_request(target, "DELETE", f"/{bucket}")
+        assert head_bucket(target, bucket).status == STATUS_MISSING, "Chưa dọn được bucket test"

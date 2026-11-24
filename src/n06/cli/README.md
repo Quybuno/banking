@@ -46,4 +46,6 @@
 
 - Chỉ hỗ trợ path-style (`object_store.path_style_access = true`); cấu hình `false` bị từ chối bằng lỗi `CONFIG_ERROR`.
 - Chưa thử endpoint `https` (mã có nhánh `HTTPSConnection` nhưng chưa chạy với máy chủ thật).
-- Chưa thử region khác `us-east-1` trên MinIO thật (region lấy từ cấu hình và dùng để ký; mới kiểm bằng máy chủ giả với region khác).
+- Mới thử region `us-east-1` và `eu-west-1` trên MinIO thật (`tests/integration/test_init_local_buckets.py`); region lấy từ cấu hình và dùng để ký. Chưa thử region nào khác và chưa thử trên AWS S3 thật.
+- Phân loại lỗi truyền tải: chỉ từ chối kết nối hoặc không phân giải được tên mới là `unreachable` (thoát `0` kèm cảnh báo); timeout, phản hồi không phải HTTP, lỗi TLS hoặc ngắt kết nối là `error` (thoát `14`).
+- Cấu hình không an toàn (`N06_MINIO_API_HOST_PORT` ngoài 1-65535, region hoặc credential chứa ký tự điều khiển/khoảng trắng) thoát `10`, thông báo chỉ nêu tên trường, không in giá trị.

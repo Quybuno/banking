@@ -82,7 +82,7 @@ n06 doctor --profile demo                          # 4. kiểm tra toàn bộ, g
 
 Chạy `doctor` khi MinIO đã chạy mà bucket chưa được tạo sẽ báo `bucket.<tên>` thiếu với mã `14`; chạy lại bước 3 là đủ. Kịch bản nghiệm thu mẫu trong đặc tả liệt kê `doctor` trước `init-local` (Phần I, mục 12) và không có bước `compose up`; trên máy mới hãy dùng chuỗi ở trên.
 
-**Giới hạn chưa kiểm của bước tạo bucket:** chỉ hỗ trợ path-style (`object_store.path_style_access = true`, kiểu virtual-hosted bị từ chối bằng lỗi cấu hình); chưa thử endpoint `https`; chưa thử region khác `us-east-1` (region lấy từ cấu hình và dùng để ký, mới kiểm trên MinIO với `us-east-1` và trên máy chủ giả với region khác).
+**Giới hạn chưa kiểm của bước tạo bucket:** chỉ hỗ trợ path-style (`object_store.path_style_access = true`, kiểu virtual-hosted bị từ chối bằng lỗi cấu hình); chưa thử endpoint `https`; mới thử region `us-east-1` và `eu-west-1` trên MinIO thật (region lấy từ cấu hình và dùng để ký; chưa thử region nào khác và chưa thử trên AWS S3 thật).
 
 ### Bảng mã thoát (`ExitCode`) của `n06`
 
