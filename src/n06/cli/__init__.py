@@ -90,8 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     # Lệnh 1: n06 init-local
     init_parser = subparsers.add_parser(
         "init-local",
-        help="Sinh file .env cục bộ từ .env.example với secret ngẫu nhiên an toàn.",
-        description="Khởi tạo file .env cục bộ từ .env.example mà không làm lộ secret ra màn hình.",
+        help="Sinh file .env cục bộ và tạo bucket object store theo cấu hình profile.",
+        description=(
+            "Khởi tạo file .env cục bộ từ .env.example mà không làm lộ secret ra màn hình, rồi tạo "
+            "bucket object store của profile (an toàn khi chạy lại; MinIO chưa chạy thì cảnh báo)."
+        ),
     )
     init_parser.add_argument(
         "--profile",
@@ -109,6 +112,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Ghi đè nếu file .env đã tồn tại.",
+    )
+    bucket_group = init_parser.add_mutually_exclusive_group()
+    bucket_group.add_argument(
+        "--skip-buckets",
+        action="store_true",
+        help="Chỉ sinh .env, không tạo bucket object store.",
+    )
+    bucket_group.add_argument(
+        "--require-buckets",
+        action="store_true",
+        help="Thoát mã 14 nếu bucket chưa sẵn sàng (kể cả khi MinIO chưa chạy).",
     )
     init_parser.add_argument(
         "--json",
@@ -299,6 +313,8 @@ def main(
                 profile=parsed.profile,
                 target_path=parsed.env_file,
                 force=parsed.force,
+                skip_buckets=parsed.skip_buckets,
+                require_buckets=parsed.require_buckets,
                 as_json=parsed.as_json,
                 out=stdout,
             )

@@ -146,10 +146,13 @@ def test_init_local_generates_env_and_never_prints_secrets(tmp_path: Path) -> No
     target_env = tmp_path / ".env"
     out = io.StringIO()
 
+    # Test này chỉ kiểm việc sinh `.env`; bước tạo bucket (T03b) có test riêng nên tắt ở đây để
+    # không phụ thuộc MinIO đang chạy trên máy.
     code = run_init_local(
         profile="benchmark",
         target_path=target_env,
         force=False,
+        skip_buckets=True,
         as_json=False,
         out=out,
     )
@@ -177,6 +180,7 @@ def test_init_local_generates_env_and_never_prints_secrets(tmp_path: Path) -> No
         profile="demo",
         target_path=target_env,
         force=False,
+        skip_buckets=True,
         as_json=True,
         out=out_second,
     )
