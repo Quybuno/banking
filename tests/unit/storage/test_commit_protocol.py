@@ -273,6 +273,82 @@ def test_semantic_hash_is_independent_of_output_path() -> None:
     assert expected_hash != _hash("2026-01-02")  # business_date có trong hash, đường dẫn thì không
 
 
+def test_committing_two_runs_with_different_paths_stores_the_same_semantic_hash() -> None:
+    """Cùng input, cấu hình, phiên bản nhưng `run_id` và đường dẫn khác: hash lưu như nhau."""
+    import inspect
+
+    # Hash không nhận run_id hay đường dẫn làm đầu vào (đặc tả mục 8.1 bước 6).
+    parameters = inspect.signature(compute_semantic_hash).parameters
+    assert "run_id" not in parameters and "output_path" not in parameters
+
+    expected_payload = (
+        '{"business_date":"2026-01-01","code_version":"abc123","config_hash":"cfg1",'
+        '"dataset_id":"ds-alpha","entity":"transactions","input_versions":["b1","b2"],'
+        '"layer":"silver","payload_digest":"sha256:deadbeef","rule_version":"1.0.0",'
+        '"schema_version":"1.0.0"}'
+    )
+    expected_hash = hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
+
+    store = _InMemoryControlStore()
+    coord = BatchCommitCoordinator(store)
+    stored: list[tuple[str, str, str]] = []
+    for run_id, tier_prefix in (
+        ("run-001", "s3a://n06-test-bucket/silver"),
+        ("run-002", "s3a://other-bucket/test-silver"),
+    ):
+        coord.start_run(
+            run_id=run_id,
+            dataset_id="ds-alpha",
+            job_name="process_day",
+            profile="test",
+            business_date_from="2026-01-01",
+            business_date_to="2026-01-01",
+            input_versions=["b1", "b2"],
+            config_hash="cfg1",
+            schema_version="1.0.0",
+            rule_version="1.0.0",
+            code_version="abc123",
+        )
+        output_path = build_run_output_path(
+            tier_prefix,
+            dataset_id="ds-alpha",
+            entity="transactions",
+            run_id=run_id,
+            business_date="2026-01-01",
+        )
+        coord.commit_run(
+            run_id=run_id,
+            dataset_id="ds-alpha",
+            layer="silver",
+            entity="transactions",
+            business_date="2026-01-01",
+            output_path=output_path,
+            row_count=10,
+            semantic_hash=compute_semantic_hash(
+                dataset_id="ds-alpha",
+                layer="silver",
+                entity="transactions",
+                business_date="2026-01-01",
+                input_versions=["b1", "b2"],
+                config_hash="cfg1",
+                schema_version="1.0.0",
+                rule_version="1.0.0",
+                code_version="abc123",
+                payload_digest="sha256:deadbeef",
+            ),
+        )
+        snapshot = coord.resolve_current_snapshot(
+            dataset_id="ds-alpha", layer="silver", entity="transactions", business_date="2026-01-01"
+        )
+        assert snapshot is not None and snapshot.run_id == run_id
+        assert snapshot.semantic_hash is not None
+        stored.append((snapshot.run_id, snapshot.output_path, snapshot.semantic_hash))
+
+    (run_a, path_a, hash_a), (run_b, path_b, hash_b) = stored
+    assert run_a != run_b and path_a != path_b
+    assert hash_a == hash_b == expected_hash
+
+
 def test_require_unused_run_prefix_passes_when_run_has_no_object() -> None:
     seen: list[str] = []
 
