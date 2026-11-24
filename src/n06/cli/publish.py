@@ -7,11 +7,14 @@ Mọi endpoint, topic, tốc độ và chiến lược key lấy từ cấu hìn
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
+
+from confluent_kafka import KafkaException
 
 from n06.cli.doctor import ExitCode
 from n06.cli.init_local import parse_dotenv_file
@@ -96,6 +99,13 @@ def run_publish(
             stdout.write(f"[publish] Lỗi: {message}\n")
         return int(code)
 
+    if not (math.isfinite(flush_timeout_seconds) and flush_timeout_seconds > 0):
+        return fail(
+            ExitCode.CONFIG_ERROR,
+            "--flush-timeout-seconds (thời gian chờ flush) phải > 0 và hữu hạn, "
+            f"nhận {flush_timeout_seconds!r}.",
+        )
+
     overrides: dict[str, Any] = dict(config_overrides or {})
     if topic is not None:
         overrides["kafka.events_topic"] = topic
@@ -132,11 +142,16 @@ def run_publish(
         source = discover_event_files(
             resolved_source, manifests_dirname=manifests_dir, events_dirname=events_dir
         )
+        try:
+            producer = producer_factory(producer_config)
+        except KafkaException as exc:
+            raise PublishConfigError(f"Cấu hình producer bị từ chối: {exc}") from exc
         stats = publish_events(
             source,
             settings=settings,
             broker=broker_factory(cfg.kafka.bootstrap_servers),
-            producer=producer_factory(producer_config),
+            producer=producer,
+            report=None if as_json else stdout.write,
         )
     except PublishConfigError as exc:
         return fail(ExitCode.CONFIG_ERROR, str(exc))
@@ -146,6 +161,10 @@ def run_publish(
         return fail(ExitCode.KAFKA_DELIVERY_ERROR, str(exc))
     except PublishError as exc:
         return fail(ExitCode.CONFIG_ERROR, str(exc))
+    except KafkaException as exc:  # lưới an toàn: lỗi Kafka chưa được bọc ở lớp dưới
+        return fail(ExitCode.KAFKA_DELIVERY_ERROR, f"Lỗi Kafka: {exc}")
+    except OSError as exc:  # lưới an toàn: lỗi đọc file nguồn chưa được bọc
+        return fail(ExitCode.CONFIG_ERROR, f"Không đọc được dữ liệu nguồn: {exc}")
 
     if as_json:
         stdout.write(json.dumps({"ok": True, **stats.to_dict()}, ensure_ascii=False) + "\n")

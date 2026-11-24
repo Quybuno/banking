@@ -105,6 +105,7 @@ def test_orphan_ledger_in_a_shard_stops_before_sending_anything_wrong(make_sourc
     producer = FakeProducer()
     with pytest.raises(OrphanLedgerError, match="không nhất quán"):
         _run(source, producer=producer, settings=_settings(key_strategy="account_from"))
+    assert producer.calls == []  # kiểm xong toàn bộ dữ liệu và key trước khi gửi message đầu tiên
 
 
 def test_missing_topic_is_created_with_configured_partitions(source) -> None:  # type: ignore[no-untyped-def]
@@ -179,7 +180,7 @@ def test_buffer_full_forever_fails_with_delivery_error(source) -> None:  # type:
 
 def test_delivery_error_stops_early_and_is_reported(source) -> None:  # type: ignore[no-untyped-def]
     producer = FakeProducer(fail_delivery_at=2)
-    with pytest.raises(DeliveryError, match="delivery failed"):
+    with pytest.raises(DeliveryError, match="MSG_TIMED_OUT"):
         _run(source, producer=producer)
     assert len(producer.calls) < 7
 

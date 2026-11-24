@@ -9,17 +9,17 @@ import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from n06.domain import parse_and_validate_json_schema
 from n06.producer.errors import SourceDataError
+from n06.producer.kafka_client import DEFAULT_MAX_MESSAGE_BYTES, MESSAGE_OVERHEAD_MARGIN_BYTES
+from n06.producer.keys import KeySelector
 
 # Tên mặc định của bố cục do generator T13 sinh; đều ghi đè được bằng tham số CLI.
 DEFAULT_SOURCE_DIRNAME = "source"
 DEFAULT_MANIFESTS_DIRNAME = "manifests"
 DEFAULT_EVENTS_DIRNAME = "events"
-
-_READ_BLOCK = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,21 @@ class EventSource:
         return sum(item.physical_rows for item in self.files)
 
 
+def _check_inside_source(source_dir: Path, relative: str, manifest_path: Path) -> None:
+    """Đường dẫn trong manifest phải tương đối và nằm trong thư mục nguồn."""
+    pure = PurePosixPath(relative)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise SourceDataError(
+            f"Đường dẫn {relative!r} trong {manifest_path.name} không hợp lệ: nằm ngoài thư mục "
+            "nguồn (tuyệt đối hoặc chứa '..')."
+        )
+    root = source_dir.resolve()
+    if not (root / relative).resolve().is_relative_to(root):
+        raise SourceDataError(
+            f"Đường dẫn {relative!r} trong {manifest_path.name} trỏ ra ngoài thư mục nguồn."
+        )
+
+
 def discover_event_files(
     source_dir: Path,
     *,
@@ -57,12 +72,18 @@ def discover_event_files(
     events_prefix = f"{events_dirname}/"
     found: dict[str, EventFile] = {}
     for manifest_path in sorted(manifests_dir.glob("*.json")):
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SourceDataError(
+                f"Manifest {manifest_path} không đọc được hoặc hỏng: {exc}"
+            ) from exc
         result = parse_and_validate_json_schema(manifest, "source_manifest")
         if not result.is_valid:
             raise SourceDataError(f"Manifest {manifest_path} không đúng schema: {result.issues}")
         for item in manifest["files"]:
             rel = str(item["path"])
+            _check_inside_source(source_dir, rel, manifest_path)
             if not rel.startswith(events_prefix):
                 continue  # accounts, control_report, sao kê: không thuộc bước publish events
             if rel in found:
@@ -91,27 +112,50 @@ def discover_event_files(
     return EventSource(files=tuple(found[rel] for rel in sorted(found)))
 
 
-def sha256_and_rows(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    rows = 0
-    with path.open("rb") as fh:
-        while block := fh.read(_READ_BLOCK):
-            digest.update(block)
-            rows += block.count(b"\n")
-    return digest.hexdigest(), rows
+def verify_event_files(
+    source: EventSource,
+    *,
+    key_strategy: str = "transaction_id",
+    max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
+) -> None:
+    """Kiểm toàn bộ nguồn trong một lượt đọc, trước khi gửi message đầu tiên.
 
-
-def verify_event_files(source: EventSource) -> None:
-    """Kiểm tra sha256 và số dòng của từng file với manifest; sai thì dừng trước khi gửi."""
+    Mỗi file: sha256 và số dòng khớp manifest; mọi dòng có LF cuối, không trống, đúng JSON và đủ
+    trường; key chọn được (orphan ledger bị phát hiện ở đây); kích thước không vượt giới hạn.
+    """
+    selector = KeySelector(key_strategy)
+    limit = max_message_bytes - MESSAGE_OVERHEAD_MARGIN_BYTES
     for item in source.files:
         if not item.path.is_file():
             raise SourceDataError(
                 f"File events {item.relative_path} có trong manifest nhưng thiếu."
             )
-        sha, rows = sha256_and_rows(item.path)
-        if sha != item.sha256 or rows != item.physical_rows:
+        selector.start_file()
+        digest = hashlib.sha256()
+        rows = 0
+        try:
+            with item.path.open("rb") as fh:
+                for number, raw in enumerate(fh, start=1):
+                    digest.update(raw)
+                    where = f"{item.relative_path} dòng {number}"
+                    if not raw.endswith(b"\n"):
+                        raise SourceDataError(f"Dòng cuối thiếu ký tự LF tại {where}.")
+                    rows += 1
+                    value = raw[:-1]
+                    key = selector.select(value, file_path=item.relative_path, line_number=number)
+                    if len(key) + len(value) > limit:
+                        raise SourceDataError(
+                            f"Dòng tại {where} dài {len(value)} byte, vượt giới hạn message "
+                            f"{limit} byte (message.max.bytes {max_message_bytes})."
+                        )
+        except OSError as exc:
             raise SourceDataError(
-                f"File events {item.relative_path} không khớp manifest: sha256={sha} "
+                f"Không đọc được file events {item.relative_path}: {exc}"
+            ) from exc
+        if digest.hexdigest() != item.sha256 or rows != item.physical_rows:
+            actual_sha = digest.hexdigest()
+            raise SourceDataError(
+                f"File events {item.relative_path} không khớp manifest: sha256={actual_sha} "
                 f"(manifest {item.sha256}), số dòng={rows} (manifest {item.physical_rows})."
             )
 

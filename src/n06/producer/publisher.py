@@ -9,8 +9,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from n06.producer.errors import DeliveryError, PublishConfigError
-from n06.producer.kafka_client import BrokerAdmin, ProducerLike
+from confluent_kafka import KafkaException
+
+from n06.producer.errors import DeliveryError, PublishConfigError, PublishError
+from n06.producer.kafka_client import DEFAULT_MAX_MESSAGE_BYTES, BrokerAdmin, ProducerLike
 from n06.producer.keys import KeySelector
 from n06.producer.rate import RateLimiter
 from n06.producer.source import EventSource, iter_lines, verify_event_files
@@ -27,6 +29,7 @@ class PublishSettings:
     replication_factor: int
     allow_non_empty_topic: bool
     flush_timeout_seconds: float
+    max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
 
 
 @dataclass(frozen=True)
@@ -93,9 +96,18 @@ def prepare_topic(broker: BrokerAdmin, settings: PublishSettings) -> int:
     if preexisting > 0 and not settings.allow_non_empty_topic:
         raise PublishConfigError(
             f"Topic {settings.topic} đã có {preexisting} message; từ chối publish để không gửi "
-            "trùng toàn bộ dữ liệu. Dùng --allow-non-empty-topic nếu cố ý phát lại."
+            "trùng toàn bộ dữ liệu. Cách xử lý: xóa topic rồi chạy lại (ví dụ kafka-topics.sh "
+            f"--delete --topic {settings.topic}), hoặc chọn topic khác bằng --topic, hoặc dùng "
+            "--allow-non-empty-topic nếu cố ý phát lại."
         )
     return preexisting
+
+
+def _check_flush_timeout(value: float) -> None:
+    if not (math.isfinite(value) and value > 0):
+        raise PublishConfigError(
+            f"Thời gian chờ flush (--flush-timeout-seconds) phải > 0 và hữu hạn, nhận {value!r}."
+        )
 
 
 def publish_events(
@@ -106,26 +118,46 @@ def publish_events(
     producer: ProducerLike,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    report: Callable[[str], None] | None = None,
 ) -> PublishStats:
-    """Kiểm manifest, chuẩn bị topic, gửi từng dòng theo thứ tự file rồi flush và đo."""
-    verify_event_files(source)
+    """Kiểm toàn bộ nguồn, chuẩn bị topic, gửi từng dòng theo thứ tự file rồi flush và đo.
+
+    Mọi lỗi dữ liệu nguồn được phát hiện trước message đầu tiên (lượt đọc kiểm sha256).
+    """
+    _check_flush_timeout(settings.flush_timeout_seconds)
+    verify_event_files(
+        source, key_strategy=settings.key_strategy, max_message_bytes=settings.max_message_bytes
+    )
     selector = KeySelector(settings.key_strategy)
     limiter = RateLimiter(settings.rate, clock=clock, sleep=sleep)
     preexisting = prepare_topic(broker, settings)
+    if report is not None:
+        report(
+            f"[publish] topic={settings.topic}: đã có {preexisting} message trước khi gửi"
+            f"{' (--allow-non-empty-topic)' if settings.allow_non_empty_topic else ''}\n"
+        )
 
     delivery = _Delivery()
     started = clock()
-    for item in source.files:
-        selector.start_file()
-        for number, value in iter_lines(item):
-            key = selector.select(value, file_path=item.relative_path, line_number=number)
-            limiter.acquire()
-            _produce(producer, settings, key, value, delivery, clock)
-            producer.poll(0)
+    try:
+        for item in source.files:
+            selector.start_file()
+            for number, value in iter_lines(item):
+                key = selector.select(value, file_path=item.relative_path, line_number=number)
+                limiter.acquire()
+                _produce(producer, settings, key, value, delivery, clock)
+                producer.poll(0)
+                if delivery.errors:
+                    break
             if delivery.errors:
                 break
-        if delivery.errors:
-            break
+    except PublishError as exc:
+        producer.flush(settings.flush_timeout_seconds)  # không bỏ rơi message còn trong hàng đợi
+        producer.poll(0)
+        raise type(exc)(
+            f"{exc} Đã giao {delivery.delivered} message trước khi dừng; xóa topic hoặc dùng "
+            "--allow-non-empty-topic khi chạy lại."
+        ) from exc
 
     remaining = producer.flush(settings.flush_timeout_seconds)
     elapsed = max(clock() - started, 1e-9)
@@ -134,7 +166,8 @@ def publish_events(
         raise DeliveryError(
             f"Giao nhận không hoàn tất: đã giao {delivery.delivered}/{source.expected_messages} "
             f"message, còn {remaining} chưa giao sau flush, {len(delivery.errors)} lỗi "
-            f"(lỗi đầu tiên: {first})."
+            f"(lỗi đầu tiên: {first}). Topic có thể đã nhận một phần: xóa topic hoặc dùng "
+            "--allow-non-empty-topic khi chạy lại."
         )
 
     latencies = sorted(delivery.latencies_ns)
@@ -172,6 +205,8 @@ def _produce(
         try:
             producer.produce(settings.topic, value=value, key=key, on_delivery=callback)
             return
+        except KafkaException as exc:  # ví dụ MSG_SIZE_TOO_LARGE: producer từ chối đồng bộ
+            raise DeliveryError(f"Producer từ chối message: {exc}") from exc
         except BufferError:
             if clock() > deadline:
                 raise DeliveryError(

@@ -252,3 +252,33 @@ def test_unreachable_broker_exits_14(
     monkeypatch.setenv("N06__KAFKA__BOOTSTRAP_SERVERS", "localhost:1")
     code, result = _publish(source_dir, topic)
     assert code == 14 and "broker" in result["error"].lower()
+
+
+def test_bad_source_is_rejected_before_any_message_reaches_the_topic(
+    bootstrap: str, source_dir: Path, tmp_path: Path, topic: str
+) -> None:
+    """Dòng trống ở giữa shard (manifest vẫn nhất quán): thoát 10 và topic chưa có message nào."""
+    import hashlib
+    import shutil
+
+    broken = tmp_path / "broken_source"
+    shutil.copytree(source_dir, broken)
+    manifest_path = next(
+        m for m in sorted((broken / "manifests").glob("events_*.json")) if "00000" in m.name
+    )
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    rel = next(f["path"] for f in manifest["files"] if f["path"].startswith("events/"))
+    lines = (broken / rel).read_bytes().split(b"\n")
+    lines.insert(len(lines) // 2, b"")  # dòng trống ở giữa file
+    data = b"\n".join(lines)
+    (broken / rel).write_bytes(data)
+    for item in manifest["files"]:
+        if item["path"] == rel:
+            item["sha256"] = hashlib.sha256(data).hexdigest()
+            item["physical_rows"] = data.count(b"\n")
+    manifest_path.write_text(json.dumps(manifest), "utf-8")
+
+    code, result = _publish(broken, topic)
+    assert code == 10 and "Dòng trống" in result["error"]
+    metadata = AdminClient({"bootstrap.servers": bootstrap}).list_topics(timeout=15)
+    assert topic not in metadata.topics  # thất bại trước khi tạo topic hay gửi message

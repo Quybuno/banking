@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from confluent_kafka import KafkaError, KafkaException
 
 from n06.producer.errors import BrokerUnavailableError
 
@@ -116,10 +117,12 @@ class FakeProducer:
         always_buffer_full: bool = False,
         fail_delivery_at: int | None = None,
         undelivered_after_flush: int = 0,
+        sync_error_at: int | None = None,
     ) -> None:
         self.buffer_errors = buffer_errors
         self.always_buffer_full = always_buffer_full
         self.fail_delivery_at = fail_delivery_at
+        self.sync_error_at = sync_error_at
         self.undelivered_after_flush = undelivered_after_flush
         self.calls: list[tuple[str, bytes, bytes]] = []
         self.polls: list[float] = []
@@ -134,13 +137,16 @@ class FakeProducer:
             self.buffer_errors -= 1
             raise BufferError("queue full")
         index = len(self.calls)
+        if self.sync_error_at is not None and index == self.sync_error_at:
+            # Bản thật ném KafkaException đồng bộ, ví dụ MSG_SIZE_TOO_LARGE.
+            raise KafkaException(KafkaError(KafkaError.MSG_SIZE_TOO_LARGE))
         self.calls.append((topic, key, value))
         self._pending.append((on_delivery, value, index))  # type: ignore[arg-type]
 
     def _drain(self) -> None:
         for callback, _value, index in self._pending:  # type: ignore[misc]
             if self.fail_delivery_at is not None and index == self.fail_delivery_at:
-                callback("delivery failed", None)
+                callback(KafkaError(KafkaError._MSG_TIMED_OUT), None)
             else:
                 callback(None, object())
         self._pending.clear()
