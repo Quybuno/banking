@@ -1,8 +1,8 @@
 # ADR-0010: Thư viện Kafka client và quy tắc của `n06 publish` (T20)
 
 - Trạng thái: Accepted
-- Người viết: agent (task T20), duyệt bởi <TÊN NGƯỜI DUYỆT>, 2026-11-23
-- Người duyệt:
+- Người viết: agent (task T20), duyệt bởi C (Quý), 2026-11-23
+- Người duyệt: C (Quý)
 - Ngày: 2026-11-23
 - Mục đặc tả liên quan (docs/spec.md): Phần II mục 4; Phần I mục 5 (dòng 255), mục 14.1 (E2, E6)
 
