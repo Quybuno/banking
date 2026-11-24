@@ -442,6 +442,8 @@ def _optional_typed(data: Mapping[str, Any], field_path: str) -> Any:
     found, value = _get_dotted(data, field_path)
     if not found or value is None:
         return None
+    if isinstance(value, str) and not value.strip():
+        return None  # biến môi trường rỗng (`N06__LIMITS__X=`) nghĩa là không đặt
     return _require_typed(data, field_path)
 
 

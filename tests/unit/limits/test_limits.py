@@ -299,3 +299,110 @@ def test_ensure_capacity_uses_an_injected_probe_and_touches_no_disk(tmp_path: Pa
 
 def test_refuse_constant_is_exposed() -> None:
     assert STATUS_REFUSE == "REFUSE"
+
+
+# --- Bổ sung sau review độc lập ----------------------------------------------------------------
+
+
+def test_astronomically_large_request_is_refused_without_overflow() -> None:
+    verdict = evaluate_capacity(10**400, _limits(), _probe(46.8))
+    assert verdict.refused and verdict.reason == REASON_INSUFFICIENT_DISK
+    assert "GB" in verdict.message and "thiếu" in verdict.message
+
+
+@pytest.mark.parametrize("bad", [0, -1, -5])
+def test_non_positive_request_is_a_programming_error(bad: int) -> None:
+    with pytest.raises(ValueError, match=">= 1"):
+        evaluate_capacity(bad, _limits(), _probe(46.8))
+
+
+def test_powershell_is_retried_once_after_a_transient_failure(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def flaky(argv: Sequence[str]) -> str:
+        calls.append(argv[0])
+        if argv[0] == "powershell.exe" and calls.count("powershell.exe") == 1:
+            raise subprocess.TimeoutExpired(list(argv), 10)
+        return LISTING if argv[0] == "powershell.exe" else "/mnt/d\n"
+
+    probe = resolve_disk_probe(
+        _limits(), tmp_path, env=WSL_ENV, disk_free=lambda p: 5 * GB, run_command=flaky,
+        osrelease="microsoft",
+    )  # fmt: skip
+    assert probe.free_bytes == 5 * GB and calls.count("powershell.exe") == 2
+
+
+def test_powershell_failing_every_attempt_is_unknown_and_says_how_many_tries(
+    tmp_path: Path,
+) -> None:
+    def always_times_out(argv: Sequence[str]) -> str:
+        raise subprocess.TimeoutExpired(list(argv), 10)
+
+    probe = resolve_disk_probe(
+        _limits(), tmp_path, env=WSL_ENV, disk_free=lambda p: 1, run_command=always_times_out,
+        osrelease="microsoft",
+    )  # fmt: skip
+    assert probe.free_bytes is None
+    assert "TimeoutExpired" in (probe.error or "") and "2 lần" in (probe.error or "")
+
+
+def test_wslpath_timeout_or_empty_answer_is_unknown(tmp_path: Path) -> None:
+    def wslpath_hangs(argv: Sequence[str]) -> str:
+        if argv[0] == "wslpath":
+            raise subprocess.TimeoutExpired(list(argv), 10)
+        return LISTING
+
+    hangs = resolve_disk_probe(
+        _limits(), tmp_path, env=WSL_ENV, disk_free=lambda p: 1, run_command=wslpath_hangs,
+        osrelease="microsoft",
+    )  # fmt: skip
+    assert hangs.free_bytes is None and "wslpath" in (hangs.error or "")
+    empty = _FakeSystem(LISTING, mount="")
+    blank = resolve_disk_probe(
+        _limits(), tmp_path, env=WSL_ENV, disk_free=empty.disk_free, run_command=empty.run_command,
+        osrelease="microsoft",
+    )  # fmt: skip
+    assert blank.free_bytes is None and "rỗng" in (blank.error or "")
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_mount"),
+    [
+        ("/mnt/c/data/generated", "/mnt/c"),
+        ("/mnt/e", "/mnt/e"),
+        ("/mnt/d/x/y/z", "/mnt/d"),
+    ],
+)
+def test_in_wsl_target_under_a_windows_drive_reads_that_drive(
+    tmp_path: Path, target: str, expected_mount: str
+) -> None:
+    fake = _FakeSystem(LISTING, mount="/mnt/d")
+    probe = resolve_disk_probe(
+        _limits(), tmp_path, env=WSL_ENV, disk_free=fake.disk_free, run_command=fake.run_command,
+        osrelease="microsoft", target_path=Path(target),
+    )  # fmt: skip
+    assert (probe.method, probe.path) == ("wsl-target-drive", expected_mount)
+    assert fake.disk_paths == [Path(expected_mount)] and fake.commands == []
+
+
+@pytest.mark.parametrize("target", ["/mnt/wsl/x", "/mnt/cc/x", "/home/user/data", "relative/dir"])
+def test_in_wsl_target_elsewhere_reads_the_drive_holding_the_virtual_disk(
+    tmp_path: Path, target: str
+) -> None:
+    fake = _FakeSystem(LISTING, mount="/mnt/d")
+    probe = resolve_disk_probe(
+        _limits(), tmp_path, env=WSL_ENV, disk_free=fake.disk_free, run_command=fake.run_command,
+        osrelease="microsoft", target_path=Path(target),
+    )  # fmt: skip
+    assert probe.method == METHOD_WSL and probe.path == "/mnt/d"
+
+
+def test_default_runner_really_runs_commands_without_a_stdin() -> None:
+    from n06.limits import _default_run_command
+
+    assert _default_run_command(["echo", "xin chào"]) == "xin chào\n"
+    assert _default_run_command(["cat"]) == ""  # stdin là DEVNULL nên không bị treo chờ đầu vào
+    with pytest.raises(subprocess.CalledProcessError):
+        _default_run_command(["false"])
+    with pytest.raises(FileNotFoundError):
+        _default_run_command(["lenh-khong-ton-tai-n06"])

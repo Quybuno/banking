@@ -63,6 +63,17 @@ __all__ = [
 ]
 
 
+def _positive_int(raw: str) -> int:
+    """Kiểu tham số: số nguyên >= 1 (số giao dịch)."""
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"không phải số nguyên: {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"phải >= 1, nhận {value}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Xây dựng parser dòng lệnh chính của `n06`."""
     epilog = (
@@ -163,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument(
         "--transactions",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Số giao dịch dự định sinh để kiểm dung lượng (mặc định: dataset.transaction_count).",
     )
@@ -315,7 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate_parser.add_argument(
         "--transactions",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Ghi đè transaction_count của cấu hình generator.",
     )

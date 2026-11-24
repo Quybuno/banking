@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from n06.cli import ExitCode, main, run_generate
+from n06.generator import FaultConfigError
 from n06.limits import METHOD_WSL, DiskProbe
 
 GB = 10**9
@@ -190,7 +191,7 @@ def test_invalid_generator_configuration_exits_10(tmp_path: Path) -> None:
 
 def test_build_configuration_error_maps_to_exit_10(tmp_path: Path) -> None:
     def rejecting(config: Any, out_dir: Path) -> None:
-        raise ValueError("cấu hình generator vi phạm ràng buộc")
+        raise FaultConfigError("cấu hình generator vi phạm ràng buộc")
 
     code, text, _ = _run(tmp_path, probe=_probe(900.0), build=rejecting)
     assert code == 10 and "vi phạm ràng buộc" in text
@@ -263,3 +264,32 @@ def test_main_wires_generate_and_refuses_over_the_cap(
     )
     assert code == 16 and "limits.max_transactions" in out.getvalue()
     assert not target.exists()
+
+
+# --- Bổ sung sau review độc lập ----------------------------------------------------------------
+
+
+def test_disk_write_error_maps_to_exit_12(tmp_path: Path) -> None:
+    def full_disk(config: Any, out_dir: Path) -> None:
+        raise OSError(28, "No space left on device")
+
+    code, text, _ = _run(tmp_path, probe=_probe(900.0), build=full_disk)
+    assert code == int(ExitCode.RESOURCE_ERROR) == 12 and "ghi đĩa" in text
+
+
+def test_internal_value_errors_are_not_swallowed_as_configuration_errors(tmp_path: Path) -> None:
+    def buggy(config: Any, out_dir: Path) -> None:
+        raise ValueError("lỗi nội bộ của generator")
+
+    with pytest.raises(ValueError, match="lỗi nội bộ"):
+        _run(tmp_path, probe=_probe(900.0), build=buggy)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
+def test_generate_transactions_must_be_a_positive_integer(tmp_path: Path, bad: str) -> None:
+    code = main(
+        ["generate", "--generator-config", str(tmp_path / "x.json"), "--transactions", bad],
+        out=io.StringIO(),
+        err=io.StringIO(),
+    )
+    assert code == 2

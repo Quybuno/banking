@@ -107,6 +107,7 @@ def run_generate(
         cfg.limits,
         _nearest_existing_parent(target_dir),
         probe=disk_probe,
+        target_path=target_dir,
     )
     if verdict.refused:
         # Từ chối trước mọi thao tác ghi: không tạo thư mục hay file dở.
@@ -114,15 +115,17 @@ def run_generate(
     if not as_json and verdict.status != "PASS":
         stream.write(f"[generate] {verdict.message}\n")
 
-    if build is None:
-        from n06.generator import build_dataset  # nhập muộn: nặng và chỉ cần khi chạy thật
+    # Nhập muộn: nặng và chỉ cần khi chạy thật. Chỉ các lỗi cấu hình đã biết mới ra mã 10;
+    # ValueError do lỗi nội bộ của generator không bị nuốt.
+    from n06.generator import FaultConfigError, ScenarioConfigError, build_dataset
 
+    if build is None:
         build = build_dataset
     try:
         summary = build(generator_cfg, target_dir)
     except OSError as exc:
         return fail(ExitCode.RESOURCE_ERROR, f"Lỗi ghi đĩa khi sinh dữ liệu: {exc}")
-    except ValueError as exc:  # cấu hình generator sai: FaultConfigError, ScenarioConfigError
+    except (FaultConfigError, ScenarioConfigError) as exc:
         return fail(ExitCode.CONFIG_ERROR, str(exc))
 
     result = {

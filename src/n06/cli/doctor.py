@@ -792,10 +792,34 @@ def build_doctor_report(
                 free_bytes=int(snap.free_disk_gib * 1024**3), path=None, method=METHOD_SNAPSHOT
             )
         else:
-            probe = resolve_disk_probe(loaded_cfg.limits, REPO_ROOT)
+            probe = resolve_disk_probe(
+                loaded_cfg.limits,
+                REPO_ROOT,
+                target_path=Path(loaded_cfg.paths.generator_output_dir),
+            )
         if resource_snapshot is None and probe.free_bytes is not None:
             snap = replace(snap, free_disk_gib=round(probe.free_bytes / (1024.0**3), 2))
-    checks.extend(evaluate_system_resources(snap, thresholds=thresholds))
+    resource_items = evaluate_system_resources(snap, thresholds=thresholds)
+    if resource_snapshot is None and probe is not None and probe.free_bytes is None:
+        # Không đọc được ổ thật: không báo số `df` của đĩa ảo (sai); lý do nằm ở capacity.limits.
+        resource_items = [
+            CheckItem(
+                check_id=item.check_id,
+                category=item.category,
+                passed=True,
+                exit_code=int(ExitCode.OK),
+                summary="Disk trống: không xác định được ổ thật (xem capacity.limits)",
+                detail=(
+                    "Không dùng `df` của thư mục dữ liệu: "
+                    "trong WSL đó là đĩa ảo, không phải ổ thật."
+                ),
+                warning=True,
+            )
+            if item.check_id == "resource.disk"
+            else item
+            for item in resource_items
+        ]
+    checks.extend(resource_items)
     if loaded_cfg is not None and probe is not None:
         checks.append(
             check_capacity(
@@ -842,8 +866,13 @@ def build_doctor_report(
         )
 
     # Xác định mã thoát ưu tiên của lần chạy
-    failed_codes = [item.exit_code for item in sanitized_checks if not item.passed]
-    final_exit_code = failed_codes[0] if failed_codes else int(ExitCode.OK)
+    # `capacity.limits` hiện sớm nhưng xếp hạng cuối: lỗi của nó đến từ guard dung lượng, không được
+    # che mã lỗi hạ tầng thật (13, 14) khi đọc ổ chập chờn.
+    failed = [item for item in sanitized_checks if not item.passed]
+    ranked = [i for i in failed if i.check_id != "capacity.limits"] + [
+        i for i in failed if i.check_id == "capacity.limits"
+    ]
+    final_exit_code = ranked[0].exit_code if ranked else int(ExitCode.OK)
 
     return DoctorReport(
         profile=effective_profile,

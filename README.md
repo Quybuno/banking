@@ -102,7 +102,9 @@ Chạy `doctor` khi MinIO đã chạy mà bucket chưa được tạo sẽ báo 
 
 Mục `[limits]` trong `config/default.toml` (ghi đè bằng `N06__LIMITS__...`): `max_transactions` (không đặt thì không giới hạn thêm), `min_free_disk_gb_reserve`, `generator_bytes_per_tx` (số đo thật, nguồn ở `docs/measurements/generator-bytes-per-tx.md`), `pipeline_bytes_per_tx` (**chưa đo**, nên không đặt) và `disk_probe_path`. Ước lượng cần = số giao dịch × byte mỗi giao dịch đã biết + reserve; không đủ chỗ hoặc vượt trần thì `n06 generate` thoát mã `16` trước khi ghi, và `n06 doctor [--transactions N]` báo FAIL mã `16`.
 
-Máy phát triển này (lúc ghi: ổ D còn khoảng 44 GB, reserve 8 GB): trần được chốt là `N06__LIMITS__MAX_TRANSACTIONS=1000000` (đặt trong `.env`, không nằm trong mã). Riêng bước sinh 5.000.000 giao dịch cần khoảng 28 GB (20 GB dữ liệu + 8 GB reserve), nay vừa đủ chỗ; nhưng phần pipeline (Kafka, MinIO, Postgres) **chưa đo** nên chưa thể kết luận 5.000.000 chạy được. Chỉ nâng trần sau khi đo `pipeline_bytes_per_tx` và đặt giá trị đó vào cấu hình. Nếu 5.000.000 không chạy được, theo đặc tả báo mức cao nhất chạy được và nguyên nhân.
+Khuyến nghị cho máy phát triển này (lúc ghi: ổ D còn khoảng 44 GB, reserve 8 GB): đặt `N06__LIMITS__MAX_TRANSACTIONS=1000000` trong `.env` (file này bị gitignore và **chưa được đặt sẵn**; mặc định `max_transactions` không đặt, nên `doctor` in `max_transactions: không đặt`). Riêng bước sinh 5.000.000 giao dịch cần khoảng 28 GB (20 GB dữ liệu + 8 GB reserve), nay vừa đủ chỗ; nhưng phần pipeline (Kafka, MinIO, Postgres) **chưa đo** nên chưa thể kết luận 5.000.000 chạy được, và trần 1.000.000 sẽ từ chối mức đó. Chỉ nâng trần sau khi đo `pipeline_bytes_per_tx` và đặt giá trị đó vào cấu hình. Nếu 5.000.000 không chạy được, theo đặc tả báo mức cao nhất chạy được và nguyên nhân.
+
+Vì `pipeline_bytes_per_tx` chưa đặt, `n06 doctor` luôn ra trạng thái `PASS_WITH_WARNINGS` (mã thoát 0, JSON `status` là `PASS_WITH_WARNINGS`, hạng mục `capacity.limits` có `warning: true`) cho tới khi có số đo pipeline; script chỉ nhìn mã thoát sẽ coi đó là PASS.
 
 ### Giới hạn tài nguyên máy thực tế (Milestone M0)
 

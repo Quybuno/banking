@@ -26,6 +26,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from n06.config import LimitsConfig
@@ -44,15 +45,18 @@ REASON_PIPELINE_UNMEASURED = "pipeline_unmeasured"
 METHOD_CONFIG = "limits.disk_probe_path"
 METHOD_WSL = "wsl-registry"
 METHOD_WORKSPACE = "workspace"
+METHOD_TARGET_DRIVE = "wsl-target-drive"  # đích ghi nằm trực tiếp dưới /mnt/<ổ>
 METHOD_SNAPSHOT = "snapshot"  # chỗ trống lấy từ ảnh chụp tài nguyên được truyền vào (kiểm thử)
 
-COMMAND_TIMEOUT_SECONDS = 20.0
+COMMAND_TIMEOUT_SECONDS = 10.0
+POWERSHELL_ATTEMPTS = 2  # powershell.exe qua interop đôi khi lỗi tạm; thử lại một lần
 
 # Liệt kê `DistributionName|BasePath` của mọi distro WSL của người dùng hiện tại.
 _LIST_DISTROS_SCRIPT = (
     r"Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss | "
     r'ForEach-Object { $p = Get-ItemProperty $_.PSPath; "$($p.DistributionName)|$($p.BasePath)" }'
 )
+_MNT_DRIVE_PATTERN = re.compile(r"^/mnt/([a-z])(?:/|$)")
 _DRIVE_PATTERN = re.compile(r"^(?:\\\\\?\\)?([A-Za-z]):[\\/]")
 
 DiskFree = Callable[[Path], int]
@@ -101,7 +105,8 @@ class CapacityVerdict:
 
 
 def _gb(value: int) -> str:
-    return f"{value / BYTES_PER_GB:.2f} GB"
+    # Decimal: số giao dịch rất lớn không được làm tràn float khi định dạng.
+    return f"{Decimal(value) / Decimal(BYTES_PER_GB):.2f} GB"
 
 
 # --- Đọc chỗ trống ở đúng ổ --------------------------------------------------------------------
@@ -115,6 +120,7 @@ def _default_run_command(argv: Sequence[str]) -> str:
     completed = subprocess.run(  # noqa: S603 - lệnh cố định, không có đầu vào của người dùng
         list(argv),
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         timeout=COMMAND_TIMEOUT_SECONDS,
         check=True,
     )
@@ -156,14 +162,25 @@ def _wsl_windows_drive_path(env: Mapping[str, str], run_command: CommandRunner) 
         raise DiskProbeError(
             "đang trong WSL nhưng thiếu biến môi trường WSL_DISTRO_NAME nên không biết distro nào"
         )
-    try:
-        listing = run_command(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _LIST_DISTROS_SCRIPT]
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise DiskProbeError(
-            f"không chạy được powershell.exe để đọc vị trí đĩa ảo WSL ({type(exc).__name__})"
-        ) from exc
+    listing = ""
+    for attempt in range(POWERSHELL_ATTEMPTS):
+        try:
+            listing = run_command(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    _LIST_DISTROS_SCRIPT,
+                ]
+            )
+            break
+        except (OSError, subprocess.SubprocessError) as exc:
+            if attempt == POWERSHELL_ATTEMPTS - 1:
+                raise DiskProbeError(
+                    "không chạy được powershell.exe để đọc vị trí đĩa ảo WSL "
+                    f"({type(exc).__name__}, đã thử {POWERSHELL_ATTEMPTS} lần)"
+                ) from exc
     base_path = select_distro_base_path(listing, distro)
     if base_path is None:
         raise DiskProbeError(f"registry của Windows không có BasePath cho distro '{distro}'")
@@ -189,8 +206,12 @@ def resolve_disk_probe(
     disk_free: DiskFree | None = None,
     run_command: CommandRunner | None = None,
     osrelease: str | None = None,
+    target_path: Path | None = None,
 ) -> DiskProbe:
     """Đọc chỗ trống ở đúng ổ chứa dữ liệu (xem thứ tự ở docstring module).
+
+    `target_path` là nơi sắp ghi dữ liệu. Trong WSL, nếu nó nằm trực tiếp dưới `/mnt/<ổ>` thì dữ
+    liệu ghi lên chính ổ Windows đó (không qua đĩa ảo), nên chỗ trống đọc ở `/mnt/<ổ>`.
 
     Không bao giờ ném ngoại lệ vì không xác định được ổ: trả `DiskProbe(free_bytes=None, ...)`
     kèm `error` để người gọi từ chối chạy.
@@ -210,6 +231,10 @@ def resolve_disk_probe(
 
     release = osrelease if osrelease is not None else _read_osrelease()
     if is_wsl(resolved_env, release):
+        if target_path is not None:
+            on_drive = _MNT_DRIVE_PATTERN.match(target_path.resolve().as_posix())
+            if on_drive:
+                return read(Path(f"/mnt/{on_drive.group(1)}"), METHOD_TARGET_DRIVE)
         try:
             mount, _ = _wsl_windows_drive_path(resolved_env, runner)
         except DiskProbeError as exc:
@@ -230,6 +255,8 @@ def evaluate_capacity(
     Thứ tự: vượt `max_transactions`, không xác định được chỗ trống, thiếu chỗ (đều là REFUSE);
     đủ chỗ nhưng `pipeline_bytes_per_tx` chưa đặt là WARN (không phải PASS đầy đủ).
     """
+    if requested_transactions < 1:
+        raise ValueError("requested_transactions phải >= 1")
     per_tx = limits.generator_bytes_per_tx + (limits.pipeline_bytes_per_tx or 0)
     data_bytes = requested_transactions * per_tx
     reserve_bytes = limits.min_free_disk_gb_reserve * BYTES_PER_GB
@@ -302,6 +329,7 @@ def ensure_capacity(
     run_command: CommandRunner | None = None,
     osrelease: str | None = None,
     probe: DiskProbe | None = None,
+    target_path: Path | None = None,
 ) -> CapacityVerdict:
     """Đọc chỗ trống (hoặc dùng `probe` đã có) rồi đánh giá. Người gọi quyết định từ chối khi
     `verdict.refused`; hàm này không tạo hay xóa file nào."""
@@ -315,6 +343,7 @@ def ensure_capacity(
             disk_free=disk_free,
             run_command=run_command,
             osrelease=osrelease,
+            target_path=target_path,
         )
     )
     return evaluate_capacity(requested_transactions, limits, resolved)

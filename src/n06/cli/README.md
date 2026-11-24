@@ -19,12 +19,11 @@
 |---|---|---|
 | `0` | `OK` | Mọi kiểm tra hoặc thao tác thành công |
 | `2` | `CLI_USAGE_ERROR` | Sai cú pháp dòng lệnh hoặc tham số CLI không hợp lệ |
-| `10` | `CONFIG_ERROR` | Lỗi thiếu biến môi trường bắt buộc, thiếu file `.env`, hoặc cấu hình `config/*.toml` sai (`ConfigValidationError`) |
+| `10` | `CONFIG_ERROR` | Lỗi thiếu biến môi trường bắt buộc, thiếu file `.env`, hoặc cấu hình `config/*.toml` sai (`ConfigValidationError`); `generate`: cấu hình generator sai (`FaultConfigError`, `ScenarioConfigError`) hoặc thư mục đầu ra không rỗng |
 | `11` | `PYTHON_ENV_ERROR` | Phiên bản Python không thuộc nhánh `3.11.x` theo `ADR-0001` |
-| `12` | `RESOURCE_ERROR` | Tài nguyên máy chủ (CPU cores, RAM, hoặc ổ đĩa trống) thấp hơn ngưỡng tối thiểu |
+| `12` | `RESOURCE_ERROR` | Tài nguyên máy chủ (CPU cores, RAM, hoặc ổ đĩa trống) thấp hơn ngưỡng tối thiểu; lỗi ghi đĩa khi `generate` đang sinh dữ liệu |
 | `13` | `DOCKER_ERROR` | Thiếu Docker CLI, thiếu plugin `docker compose`, hoặc Docker daemon chưa chạy |
 | `14` | `SERVICE_ERROR` | Một hoặc nhiều service hạ tầng (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, hoặc không mở kết nối port |
-
 | `15` | `KAFKA_DELIVERY_ERROR` | Lỗi giao nhận Kafka khi `publish` (không retry được) |
 | `16` | `CAPACITY_ERROR` | Từ chối vì không đủ dung lượng ổ đĩa, không xác định được ổ chứa dữ liệu, hoặc vượt `limits.max_transactions` (`generate`, `doctor`) |
 
@@ -58,5 +57,7 @@
 - `n06 generate --generator-config <json> [--out <thư mục>] [--transactions N] [--profile P]`: lệnh **tối thiểu**; kiểm dung lượng rồi gọi `build_dataset`. Các cờ còn lại của `n06 generate` trong đặc tả (`--dataset-id`, `--seed`, `--from-date`, `--to-date`) chưa có và thuộc task sở hữu lệnh đó.
 - Bị từ chối thì thoát `16` **trước mọi thao tác ghi** (không tạo thư mục hay file nào); thông báo nêu số cần, số có, reserve và nguyên nhân (`n06.limits`).
 - `n06 doctor [--transactions N]` thêm hạng mục `capacity.limits` (chỗ trống thật, reserve, `max_transactions` đang áp dụng). Thiếu chỗ hoặc vượt trần là FAIL mã `16`. Khi `limits.pipeline_bytes_per_tx` chưa đặt (CHƯA ĐO), kết quả là `[WARN]` và trạng thái tổng là `PASS_WITH_WARNINGS`, không phải PASS đầy đủ.
-- Chỗ trống đọc ở **ổ Windows chứa đĩa ảo WSL**, không đọc `df` của thư mục dữ liệu: trên máy này `df` báo 928 GB trống còn ổ thật chỉ có khoảng 44 GB. Cách đọc và thứ tự xác định ổ: docstring `src/n06/limits.py`. Hạng mục `resource.disk` của `doctor` dùng cùng cách đọc.
+- Chỗ trống đọc ở **ổ Windows thật**, không đọc `df` của thư mục dữ liệu: nếu đích ghi nằm trực tiếp dưới `/mnt/<ổ>` thì đọc ổ đó; nếu không thì đọc ổ chứa đĩa ảo WSL của distro (hoặc `limits.disk_probe_path` nếu có). Trên máy này trên máy này `df` báo 928 GB trống còn ổ thật chỉ có khoảng 44 GB. Cách đọc và thứ tự xác định ổ: docstring `src/n06/limits.py`. Hạng mục `resource.disk` của `doctor` dùng cùng cách đọc; khi không đọc được ổ thật nó ghi cảnh báo thay vì hiển thị số của đĩa ảo.
+- Mã thoát của `doctor`: `capacity.limits` hiện sớm nhưng xếp hạng cuối, nên lỗi hạ tầng (13, 14) và lỗi tài nguyên (12) được báo trước mã 16.
+- `n06 generate` dùng hệ thống cấu hình chung nên vẫn đòi đủ 6 credential trong `.env` hoặc môi trường dù lệnh này không dùng chúng; chưa nới.
 - Giới hạn chưa kiểm: Docker Desktop có thể đặt đĩa ảo của nó trên ổ khác với đĩa ảo WSL của distro; guard chỉ đọc một ổ (ổ chứa distro, hoặc `limits.disk_probe_path`). Trên máy này hai đĩa ảo cùng nằm trên ổ D.

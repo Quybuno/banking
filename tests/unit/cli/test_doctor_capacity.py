@@ -165,3 +165,76 @@ def test_main_doctor_transactions_flag_refuses_over_the_cap(
     assert (
         "[FAIL] capacity.limits" in out.getvalue() and "limits.max_transactions" in out.getvalue()
     )
+
+
+# --- Bổ sung sau review độc lập ----------------------------------------------------------------
+
+
+def _services_with_minio_stopped():  # type: ignore[no-untyped-def]
+    from unittest.mock import patch
+
+    from n06.cli.doctor import CheckItem
+
+    states = {
+        "kafka": {"state": "running", "health": "healthy", "name": "n06-kafka-1"},
+        "minio": {"state": "exited", "health": "", "name": "n06-minio-1"},
+        "postgres": {"state": "running", "health": "healthy", "name": "n06-postgres-1"},
+        "spark": {"state": "running", "health": "healthy", "name": "n06-spark-1"},
+    }
+    docker_ok = CheckItem("docker.engine", "docker", True, 0, "Docker OK", "OK")
+    return (
+        patch("n06.cli.doctor.check_docker_engine", return_value=(docker_ok, "/usr/bin/docker")),
+        patch("n06.cli.doctor._get_compose_service_states", return_value=states),
+        patch("n06.cli.doctor._probe_tcp", return_value=(True, "TCP OK")),
+        patch("n06.cli.doctor._probe_http", return_value=(True, "HTTP OK")),
+    )
+
+
+@pytest.mark.parametrize("probe", [_probe(None), _probe(1.0)])
+def test_service_failure_keeps_exit_14_even_when_capacity_also_fails(
+    tmp_path: Path, probe: DiskProbe
+) -> None:
+    """Lỗi đọc ổ chập chờn hoặc thiếu chỗ không được che mã lỗi hạ tầng thật."""
+    p1, p2, p3, p4 = _services_with_minio_stopped()
+    with p1, p2, p3, p4:
+        report = build_doctor_report(
+            profile="demo",
+            env_file=tmp_path / "none.env",
+            env=CREDENTIALS,
+            resource_snapshot=SNAPSHOT,
+            disk_probe=probe,
+        )
+    by_id = {c.check_id: c for c in report.checks}
+    assert not by_id["capacity.limits"].passed and by_id["capacity.limits"].exit_code == 16
+    assert not by_id["service.minio"].passed
+    assert report.exit_code == int(ExitCode.SERVICE_ERROR) == 14
+
+
+def test_capacity_failure_alone_still_exits_16(tmp_path: Path) -> None:
+    assert _report(tmp_path, _probe(None)).exit_code == 16
+
+
+def test_unknown_drive_does_not_show_the_virtual_disk_size_as_free_space(tmp_path: Path) -> None:
+    report = build_doctor_report(
+        profile="demo",
+        env_file=tmp_path / "none.env",
+        env=CREDENTIALS,
+        skip_services=True,
+        disk_probe=_probe(None),
+    )
+    (disk,) = [c for c in report.checks if c.check_id == "resource.disk"]
+    assert disk.passed and disk.warning and "GiB" not in disk.summary
+    assert "không xác định được ổ thật" in disk.summary
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "1.5"])
+def test_doctor_transactions_must_be_a_positive_integer(bad: str) -> None:
+    code = main(
+        ["doctor", "--skip-services", "--transactions", bad], out=io.StringIO(), err=io.StringIO()
+    )
+    assert code == 2
+
+
+def test_huge_transactions_fail_cleanly_with_exit_16(tmp_path: Path) -> None:
+    report = _report(tmp_path, _probe(46.8), requested_transactions=10**400)
+    assert _capacity(report).exit_code == 16 and report.exit_code == 16

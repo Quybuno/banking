@@ -62,3 +62,21 @@ def test_invalid_limits_are_rejected_naming_the_field(key: str, value: str, fiel
     with pytest.raises(ConfigValidationError) as caught:
         _load(**{key: value})
     assert caught.value.field_path == field
+
+
+def test_empty_environment_value_for_an_optional_key_means_unset() -> None:
+    limits = _load(
+        N06__LIMITS__MAX_TRANSACTIONS="",
+        N06__LIMITS__PIPELINE_BYTES_PER_TX="  ",
+        N06__LIMITS__DISK_PROBE_PATH="",
+    )
+    assert (limits.max_transactions, limits.pipeline_bytes_per_tx, limits.disk_probe_path) == (
+        None,
+        None,
+        None,
+    )
+
+
+def test_empty_environment_value_for_a_required_key_is_still_rejected() -> None:
+    with pytest.raises(ConfigValidationError):
+        _load(N06__LIMITS__MIN_FREE_DISK_GB_RESERVE="")
