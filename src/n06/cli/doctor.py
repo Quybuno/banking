@@ -20,7 +20,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from pathlib import Path
 from typing import Any, TextIO
@@ -44,6 +44,16 @@ from n06.config import (
     ConfigValidationError,
     load_config,
 )
+from n06.limits import (
+    BYTES_PER_GB,
+    METHOD_SNAPSHOT,
+    STATUS_REFUSE,
+    STATUS_WARN,
+    CapacityVerdict,
+    DiskProbe,
+    evaluate_capacity,
+    resolve_disk_probe,
+)
 
 CORE_SERVICES = ("kafka", "minio", "postgres", "spark")
 
@@ -59,6 +69,7 @@ class ExitCode(IntEnum):
     DOCKER_ERROR = 13
     SERVICE_ERROR = 14
     KAFKA_DELIVERY_ERROR = 15
+    CAPACITY_ERROR = 16
 
 
 @dataclass(frozen=True)
@@ -94,6 +105,7 @@ class CheckItem:
     exit_code: int
     summary: str
     detail: str
+    warning: bool = False
 
 
 @dataclass(frozen=True)
@@ -107,6 +119,10 @@ class DoctorReport:
     @property
     def passed(self) -> bool:
         return self.exit_code == int(ExitCode.OK)
+
+    @property
+    def warnings(self) -> int:
+        return sum(1 for c in self.checks if c.passed and c.warning)
 
 
 def _read_total_ram_gib() -> float:
@@ -679,6 +695,48 @@ def check_object_store_buckets(
     ]
 
 
+def check_capacity(
+    *,
+    cfg: AppConfig,
+    probe: DiskProbe,
+    requested_transactions: int | None = None,
+) -> CheckItem:
+    """Hạng mục `capacity.limits`: chỗ trống thật, reserve, `max_transactions` đang áp dụng.
+
+    REFUSE (vượt trần, thiếu chỗ, không xác định được ổ) là FAIL mã 16 kèm cách xử lý.
+    WARN (phần pipeline chưa đo) vẫn đạt nhưng được đánh dấu cảnh báo, không phải PASS đầy đủ.
+    """
+    limits = cfg.limits
+    requested = (
+        requested_transactions
+        if requested_transactions is not None
+        else cfg.dataset.transaction_count
+    )
+    verdict: CapacityVerdict = evaluate_capacity(requested, limits, probe)
+    free_text = (
+        f"{verdict.free_bytes / BYTES_PER_GB:.2f} GB" if verdict.free_bytes is not None else "?"
+    )
+    cap_text = (
+        f"{limits.max_transactions:,}" if limits.max_transactions is not None else "không đặt"
+    )
+    where = f", {verdict.probe_path}" if verdict.probe_path else ""
+    summary = (
+        f"Chỗ trống {free_text} (đọc theo {verdict.probe_method}{where}); "
+        f"reserve {limits.min_free_disk_gb_reserve} GB; max_transactions: {cap_text}; "
+        f"yêu cầu {requested:,} giao dịch [{verdict.status}]"
+    )
+    refused = verdict.status == STATUS_REFUSE
+    return CheckItem(
+        check_id="capacity.limits",
+        category="capacity",
+        passed=not refused,
+        exit_code=int(ExitCode.CAPACITY_ERROR if refused else ExitCode.OK),
+        summary=summary,
+        detail=verdict.message,
+        warning=verdict.status == STATUS_WARN,
+    )
+
+
 def build_doctor_report(
     *,
     profile: str | None = None,
@@ -690,6 +748,8 @@ def build_doctor_report(
     thresholds: ResourceThresholds | None = None,
     skip_services: bool = False,
     bucket_prober: Callable[[ObjectStoreTarget, str], BucketResult] | None = None,
+    requested_transactions: int | None = None,
+    disk_probe: DiskProbe | None = None,
 ) -> DoctorReport:
     """Thực hiện toàn bộ chuỗi kiểm tra của `n06 doctor` và trả về `DoctorReport`."""
     resolved_env_file = env_file if env_file is not None else (REPO_ROOT / ".env")
@@ -721,7 +781,27 @@ def build_doctor_report(
     snap = (
         resource_snapshot if resource_snapshot is not None else collect_system_resources(REPO_ROOT)
     )
+    # Chỗ trống đọc ở đúng ổ chứa dữ liệu (trong WSL là ổ Windows chứa đĩa ảo, không phải `df`
+    # của đĩa ảo). Snapshot được truyền vào (unit test) thì coi đó là chỗ trống và không đọc máy.
+    probe: DiskProbe | None = None
+    if loaded_cfg is not None:
+        if disk_probe is not None:
+            probe = disk_probe
+        elif resource_snapshot is not None:
+            probe = DiskProbe(
+                free_bytes=int(snap.free_disk_gib * 1024**3), path=None, method=METHOD_SNAPSHOT
+            )
+        else:
+            probe = resolve_disk_probe(loaded_cfg.limits, REPO_ROOT)
+        if resource_snapshot is None and probe.free_bytes is not None:
+            snap = replace(snap, free_disk_gib=round(probe.free_bytes / (1024.0**3), 2))
     checks.extend(evaluate_system_resources(snap, thresholds=thresholds))
+    if loaded_cfg is not None and probe is not None:
+        checks.append(
+            check_capacity(
+                cfg=loaded_cfg, probe=probe, requested_transactions=requested_transactions
+            )
+        )
 
     # 3. Kiểm tra Docker & các service hạ tầng (trừ khi yêu cầu --skip-services)
     if not skip_services:
@@ -757,6 +837,7 @@ def build_doctor_report(
                 exit_code=item.exit_code,
                 summary=redact_secrets(item.summary, secret_values),
                 detail=redact_secrets(item.detail, secret_values),
+                warning=item.warning,
             )
         )
 
@@ -781,11 +862,17 @@ def format_doctor_report_text(report: DoctorReport) -> str:
 
     for item in report.checks:
         badge = "[PASS]" if item.passed else "[FAIL]"
+        if item.passed and item.warning:
+            badge = "[WARN]"
         lines.append(f"{badge} {item.check_id:<18} | {item.summary}")
         if not item.passed:
             lines.append(f"       -> Chi tiết (exit={item.exit_code}): {item.detail}")
+        elif item.warning:
+            lines.append(f"       -> {item.detail}")
 
     overall = "PASS" if report.passed else "FAIL"
+    if report.passed and report.warnings:
+        overall = f"PASS (có {report.warnings} cảnh báo, không phải PASS đầy đủ)"
     lines.append(
         f"=== Kết quả: {overall} ({passed_count}/{total_count} hạng mục đạt, "
         f"exit_code={report.exit_code}) ==="
@@ -803,6 +890,8 @@ def run_doctor(
     resource_snapshot: SystemResourceSnapshot | None = None,
     thresholds: ResourceThresholds | None = None,
     skip_services: bool = False,
+    requested_transactions: int | None = None,
+    disk_probe: DiskProbe | None = None,
     as_json: bool = False,
     out: TextIO | None = None,
 ) -> int:
@@ -817,19 +906,26 @@ def run_doctor(
         resource_snapshot=resource_snapshot,
         thresholds=thresholds,
         skip_services=skip_services,
+        requested_transactions=requested_transactions,
+        disk_probe=disk_probe,
     )
 
     if as_json:
         payload = {
             "command": "doctor",
             "profile": report.profile,
-            "status": "PASS" if report.passed else "FAIL",
+            "status": (
+                "FAIL"
+                if not report.passed
+                else ("PASS_WITH_WARNINGS" if report.warnings else "PASS")
+            ),
             "exit_code": report.exit_code,
             "checks": [
                 {
                     "check_id": c.check_id,
                     "category": c.category,
                     "passed": c.passed,
+                    "warning": c.warning,
                     "exit_code": c.exit_code,
                     "summary": c.summary,
                     "detail": c.detail,

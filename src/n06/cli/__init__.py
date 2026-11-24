@@ -28,6 +28,7 @@ from n06.cli.doctor import (
     redact_secrets,
     run_doctor,
 )
+from n06.cli.generate import run_generate
 from n06.cli.init_local import (
     InitLocalResult,
     generate_local_env,
@@ -55,6 +56,7 @@ __all__ = [
     "parse_dotenv_file",
     "redact_secrets",
     "run_doctor",
+    "run_generate",
     "run_init_local",
     "run_publish",
     "run_validate",
@@ -73,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
         "  13 (DOCKER_ERROR)      : Thiếu Docker CLI, Compose hoặc Docker daemon chưa chạy\n"
         "  14 (SERVICE_ERROR)     : Một hoặc nhiều service (kafka/minio/postgres/spark) lỗi"
         "\n  15 (KAFKA_DELIVERY_ERROR): Lỗi giao nhận Kafka khi publish (không retry được)"
+        "\n  16 (CAPACITY_ERROR)    : Từ chối: không đủ dung lượng ổ hoặc vượt max_transactions"
     )
     parser = argparse.ArgumentParser(
         prog="n06",
@@ -84,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor,validate,publish}",
+        metavar="{init-local,doctor,validate,publish,generate}",
     )
 
     # Lệnh 1: n06 init-local
@@ -157,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-services",
         action="store_true",
         help="Chỉ kiểm tra cấu hình, Python và tài nguyên máy (bỏ qua kiểm tra Docker/service).",
+    )
+    doctor_parser.add_argument(
+        "--transactions",
+        type=int,
+        default=None,
+        help="Số giao dịch dự định sinh để kiểm dung lượng (mặc định: dataset.transaction_count).",
     )
     doctor_parser.add_argument(
         "--json",
@@ -281,6 +290,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="In kết quả dạng JSON có cấu trúc.",
     )
 
+    # Lệnh 5: n06 generate (tối thiểu, kèm kiểm dung lượng)
+    generate_parser = subparsers.add_parser(
+        "generate",
+        help="Sinh dataset bằng generator sau khi kiểm dung lượng ổ đĩa (từ chối bằng mã 16).",
+        description=(
+            "Kiểm dung lượng ổ thật theo mục [limits] của cấu hình rồi gọi build_dataset. "
+            "Bị từ chối (mã 16) thì không tạo file nào. Chỉ có các cờ tối thiểu; các cờ còn lại "
+            "của lệnh generate trong đặc tả thuộc task khác."
+        ),
+    )
+    generate_parser.add_argument(
+        "--generator-config",
+        type=Path,
+        required=True,
+        help="Tệp JSON cấu hình generator (ví dụ trong contracts/.../config/).",
+    )
+    generate_parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        dest="out_dir",
+        help="Thư mục đầu ra (mặc định: paths.generator_output_dir).",
+    )
+    generate_parser.add_argument(
+        "--transactions",
+        type=int,
+        default=None,
+        help="Ghi đè transaction_count của cấu hình generator.",
+    )
+    generate_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình (default | demo | benchmark | test).",
+    )
+    generate_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    generate_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
+    )
+
     return parser
 
 
@@ -327,6 +381,7 @@ def main(
             profile=parsed.profile,
             env_file=parsed.env_file,
             skip_services=parsed.skip_services,
+            requested_transactions=parsed.transactions,
             as_json=parsed.as_json,
             out=stdout,
         )
@@ -365,6 +420,17 @@ def main(
             as_json=parsed.as_json,
             out=stdout,
             **publish_kwargs,
+        )
+
+    if parsed.command == "generate":
+        return run_generate(
+            generator_config=parsed.generator_config,
+            out_dir=parsed.out_dir,
+            transactions=parsed.transactions,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            as_json=parsed.as_json,
+            out=stdout,
         )
 
     parser.print_help(file=stdout)

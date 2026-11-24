@@ -25,6 +25,9 @@
 | `13` | `DOCKER_ERROR` | Thiếu Docker CLI, thiếu plugin `docker compose`, hoặc Docker daemon chưa chạy |
 | `14` | `SERVICE_ERROR` | Một hoặc nhiều service hạ tầng (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, hoặc không mở kết nối port |
 
+| `15` | `KAFKA_DELIVERY_ERROR` | Lỗi giao nhận Kafka khi `publish` (không retry được) |
+| `16` | `CAPACITY_ERROR` | Từ chối vì không đủ dung lượng ổ đĩa, không xác định được ổ chứa dữ liệu, hoặc vượt `limits.max_transactions` (`generate`, `doctor`) |
+
 ## Bucket object store (T03b, ADR-0002 mục 1)
 
 - Chỉ tạo và kiểm bucket do cấu hình định nghĩa: đúng một bucket `object_store.bucket` của profile đang dùng (`default`/`demo`: `n06-lakehouse`, `benchmark`: `n06-benchmark-lakehouse`, `test`: `n06-test-lakehouse`; ghi đè được bằng `N06__OBJECT_STORE__BUCKET`). Tên bucket, region và credential lấy từ cấu hình T01, không hardcode.
@@ -49,3 +52,11 @@
 - Mới thử region `us-east-1` và `eu-west-1` trên MinIO thật (`tests/integration/test_init_local_buckets.py`); region lấy từ cấu hình và dùng để ký. Chưa thử region nào khác và chưa thử trên AWS S3 thật.
 - Phân loại lỗi truyền tải: chỉ từ chối kết nối hoặc không phân giải được tên mới là `unreachable` (thoát `0` kèm cảnh báo); timeout, phản hồi không phải HTTP, lỗi TLS hoặc ngắt kết nối là `error` (thoát `14`). Hệ quả chưa kiểm trên máy thật: ngay lúc container MinIO vừa bật, nếu proxy cổng nhận rồi ngắt kết nối thì `init-local` ra `error` (mã `14`) chứ không phải `unreachable`; dùng `docker compose --profile core up -d --wait` rồi chạy lại là đủ.
 - Cấu hình không an toàn (`N06_MINIO_API_HOST_PORT` ngoài 1-65535, region hoặc credential chứa ký tự điều khiển/khoảng trắng) thoát `10`, thông báo chỉ nêu tên trường, không in giá trị.
+
+## Kiểm dung lượng trước khi sinh dữ liệu (CFG-scale-guard)
+
+- `n06 generate --generator-config <json> [--out <thư mục>] [--transactions N] [--profile P]`: lệnh **tối thiểu**; kiểm dung lượng rồi gọi `build_dataset`. Các cờ còn lại của `n06 generate` trong đặc tả (`--dataset-id`, `--seed`, `--from-date`, `--to-date`) chưa có và thuộc task sở hữu lệnh đó.
+- Bị từ chối thì thoát `16` **trước mọi thao tác ghi** (không tạo thư mục hay file nào); thông báo nêu số cần, số có, reserve và nguyên nhân (`n06.limits`).
+- `n06 doctor [--transactions N]` thêm hạng mục `capacity.limits` (chỗ trống thật, reserve, `max_transactions` đang áp dụng). Thiếu chỗ hoặc vượt trần là FAIL mã `16`. Khi `limits.pipeline_bytes_per_tx` chưa đặt (CHƯA ĐO), kết quả là `[WARN]` và trạng thái tổng là `PASS_WITH_WARNINGS`, không phải PASS đầy đủ.
+- Chỗ trống đọc ở **ổ Windows chứa đĩa ảo WSL**, không đọc `df` của thư mục dữ liệu: trên máy này `df` báo 928 GB trống còn ổ thật chỉ có khoảng 44 GB. Cách đọc và thứ tự xác định ổ: docstring `src/n06/limits.py`. Hạng mục `resource.disk` của `doctor` dùng cùng cách đọc.
+- Giới hạn chưa kiểm: Docker Desktop có thể đặt đĩa ảo của nó trên ổ khác với đĩa ảo WSL của distro; guard chỉ đọc một ổ (ổ chứa distro, hoặc `limits.disk_probe_path`). Trên máy này hai đĩa ảo cùng nằm trên ổ D.

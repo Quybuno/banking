@@ -95,6 +95,14 @@ Chạy `doctor` khi MinIO đã chạy mà bucket chưa được tạo sẽ báo 
 | `12` | `RESOURCE_ERROR` | Tài nguyên máy chủ thấp hơn ngưỡng tối thiểu (`CPU >= 2 cores`, `RAM >= 4.0 GiB`, `Disk trống >= 5.0 GiB`) |
 | `13` | `DOCKER_ERROR` | Thiếu Docker CLI, thiếu plugin `docker compose`, hoặc Docker daemon chưa chạy |
 | `14` | `SERVICE_ERROR` | Một hoặc nhiều service (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, hoặc không mở port; bucket object store thiếu hoặc bị từ chối (`doctor`); `init-local` không tạo được bucket |
+| `15` | `KAFKA_DELIVERY_ERROR` | Lỗi giao nhận Kafka khi `publish` (không retry được) |
+| `16` | `CAPACITY_ERROR` | Từ chối vì không đủ dung lượng ổ đĩa, không xác định được ổ chứa dữ liệu, hoặc vượt `limits.max_transactions` |
+
+### Giới hạn quy mô theo dung lượng máy (CFG-scale-guard)
+
+Mục `[limits]` trong `config/default.toml` (ghi đè bằng `N06__LIMITS__...`): `max_transactions` (không đặt thì không giới hạn thêm), `min_free_disk_gb_reserve`, `generator_bytes_per_tx` (số đo thật, nguồn ở `docs/measurements/generator-bytes-per-tx.md`), `pipeline_bytes_per_tx` (**chưa đo**, nên không đặt) và `disk_probe_path`. Ước lượng cần = số giao dịch × byte mỗi giao dịch đã biết + reserve; không đủ chỗ hoặc vượt trần thì `n06 generate` thoát mã `16` trước khi ghi, và `n06 doctor [--transactions N]` báo FAIL mã `16`.
+
+Máy phát triển này (lúc ghi: ổ D còn khoảng 44 GB, reserve 8 GB): trần được chốt là `N06__LIMITS__MAX_TRANSACTIONS=1000000` (đặt trong `.env`, không nằm trong mã). Riêng bước sinh 5.000.000 giao dịch cần khoảng 28 GB (20 GB dữ liệu + 8 GB reserve), nay vừa đủ chỗ; nhưng phần pipeline (Kafka, MinIO, Postgres) **chưa đo** nên chưa thể kết luận 5.000.000 chạy được. Chỉ nâng trần sau khi đo `pipeline_bytes_per_tx` và đặt giá trị đó vào cấu hình. Nếu 5.000.000 không chạy được, theo đặc tả báo mức cao nhất chạy được và nguyên nhân.
 
 ### Giới hạn tài nguyên máy thực tế (Milestone M0)
 
