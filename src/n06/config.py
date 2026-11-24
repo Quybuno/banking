@@ -107,6 +107,10 @@ FIELD_TYPES: dict[str, type] = {
     "producer.acks": str,
     "producer.retries": int,
     "producer.batch_size": int,
+    "producer.flush_timeout_seconds": int,
+    "producer.max_message_bytes": int,
+    "producer.metadata_timeout_seconds": int,
+    "producer.leader_wait_seconds": int,
     "dataset.dataset_id": str,
     "dataset.seed": int,
     "dataset.from_date": str,
@@ -210,6 +214,10 @@ class ProducerConfig:
     acks: str
     retries: int
     batch_size: int
+    flush_timeout_seconds: int
+    max_message_bytes: int
+    metadata_timeout_seconds: int
+    leader_wait_seconds: int
 
 
 @dataclass(frozen=True)
@@ -635,6 +643,26 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         batch_size=_require_min_int(
             "producer.batch_size",
             _require_typed(merged, "producer.batch_size"),
+            1,
+        ),
+        flush_timeout_seconds=_require_min_int(
+            "producer.flush_timeout_seconds",
+            _require_typed(merged, "producer.flush_timeout_seconds"),
+            1,
+        ),
+        max_message_bytes=_require_min_int(
+            "producer.max_message_bytes",
+            _require_typed(merged, "producer.max_message_bytes"),
+            2048,
+        ),
+        metadata_timeout_seconds=_require_min_int(
+            "producer.metadata_timeout_seconds",
+            _require_typed(merged, "producer.metadata_timeout_seconds"),
+            1,
+        ),
+        leader_wait_seconds=_require_min_int(
+            "producer.leader_wait_seconds",
+            _require_typed(merged, "producer.leader_wait_seconds"),
             1,
         ),
     )

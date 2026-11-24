@@ -55,15 +55,23 @@ def test_generator_names_sort_numerically_for_every_five_digit_shard() -> None:
     assert DEFAULT_LAYOUT.events_relpath(99_999) == "events/events_batch_99999.jsonl"
 
 
-def test_without_zero_padding_string_order_would_be_wrong(tmp_path: Path) -> None:
-    """Ghi lại lý do cần đệm 0: tên không đệm làm shard 10 đứng trước shard 9."""
+def test_unpadded_names_are_still_ordered_by_shard_number(tmp_path: Path) -> None:
+    """Sắp xếp tự nhiên: tên không đệm 0 vẫn theo số shard (trước đây ra [10, 9])."""
     _write_source(tmp_path, [9, 10], lambda n: f"events/batch_{n}.jsonl")
     order = [_shard_number(f.relative_path) for f in discover_event_files(tmp_path).files]
-    assert order == [10, 9]
+    assert order == [9, 10]
 
 
-def test_documented_limit_is_five_digits() -> None:
-    """Giả định có giới hạn: từ shard 100000 (10^9 giao dịch) chuỗi 6 chữ số sắp sai thứ tự."""
+def test_six_digit_shards_are_ordered_after_five_digit_shards(tmp_path: Path) -> None:
+    """Từ shard 100000 (10^9 giao dịch) sắp theo chuỗi sẽ sai im lặng; sắp tự nhiên thì đúng."""
+    shards = [0, 99_998, 99_999, 100_000, 100_001, 1_000_000]
+    _write_source(tmp_path, list(reversed(shards)), DEFAULT_LAYOUT.events_relpath)
+    order = [_shard_number(f.relative_path) for f in discover_event_files(tmp_path).files]
+    assert order == shards
+
+
+def test_plain_string_order_of_generator_names_is_wrong_past_five_digits() -> None:
+    """Lý do cần sắp tự nhiên: theo chuỗi, shard 100000 đứng trước shard 99999."""
     five = DEFAULT_LAYOUT.events_relpath(99_999)
     six = DEFAULT_LAYOUT.events_relpath(100_000)
-    assert six < five  # nếu đổi hợp đồng T13 để hỗ trợ lớn hơn, phải đổi cách sắp thứ tự
+    assert six < five

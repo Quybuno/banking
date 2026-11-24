@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -58,6 +59,17 @@ def _check_inside_source(source_dir: Path, relative: str, manifest_path: Path) -
         )
 
 
+_DIGIT_RUNS = re.compile(r"(\d+)")
+
+
+def _natural_key(relative_path: str) -> list[int | str]:
+    """Khóa sắp xếp tự nhiên: `events_batch_99999` đứng trước `events_batch_100000`.
+
+    Sắp theo chuỗi sẽ sai im lặng khi số shard vượt 5 chữ số (`1000000` < `99999` theo chuỗi).
+    """
+    return [int(part) if part.isdigit() else part for part in _DIGIT_RUNS.split(relative_path)]
+
+
 def discover_event_files(
     source_dir: Path,
     *,
@@ -74,7 +86,7 @@ def discover_event_files(
     for manifest_path in sorted(manifests_dir.glob("*.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             raise SourceDataError(
                 f"Manifest {manifest_path} không đọc được hoặc hỏng: {exc}"
             ) from exc
@@ -109,7 +121,7 @@ def discover_event_files(
     unlisted = sorted(on_disk - set(found))
     if unlisted:
         raise SourceDataError(f"File events không có trong manifest nào: {unlisted}")
-    return EventSource(files=tuple(found[rel] for rel in sorted(found)))
+    return EventSource(files=tuple(found[rel] for rel in sorted(found, key=_natural_key)))
 
 
 def verify_event_files(

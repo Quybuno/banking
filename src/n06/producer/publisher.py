@@ -11,13 +11,16 @@ from typing import Any
 
 from confluent_kafka import KafkaException
 
-from n06.producer.errors import DeliveryError, PublishConfigError, PublishError
+from n06.producer.errors import DeliveryError, PublishConfigError, PublishError, SourceDataError
 from n06.producer.kafka_client import DEFAULT_MAX_MESSAGE_BYTES, BrokerAdmin, ProducerLike
 from n06.producer.keys import KeySelector
 from n06.producer.rate import RateLimiter
 from n06.producer.source import EventSource, iter_lines, verify_event_files
 
 _BUFFER_FULL_POLL_SECONDS = 0.5
+# Khi giới hạn tốc độ làm producer chờ, vẫn phục vụ callback giao nhận theo từng lát ngắn để độ
+# trễ p50/p95/p99 phản ánh broker chứ không phải khoảng chờ 1/rate giữa hai message.
+_WAIT_POLL_SLICE_SECONDS = 0.005
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,22 @@ def prepare_topic(broker: BrokerAdmin, settings: PublishSettings) -> int:
     return preexisting
 
 
+def _wait_serving_callbacks(
+    producer: ProducerLike, clock: Callable[[], float]
+) -> Callable[[float], None]:
+    """Hàm chờ cho `RateLimiter`: thay `sleep` bằng `poll` theo lát ngắn đến hết thời gian chờ."""
+
+    def wait(seconds: float) -> None:
+        end = clock() + seconds
+        while True:
+            remaining = end - clock()
+            if remaining <= 0:
+                return
+            producer.poll(min(remaining, _WAIT_POLL_SLICE_SECONDS))
+
+    return wait
+
+
 def _check_flush_timeout(value: float) -> None:
     if not (math.isfinite(value) and value > 0):
         raise PublishConfigError(
@@ -117,7 +136,7 @@ def publish_events(
     broker: BrokerAdmin,
     producer: ProducerLike,
     clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
     report: Callable[[str], None] | None = None,
 ) -> PublishStats:
     """Kiểm toàn bộ nguồn, chuẩn bị topic, gửi từng dòng theo thứ tự file rồi flush và đo.
@@ -129,7 +148,8 @@ def publish_events(
         source, key_strategy=settings.key_strategy, max_message_bytes=settings.max_message_bytes
     )
     selector = KeySelector(settings.key_strategy)
-    limiter = RateLimiter(settings.rate, clock=clock, sleep=sleep)
+    wait = sleep if sleep is not None else _wait_serving_callbacks(producer, clock)
+    limiter = RateLimiter(settings.rate, clock=clock, sleep=wait)
     preexisting = prepare_topic(broker, settings)
     if report is not None:
         report(
@@ -151,13 +171,20 @@ def publish_events(
                     break
             if delivery.errors:
                 break
-    except PublishError as exc:
+    except (PublishError, OSError) as exc:
         producer.flush(settings.flush_timeout_seconds)  # không bỏ rơi message còn trong hàng đợi
         producer.poll(0)
-        raise type(exc)(
-            f"{exc} Đã giao {delivery.delivered} message trước khi dừng; xóa topic hoặc dùng "
-            "--allow-non-empty-topic khi chạy lại."
-        ) from exc
+        first_error = f" Lỗi giao nhận đầu tiên: {delivery.errors[0]}." if delivery.errors else ""
+        tail = (
+            f" Đã giao {delivery.delivered} message trước khi dừng.{first_error} Topic có thể đã "
+            "nhận một phần: xóa topic hoặc dùng --allow-non-empty-topic khi chạy lại."
+        )
+        if isinstance(exc, OSError):
+            # File nguồn đã qua lượt kiểm sha256 nhưng bị xóa hoặc đổi quyền giữa chừng.
+            raise SourceDataError(
+                f"Không đọc được dữ liệu nguồn khi đang gửi: {exc}.{tail}"
+            ) from exc
+        raise type(exc)(f"{exc}{tail}") from exc
 
     remaining = producer.flush(settings.flush_timeout_seconds)
     elapsed = max(clock() - started, 1e-9)

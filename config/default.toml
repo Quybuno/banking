@@ -65,6 +65,12 @@ key_strategy = "transaction_id"
 acks = "all"
 retries = 5
 batch_size = 16384
+# Thời gian chờ và giới hạn của `n06 publish` (giây, byte). Mặc định của thư viện trong
+# src/n06/producer/kafka_client.py phải bằng các giá trị này (có test chống lệch).
+flush_timeout_seconds = 120
+max_message_bytes = 1000000
+metadata_timeout_seconds = 10
+leader_wait_seconds = 20
 
 [dataset]
 dataset_id = "n06-demo-clean"

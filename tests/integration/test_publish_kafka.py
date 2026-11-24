@@ -282,3 +282,68 @@ def test_bad_source_is_rejected_before_any_message_reaches_the_topic(
     assert code == 10 and "Dòng trống" in result["error"]
     metadata = AdminClient({"bootstrap.servers": bootstrap}).list_topics(timeout=15)
     assert topic not in metadata.topics  # thất bại trước khi tạo topic hay gửi message
+
+
+def _idempotence_state_on_broker(
+    bootstrap: str, topic: str, config: dict[str, Any]
+) -> dict[str, Any]:
+    """Gửi một message rồi đọc thống kê `eos` của librdkafka; trả khối `eos` ở lần đọc cuối
+    (rỗng nếu producer không bật idempotence)."""
+    from n06.producer.kafka_client import make_producer
+
+    stats: list[dict[str, Any]] = []
+    producer = make_producer(
+        {
+            **config,
+            "statistics.interval.ms": 200,
+            "stats_cb": lambda raw: stats.append(json.loads(raw)),
+        }
+    )
+    delivered: list[Any] = []
+    producer.produce(
+        topic, value=b"idempotence-probe", key=b"k", on_delivery=lambda e, m: delivered.append(e)
+    )
+    # Thống kê đến theo chu kỳ: sau khi giao xong, chờ thêm tối đa 3 giây cho tới khi trạng thái
+    # idempotent là "Assigned" (producer đối chứng không bao giờ tới đó nên chờ hết 3 giây).
+    deadline = time.monotonic() + 20
+    settle_until: float | None = None
+    while time.monotonic() < deadline:
+        producer.poll(0.2)
+        latest = [s["eos"] for s in stats if s.get("eos")]
+        if latest and latest[-1].get("idemp_state") == "Assigned":
+            break
+        if delivered and settle_until is None:
+            settle_until = time.monotonic() + 3
+        if settle_until is not None and time.monotonic() > settle_until:
+            break
+    producer.flush(10)
+    assert delivered == [None], f"Message không được giao: {delivered}"
+    eos = [s["eos"] for s in stats if s.get("eos")]
+    return eos[-1] if eos else {}  # producer không idempotent thì librdkafka không báo khối eos
+
+
+def test_real_producer_is_idempotent_on_the_broker_and_control_is_not(
+    bootstrap: str, topic: str
+) -> None:
+    """Bằng chứng idempotence có hiệu lực thật: broker đã cấp Producer ID cho producer của
+    `n06 publish`, còn producer đối chứng (không bật idempotence) thì không."""
+    from n06.producer.kafka_client import ConfluentBroker, build_producer_config
+
+    ConfluentBroker(bootstrap).create_topic(topic, 1, 1)
+    ours = _idempotence_state_on_broker(
+        bootstrap,
+        topic,
+        build_producer_config(bootstrap_servers=bootstrap, acks="all", retries=5, batch_size=16384),
+    )
+    assert ours["idemp_state"] == "Assigned", ours
+    assert ours["producer_id"] >= 0, ours
+
+    control = _idempotence_state_on_broker(
+        bootstrap,
+        topic,
+        {"bootstrap.servers": bootstrap, "enable.idempotence": False, "acks": "all"},
+    )
+    assert control.get("idemp_state") != "Assigned" and control.get("producer_id", -1) == -1, (
+        control
+    )
+    assert control == {}, f"Producer đối chứng không được có khối eos: {control}"

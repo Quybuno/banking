@@ -13,8 +13,10 @@ from confluent_kafka.admin import AdminClient, NewTopic
 from n06.producer.errors import BrokerUnavailableError, PublishConfigError
 
 CLIENT_ID = "n06-publish"
-METADATA_TIMEOUT_SECONDS = 10.0
-LEADER_WAIT_SECONDS = 20.0
+# Mặc định của thư viện; `n06 publish` luôn truyền giá trị từ `config/` (producer.*), và
+# `tests/unit/publish/test_config_defaults.py` khẳng định hai bên không lệch nhau.
+DEFAULT_METADATA_TIMEOUT_SECONDS = 10.0
+DEFAULT_LEADER_WAIT_SECONDS = 20.0
 RETRY_SLEEP_SECONDS = 0.2
 # Giới hạn kích thước message (key + value) của producer; librdkafka từ chối message lớn hơn
 # `message.max.bytes` ngay khi gọi produce(). Chừa biên cho phần overhead của bản ghi.
@@ -59,7 +61,12 @@ class BrokerAdmin(Protocol):
 
 
 def build_producer_config(
-    *, bootstrap_servers: str, acks: str, retries: int, batch_size: int
+    *,
+    bootstrap_servers: str,
+    acks: str,
+    retries: int,
+    batch_size: int,
+    max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
 ) -> dict[str, Any]:
     """Cấu hình producer idempotent; `acks` khác `all` hoặc `retries < 1` bị từ chối."""
     if acks != "all":
@@ -78,7 +85,7 @@ def build_producer_config(
         "acks": acks,
         "retries": retries,
         "batch.size": batch_size,
-        "message.max.bytes": DEFAULT_MAX_MESSAGE_BYTES,
+        "message.max.bytes": max_message_bytes,
     }
 
 
@@ -118,7 +125,11 @@ class ConfluentBroker:
         consumer_factory: Callable[[], Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        metadata_timeout_seconds: float = DEFAULT_METADATA_TIMEOUT_SECONDS,
+        leader_wait_seconds: float = DEFAULT_LEADER_WAIT_SECONDS,
     ) -> None:
+        self._metadata_timeout = metadata_timeout_seconds
+        self._leader_wait = leader_wait_seconds
         self._bootstrap = bootstrap_servers
         self._admin = (
             admin
@@ -132,10 +143,10 @@ class ConfluentBroker:
     def partition_count(self, topic: str) -> int | None:
         """None chỉ khi broker xác nhận topic không tồn tại; lỗi metadata tạm thời được thử lại
         có hạn rồi dừng (không bao giờ coi là "topic rỗng")."""
-        deadline = self._clock() + LEADER_WAIT_SECONDS
+        deadline = self._clock() + self._leader_wait
         while True:
             try:
-                metadata = self._admin.list_topics(timeout=METADATA_TIMEOUT_SECONDS)
+                metadata = self._admin.list_topics(timeout=self._metadata_timeout)
             except KafkaException as exc:
                 raise BrokerUnavailableError(
                     f"Không kết nối được broker {self._bootstrap}: {exc}"
@@ -160,7 +171,7 @@ class ConfluentBroker:
             [NewTopic(topic, num_partitions=partitions, replication_factor=replication_factor)]
         )
         try:
-            futures[topic].result(timeout=METADATA_TIMEOUT_SECONDS)
+            futures[topic].result(timeout=self._metadata_timeout)
         except KafkaException as exc:
             code = exc.args[0].code() if exc.args else None
             if code == KafkaError.TOPIC_ALREADY_EXISTS:
@@ -179,8 +190,10 @@ class ConfluentBroker:
         count = self.partition_count(topic)
         if count is None:
             raise BrokerUnavailableError(f"Topic {topic} không tồn tại khi đọc offset.")
-        consumer = self._consumer_factory()
+        consumer = None
         try:
+            # Dựng consumer cũng có thể ném KafkaException: phải nằm trong khối này để thành mã 14.
+            consumer = self._consumer_factory()
             return {
                 partition: self._high_watermark(consumer, topic, partition)
                 for partition in range(count)
@@ -188,14 +201,15 @@ class ConfluentBroker:
         except KafkaException as exc:
             raise BrokerUnavailableError(f"Không đọc được offset của topic {topic}: {exc}") from exc
         finally:
-            consumer.close()
+            if consumer is not None:
+                consumer.close()
 
     def _high_watermark(self, consumer: Any, topic: str, partition: int) -> int:
-        deadline = self._clock() + LEADER_WAIT_SECONDS
+        deadline = self._clock() + self._leader_wait
         while True:
             try:
                 _, high = consumer.get_watermark_offsets(
-                    TopicPartition(topic, partition), timeout=METADATA_TIMEOUT_SECONDS
+                    TopicPartition(topic, partition), timeout=self._metadata_timeout
                 )
                 return int(high)
             except KafkaException as exc:

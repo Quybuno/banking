@@ -51,8 +51,22 @@ def _settings() -> PublishSettings:
     )
 
 
-def test_producer_is_created_from_our_config_with_idempotence(producer: Producer) -> None:
-    assert isinstance(producer, Producer)
+def test_make_producer_hands_our_idempotent_config_to_the_real_client() -> None:
+    """Producer thật nhận đúng cấu hình idempotent do `build_producer_config` sinh ra.
+
+    Chứng minh idempotence có hiệu lực trên broker nằm ở
+    `tests/integration/test_publish_kafka.py::test_real_producer_is_idempotent_on_the_broker_*`.
+    """
+    from unittest.mock import patch
+
+    config = _config()
+    with patch("n06.producer.kafka_client.Producer") as constructor:
+        make_producer(config)
+    (passed,), _ = constructor.call_args
+    assert passed["enable.idempotence"] is True
+    assert passed["acks"] == "all"
+    assert passed["retries"] >= 1
+    assert passed is config or passed == config
 
 
 def test_publisher_produce_call_matches_real_signature(producer: Producer) -> None:
