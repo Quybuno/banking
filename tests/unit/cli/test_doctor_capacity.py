@@ -238,3 +238,13 @@ def test_doctor_transactions_must_be_a_positive_integer(bad: str) -> None:
 def test_huge_transactions_fail_cleanly_with_exit_16(tmp_path: Path) -> None:
     report = _report(tmp_path, _probe(46.8), requested_transactions=10**400)
     assert _capacity(report).exit_code == 16 and report.exit_code == 16
+
+
+@pytest.mark.parametrize("bad", [0, -5])
+def test_calling_doctor_as_a_function_with_non_positive_transactions_fails_cleanly(
+    tmp_path: Path, bad: int
+) -> None:
+    report = _report(tmp_path, _probe(46.8), requested_transactions=bad)
+    item = _capacity(report)
+    assert not item.passed and item.exit_code == int(ExitCode.CONFIG_ERROR) == 10
+    assert "không hợp lệ" in item.summary and ">= 1" in item.detail

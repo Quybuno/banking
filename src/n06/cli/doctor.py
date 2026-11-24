@@ -707,6 +707,15 @@ def check_capacity(
     WARN (phần pipeline chưa đo) vẫn đạt nhưng được đánh dấu cảnh báo, không phải PASS đầy đủ.
     """
     limits = cfg.limits
+    if requested_transactions is not None and requested_transactions < 1:
+        return CheckItem(
+            check_id="capacity.limits",
+            category="capacity",
+            passed=False,
+            exit_code=int(ExitCode.CONFIG_ERROR),
+            summary=f"Số giao dịch yêu cầu không hợp lệ: {requested_transactions}",
+            detail="Số giao dịch phải là số nguyên >= 1 (--transactions hoặc cấu hình).",
+        )
     requested = (
         requested_transactions
         if requested_transactions is not None
