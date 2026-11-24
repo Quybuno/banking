@@ -129,10 +129,19 @@ def test_commit_lifecycle_atomicity_rerun_and_concurrency() -> None:
     run3 = f"run-3-{uuid.uuid4().hex[:8]}"
     run4 = f"run-4-{uuid.uuid4().hex[:8]}"
 
-    path1 = f"s3a://n06-lakehouse/{dataset_id}/silver/transactions/run_id={run1}/business_date=2026-01-15"
-    path2 = f"s3a://n06-lakehouse/{dataset_id}/silver/transactions/run_id={run2}/business_date=2026-01-15"
-    path3 = f"s3a://n06-lakehouse/{dataset_id}/silver/transactions/run_id={run3}/business_date=2026-01-15"
-    path4 = f"s3a://n06-lakehouse/{dataset_id}/silver/transactions/run_id={run4}/business_date=2026-01-15"
+    # Đường dẫn viết tay theo ADR-0002 (mục 3): <silver_prefix>/<dataset_id>/<entity>/run_id=<id>/
+    # business_date=<d>; manifest nằm ở gốc run. Không dùng build_run_output_path để tính expected.
+    root1 = f"s3a://n06-lakehouse/silver/{dataset_id}/transactions/run_id={run1}"
+    path1 = f"{root1}/business_date=2026-01-15"
+    manifest1 = f"{root1}/_manifest.json"
+    root2 = f"s3a://n06-lakehouse/silver/{dataset_id}/transactions/run_id={run2}"
+    path2 = f"{root2}/business_date=2026-01-15"
+    root3 = f"s3a://n06-lakehouse/silver/{dataset_id}/transactions/run_id={run3}"
+    path3 = f"{root3}/business_date=2026-01-15"
+    manifest3 = f"{root3}/_manifest.json"
+    root4 = f"s3a://n06-lakehouse/silver/{dataset_id}/transactions/run_id={run4}"
+    path4 = f"{root4}/business_date=2026-01-15"
+    manifest4 = f"{root4}/_manifest.json"
 
     hash1 = hashlib.sha256(b"payload-1").hexdigest()
     hash3 = hashlib.sha256(b"payload-3").hexdigest()
@@ -171,7 +180,7 @@ def test_commit_lifecycle_atomicity_rerun_and_concurrency() -> None:
             entity="transactions",
             business_date=biz_date,
             output_path=path1,
-            manifest_path=f"{path1}/_manifest.json",
+            manifest_path=manifest1,
             row_count=100,
             semantic_hash=hash1,
         )
@@ -190,7 +199,7 @@ def test_commit_lifecycle_atomicity_rerun_and_concurrency() -> None:
             entity="transactions",
             business_date=biz_date,
             output_path=path1,
-            manifest_path=f"{path1}/_manifest.json",
+            manifest_path=manifest1,
             row_count=100,
             semantic_hash=hash1,
         )
@@ -269,7 +278,7 @@ def test_commit_lifecycle_atomicity_rerun_and_concurrency() -> None:
         barrier = threading.Barrier(2)
         errors: list[Exception] = []
 
-        def _commit_worker(rid: str, out_path: str, shash: str, rcount: int) -> None:
+        def _commit_worker(rid: str, out_path: str, manifest: str, shash: str, rcount: int) -> None:
             try:
                 barrier.wait(timeout=5)
                 coord.commit_run(
@@ -279,15 +288,15 @@ def test_commit_lifecycle_atomicity_rerun_and_concurrency() -> None:
                     entity="transactions",
                     business_date=biz_date,
                     output_path=out_path,
-                    manifest_path=f"{out_path}/_manifest.json",
+                    manifest_path=manifest,
                     row_count=rcount,
                     semantic_hash=shash,
                 )
             except Exception as exc:  # pragma: no cover - chỉ dùng báo lỗi thread
                 errors.append(exc)
 
-        t3 = threading.Thread(target=_commit_worker, args=(run3, path3, hash3, 300))
-        t4 = threading.Thread(target=_commit_worker, args=(run4, path4, hash4, 400))
+        t3 = threading.Thread(target=_commit_worker, args=(run3, path3, manifest3, hash3, 300))
+        t4 = threading.Thread(target=_commit_worker, args=(run4, path4, manifest4, hash4, 400))
         t3.start()
         t4.start()
         t3.join(timeout=15)
@@ -302,11 +311,11 @@ def test_commit_lifecycle_atomicity_rerun_and_concurrency() -> None:
         # Kiểm tra không trộn lẫn trường giữa hai run
         if final_snap.run_id == run3:
             assert final_snap.output_path == path3
-            assert final_snap.manifest_path == f"{path3}/_manifest.json"
+            assert final_snap.manifest_path == manifest3
             assert final_snap.semantic_hash == hash3
         else:
             assert final_snap.output_path == path4
-            assert final_snap.manifest_path == f"{path4}/_manifest.json"
+            assert final_snap.manifest_path == manifest4
             assert final_snap.semantic_hash == hash4
     finally:
         sql_exec.execute_in_transaction(
