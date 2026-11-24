@@ -34,7 +34,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T22 | A | TODO | | | |
 | T23 | A | TODO | | | |
 | T24 | B | DONE | `task/T24-batch-commit` | `pytest tests/integration/test_commit_postgres.py` (1/1 PASS trên Postgres thật, 4.02s), `pytest tests/unit` (72/72 PASS), `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff` (T24 files PASS) | `src/n06/storage/{commit.py,control_store.py}`, `tests/{unit/storage,integration}/` |
-| T25 | B | TODO | | | |
+| T25 | B | TODO | | | T25 phải dùng `require_unused_run_prefix` (`src/n06/storage/commit.py`) với bản liệt kê object S3 thật trước khi ghi một run, và `build_run_output_path` theo ADR-0002; bản S3 thật do T25 cung cấp |
 | T26 | C | TODO | | | |
 | T30 | B | TODO | | | |
 | T31 | B | TODO | | | |

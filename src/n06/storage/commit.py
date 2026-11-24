@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date
 from typing import Any
 
@@ -28,21 +29,68 @@ def generate_run_id() -> str:
     return f"run-{uuid.uuid4().hex}"
 
 
+# Mẫu thành phần đường dẫn theo ADR-0002 ("Quy ước chung").
+_DATASET_ID_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
+_ENTITY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def _run_prefix(tier_prefix: str, *, dataset_id: str, entity: str, run_id: str) -> str:
+    """Gốc của một run: `<tier_prefix>/<dataset_id>/<entity>/run_id=<run_id>` (ADR-0002 mục 3).
+
+    `tier_prefix` đã gồm tiền tố của tầng (`paths.silver_prefix`, `gold_prefix` hoặc
+    `quarantine_prefix`), có thể là URI `s3a://<bucket>/<prefix>`.
+    """
+    if not tier_prefix.strip("/"):
+        raise ValueError("tier_prefix không được rỗng")
+    for name, value, pattern in (
+        ("dataset_id", dataset_id, _DATASET_ID_RE),
+        ("entity", entity, _ENTITY_RE),
+        ("run_id", run_id, _RUN_ID_RE),
+    ):
+        if not pattern.fullmatch(value):
+            raise ValueError(f"{name} không hợp lệ theo ADR-0002: {value!r}")
+    return f"{tier_prefix.rstrip('/')}/{dataset_id}/{entity}/run_id={run_id}"
+
+
 def build_run_output_path(
-    base_prefix: str,
+    tier_prefix: str,
     *,
     dataset_id: str,
-    layer: str,
     entity: str,
     run_id: str,
     business_date: date | str,
 ) -> str:
-    """Tạo đường dẫn output bất biến cô lập theo `run_id` và `business_date`."""
-    if not run_id or "/" in run_id:
-        raise ValueError(f"run_id không hợp lệ: {run_id!r}")
-    clean_prefix = base_prefix.rstrip("/")
-    biz_date = _normalize_date(business_date).isoformat()
-    return f"{clean_prefix}/{dataset_id}/{layer}/{entity}/run_id={run_id}/business_date={biz_date}"
+    """Đường dẫn partition bất biến của một run (ADR-0002 mục 3).
+
+    Dạng `<tier_prefix>/<dataset_id>/<entity>/run_id=<run_id>/business_date=<YYYY-MM-DD>`.
+    Tầng nằm trong `tier_prefix`, không còn là một đoạn riêng của đường dẫn.
+    """
+    root = _run_prefix(tier_prefix, dataset_id=dataset_id, entity=entity, run_id=run_id)
+    return f"{root}/business_date={_normalize_date(business_date).isoformat()}"
+
+
+def require_unused_run_prefix(
+    list_objects: Callable[[str], Iterable[str]],
+    tier_prefix: str,
+    *,
+    dataset_id: str,
+    entity: str,
+    run_id: str,
+) -> None:
+    """Báo lỗi nếu đã có object dưới gốc `run_id=<run_id>/` (ADR-0002 mục 6).
+
+    Phải gọi trước khi ghi bất kỳ object nào của run. `list_objects(prefix)` trả các khóa object
+    dưới `prefix`; bản S3 thật do bên ghi dữ liệu (T25) cung cấp. Prefix liệt kê kết thúc bằng
+    `/` để `run_id=run-1` không trùng với `run_id=run-10`.
+    """
+    prefix = _run_prefix(tier_prefix, dataset_id=dataset_id, entity=entity, run_id=run_id) + "/"
+    existing = next(iter(list_objects(prefix)), None)
+    if existing is not None:
+        raise CommitError(
+            f"Đường dẫn của run đã có object (ví dụ {existing!r}); không được ghi vào run_id "
+            f"đã tồn tại: {prefix}"
+        )
 
 
 def compute_semantic_hash(

@@ -5,6 +5,7 @@ from n06.storage.commit import (
     build_run_output_path,
     compute_semantic_hash,
     generate_run_id,
+    require_unused_run_prefix,
 )
 from n06.storage.control_store import (
     COMMITTED_RUN_STATUSES,
@@ -40,4 +41,5 @@ __all__ = [
     "connect_control_store",
     "generate_run_id",
     "make_compose_psql_runner",
+    "require_unused_run_prefix",
 ]

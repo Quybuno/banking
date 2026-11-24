@@ -24,6 +24,7 @@ from n06.storage import (
     SnapshotRecord,
     build_run_output_path,
     compute_semantic_hash,
+    require_unused_run_prefix,
 )
 
 
@@ -170,20 +171,61 @@ class _InMemoryControlStore:
         ]
 
 
-def test_build_run_output_path_and_independent_semantic_hash() -> None:
+def test_build_run_output_path_follows_adr_0002() -> None:
+    # Expected viết tay theo ADR-0002 mục 3, không lấy từ chính hàm đang test.
     path = build_run_output_path(
-        "s3a://n06-test-bucket/lakehouse/",
+        "s3a://n06-test-bucket/silver/",
         dataset_id="ds-alpha",
-        layer="silver",
         entity="transactions",
         run_id="run-001",
         business_date="2026-01-01",
     )
     assert path == (
-        "s3a://n06-test-bucket/lakehouse/ds-alpha/silver/transactions"
-        "/run_id=run-001/business_date=2026-01-01"
+        "s3a://n06-test-bucket/silver/ds-alpha/transactions/run_id=run-001/business_date=2026-01-01"
     )
+    # Tầng nằm trong tier_prefix: đổi sang gold không thêm đoạn nào khác.
+    gold = build_run_output_path(
+        "gold",
+        dataset_id="ds-alpha",
+        entity="fact_transactions",
+        run_id="run-001",
+        business_date=date(2026, 1, 1),
+    )
+    assert gold == "gold/ds-alpha/fact_transactions/run_id=run-001/business_date=2026-01-01"
 
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"dataset_id": "DS-alpha"},
+        {"dataset_id": "ds"},
+        {"entity": "fact-transactions"},
+        {"entity": "a/b"},
+        {"entity": ""},
+        {"run_id": "run/1"},
+        {"run_id": ""},
+        {"run_id": "-run"},
+        {"run_id": "run 1"},
+        {"business_date": "2026-13-01"},
+        {"tier_prefix": ""},
+        {"tier_prefix": "/"},
+    ],
+)
+def test_build_run_output_path_rejects_invalid_components(overrides: dict[str, str]) -> None:
+    kwargs: dict[str, str] = {
+        "tier_prefix": "silver",
+        "dataset_id": "ds-alpha",
+        "entity": "transactions",
+        "run_id": "run-001",
+        "business_date": "2026-01-01",
+    }
+    kwargs.update(overrides)
+    tier_prefix = kwargs.pop("tier_prefix")
+    with pytest.raises(ValueError):
+        build_run_output_path(tier_prefix, **kwargs)  # type: ignore[arg-type]
+
+
+def test_semantic_hash_is_independent_of_output_path() -> None:
     # Expected semantic hash tính độc lập theo chuẩn JSON canonical + SHA-256
     expected_payload = (
         '{"business_date":"2026-01-01","code_version":"abc123","config_hash":"cfg1",'
@@ -193,32 +235,81 @@ def test_build_run_output_path_and_independent_semantic_hash() -> None:
     )
     expected_hash = hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
 
-    h1 = compute_semantic_hash(
-        dataset_id="ds-alpha",
-        layer="silver",
-        entity="transactions",
-        business_date=date(2026, 1, 1),
-        input_versions=["b1", "b2"],
-        config_hash="cfg1",
-        schema_version="1.0.0",
-        rule_version="1.0.0",
-        code_version="abc123",
-        payload_digest="sha256:deadbeef",
+    def _hash(business_date: date | str) -> str:
+        return compute_semantic_hash(
+            dataset_id="ds-alpha",
+            layer="silver",
+            entity="transactions",
+            business_date=business_date,
+            input_versions=["b1", "b2"],
+            config_hash="cfg1",
+            schema_version="1.0.0",
+            rule_version="1.0.0",
+            code_version="abc123",
+            payload_digest="sha256:deadbeef",
+        )
+
+    # Cùng input, cấu hình và phiên bản nhưng đường dẫn khác hẳn (run_id và tiền tố khác):
+    # semantic hash phải giữ nguyên (đặc tả mục 8.1 bước 6: run_id/đường dẫn là dữ liệu vận hành).
+    paths = [
+        build_run_output_path(
+            "s3a://n06-test-bucket/silver",
+            dataset_id="ds-alpha",
+            entity="transactions",
+            run_id="run-001",
+            business_date="2026-01-01",
+        ),
+        build_run_output_path(
+            "s3a://other-bucket/test-silver",
+            dataset_id="ds-alpha",
+            entity="transactions",
+            run_id="run-002",
+            business_date=date(2026, 1, 1),
+        ),
+    ]
+    assert paths[0] != paths[1]
+    hashes = [_hash("2026-01-01"), _hash(date(2026, 1, 1))]
+    assert hashes == [expected_hash, expected_hash]
+    assert expected_hash != _hash("2026-01-02")  # business_date có trong hash, đường dẫn thì không
+
+
+def test_require_unused_run_prefix_passes_when_run_has_no_object() -> None:
+    seen: list[str] = []
+
+    def lister(prefix: str) -> list[str]:
+        seen.append(prefix)
+        # Chỉ có object của run khác, kể cả run có tên bắt đầu bằng cùng chuỗi.
+        other = "silver/ds-alpha/transactions/run_id=run-10/business_date=2026-01-01/part-0.parquet"
+        keys = [other]
+        return [k for k in keys if k.startswith(prefix)]
+
+    require_unused_run_prefix(
+        lister, "silver", dataset_id="ds-alpha", entity="transactions", run_id="run-1"
     )
-    h2 = compute_semantic_hash(
-        dataset_id="ds-alpha",
-        layer="silver",
-        entity="transactions",
-        business_date="2026-01-01",
-        input_versions=["b1", "b2"],
-        config_hash="cfg1",
-        schema_version="1.0.0",
-        rule_version="1.0.0",
-        code_version="abc123",
-        payload_digest="sha256:deadbeef",
-    )
-    assert h1 == expected_hash
-    assert h2 == expected_hash
+    # Prefix liệt kê viết tay theo ADR-0002: kết thúc bằng "/" để run-1 không khớp run-10.
+    assert seen == ["silver/ds-alpha/transactions/run_id=run-1/"]
+
+
+def test_require_unused_run_prefix_rejects_run_that_already_has_objects() -> None:
+    existing = "silver/ds-alpha/transactions/run_id=run-1/business_date=2026-01-01/part-0.parquet"
+
+    def lister(prefix: str) -> list[str]:
+        return [existing] if existing.startswith(prefix) else []
+
+    with pytest.raises(CommitError, match="đã có object"):
+        require_unused_run_prefix(
+            lister, "silver", dataset_id="ds-alpha", entity="transactions", run_id="run-1"
+        )
+
+
+def test_require_unused_run_prefix_rejects_invalid_run_id_before_listing() -> None:
+    def lister(prefix: str) -> list[str]:
+        raise AssertionError("không được liệt kê khi tham số không hợp lệ")
+
+    with pytest.raises(ValueError):
+        require_unused_run_prefix(
+            lister, "silver", dataset_id="ds-alpha", entity="transactions", run_id="../x"
+        )
 
 
 def test_running_and_failed_runs_never_exposed_by_reader() -> None:
