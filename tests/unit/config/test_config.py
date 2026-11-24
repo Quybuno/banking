@@ -254,3 +254,22 @@ def test_no_config_file_contains_passwords_or_secrets(tmp_path: Path) -> None:
     with pytest.raises(ConfigValidationError) as exc_info:
         load_config(profile="demo", config_dir=tmp_path, env=_valid_secret_env())
     assert exc_info.value.field_path == "postgres.mart.password"
+
+
+@pytest.mark.parametrize(
+    ("profile", "bucket", "endpoint"),
+    [
+        # Expected viết tay theo ADR-0002 (mục 1 và mục 5), không đọc lại từ file cấu hình.
+        ("default", "n06-lakehouse", "http://minio:9000"),
+        ("demo", "n06-lakehouse", "http://minio:9000"),
+        ("benchmark", "n06-benchmark-lakehouse", "http://minio:9000"),
+        ("test", "n06-test-lakehouse", "http://localhost:19000"),
+    ],
+)
+def test_object_store_bucket_and_endpoint_per_profile(
+    profile: str, bucket: str, endpoint: str
+) -> None:
+    """Chỉ profile benchmark dùng bucket riêng; endpoint của benchmark giữ nguyên như default."""
+    cfg = load_config(profile=profile, env=_valid_secret_env())
+    assert cfg.object_store.bucket == bucket
+    assert cfg.object_store.endpoint == endpoint
