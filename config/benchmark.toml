@@ -2,6 +2,11 @@
 
 profile = "benchmark"
 
+[object_store]
+# ADR-0002 mục 5: pipeline đầy đủ khi đo (E1-E3, E5) dùng bucket riêng để Raw/Bronze/Silver/Gold
+# của lần đo không lẫn dữ liệu nghiệp vụ. Endpoint giữ nguyên theo default.toml.
+bucket = "n06-benchmark-lakehouse"
+
 [services]
 airflow_enabled = false
 metabase_enabled = false
