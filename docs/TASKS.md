@@ -85,7 +85,7 @@ Ký hiệu: **Đọc** = mục đặc tả agent phải đọc; **Phụ thuộc*
 | T22 | A | `n06 stream`: một query `foreachBatch` ghi Raw + Bronze theo `batch_id`, upsert `ingest_batches`; `n06 wait-ingestion` | I.6, I.8.1 (streaming) | T20, T21 | kill tiến trình giữa batch rồi chạy lại: không có dòng `ingest_batches` trùng, đường dẫn bị ghi đè đúng |
 | T23 | A | `n06 ingest-statements`: đưa file sao kê lên MinIO theo lịch giao, manifest từng batch | II.4, II.7 | T13, T21 | không file nào xuất hiện trước `file_available_at` theo đồng hồ giả lập |
 | T24 | B | Thư viện commit batch: ghi theo `run_id`, cập nhật `current_snapshot` trong một transaction, reader chỉ đọc snapshot hiện hành | I.8.1 (batch) | T21 | test: run thất bại không bị đọc; hai run cùng input cho cùng semantic hash |
-| T25 | B | `n06 process-day` bản sạch: Bronze → Silver (dedup cơ bản) → đối soát MATCHED → Gold | I.6, I.7.1 | T22, T23, T24 | dataset clean nhỏ: mọi khóa MATCHED; tổng khớp control report |
+| T25 | B | `n06 process-day` bản sạch: Bronze → Silver (dedup cơ bản) → đối soát MATCHED → Gold. **Bắt buộc** gọi `require_unused_run_prefix` (`src/n06/storage/commit.py`) với bản liệt kê object S3 thật trước khi ghi bất kỳ object nào của một run, và dựng đường dẫn bằng `build_run_output_path` (ADR-0002 mục 3 và 6) | I.6, I.7.1 | T22, T23, T24 | dataset clean nhỏ: mọi khóa MATCHED; tổng khớp control report; ghi vào `run_id` đã có object thì báo lỗi |
 | T26 | C | `n06 load-mart` tối thiểu: một bảng mart qua staging + một transaction | I.8.2 | T25 | chạy hai lần không tăng số dòng |
 
 **Cổng M2**: tập nhỏ toàn bộ MATCHED; count/total theo ngày/currency khớp control report; chạy lại không tăng count; có lineage nguồn.
