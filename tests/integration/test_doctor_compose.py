@@ -50,6 +50,13 @@ def test_doctor_detects_stopped_compose_service_and_recovers() -> None:
     )
     assert up_res.returncode == 0, f"Không khởi động được Compose core: {up_res.stderr}"
 
+    # 1b. `doctor` kiểm bucket của profile (T03b) nên phải chạy lại `init-local` sau khi MinIO đã
+    # chạy để tạo bucket (lần chạy đầu có thể xảy ra lúc MinIO chưa lên). Chạy lại là an toàn.
+    bucket_out = io.StringIO()
+    assert main(["init-local", "--profile", "demo", "--require-buckets"], out=bucket_out) == 0, (
+        f"init-local không tạo được bucket:\n{bucket_out.getvalue()}"
+    )
+
     # 2. Chạy `n06 doctor` khi cả 4 service đang healthy -> exit code = 0
     out_healthy = io.StringIO()
     code_healthy = main(["doctor", "--profile", "demo"], out=out_healthy)

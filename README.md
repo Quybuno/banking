@@ -59,13 +59,30 @@ Sau khi cài đặt gói (`uv sync --extra dev` hoặc `pip install -e ".[dev]"`
 # Xem danh sách lệnh và bảng mã thoát
 n06 --help
 
-# Sinh file .env cục bộ từ .env.example với secret ngẫu nhiên an toàn (không lộ secret ra màn hình)
+# Sinh file .env cục bộ từ .env.example với secret ngẫu nhiên an toàn (không lộ secret ra màn hình),
+# rồi tạo bucket object store của profile (object_store.bucket; chạy lại an toàn, không đổi gì).
 n06 init-local --profile demo
+n06 init-local --profile demo --require-buckets   # thoát mã 14 nếu bucket chưa sẵn sàng
+n06 init-local --profile demo --skip-buckets      # chỉ sinh .env
 
-# Kiểm tra toàn diện cấu hình, Python 3.11, CPU/RAM/disk, Docker và 4 service (kafka, minio, postgres, spark)
+# Kiểm tra toàn diện cấu hình, Python 3.11, CPU/RAM/disk, Docker, 4 service (kafka, minio, postgres, spark)
+# và bucket object store của profile (báo đúng tên bucket thiếu)
 n06 doctor --profile demo
 n06 doctor --profile demo --json
 ```
+
+**Chuỗi lệnh trên máy mới** (đây là thứ tự đã chạy thực tế; MinIO chưa chạy ở bước 1 nên không tạo được bucket):
+
+```bash
+n06 init-local --profile demo                      # 1. lần 1: sinh .env; bucket "unreachable" (thoát 0 kèm cảnh báo)
+docker compose --profile core up -d --wait         # 2. khởi động hạ tầng
+n06 init-local --profile demo --require-buckets    # 3. lần 2: giữ nguyên .env, tạo bucket; thoát 14 nếu chưa sẵn sàng
+n06 doctor --profile demo                          # 4. kiểm tra toàn bộ, gồm bucket
+```
+
+Chạy `doctor` khi MinIO đã chạy mà bucket chưa được tạo sẽ báo `bucket.<tên>` thiếu với mã `14`; chạy lại bước 3 là đủ. Kịch bản nghiệm thu mẫu trong đặc tả liệt kê `doctor` trước `init-local` (Phần I, mục 12) và không có bước `compose up`; trên máy mới hãy dùng chuỗi ở trên.
+
+**Giới hạn chưa kiểm của bước tạo bucket:** chỉ hỗ trợ path-style (`object_store.path_style_access = true`, kiểu virtual-hosted bị từ chối bằng lỗi cấu hình); chưa thử endpoint `https`; mới thử region `us-east-1` và `eu-west-1` trên MinIO thật (region lấy từ cấu hình và dùng để ký; chưa thử region nào khác và chưa thử trên AWS S3 thật).
 
 ### Bảng mã thoát (`ExitCode`) của `n06`
 
@@ -77,7 +94,7 @@ n06 doctor --profile demo --json
 | `11` | `PYTHON_ENV_ERROR` | Phiên bản Python không thuộc nhánh `3.11.x` theo `ADR-0001` |
 | `12` | `RESOURCE_ERROR` | Tài nguyên máy chủ thấp hơn ngưỡng tối thiểu (`CPU >= 2 cores`, `RAM >= 4.0 GiB`, `Disk trống >= 5.0 GiB`) |
 | `13` | `DOCKER_ERROR` | Thiếu Docker CLI, thiếu plugin `docker compose`, hoặc Docker daemon chưa chạy |
-| `14` | `SERVICE_ERROR` | Một hoặc nhiều service (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, hoặc không mở port |
+| `14` | `SERVICE_ERROR` | Một hoặc nhiều service (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, hoặc không mở port; bucket object store thiếu hoặc bị từ chối (`doctor`); `init-local` không tạo được bucket |
 
 ### Giới hạn tài nguyên máy thực tế (Milestone M0)
 

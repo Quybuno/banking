@@ -19,7 +19,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
@@ -27,6 +27,15 @@ from typing import Any, TextIO
 from urllib.parse import urlparse
 
 from n06.cli.init_local import parse_dotenv_file
+from n06.cli.object_store import (
+    STATUS_EXISTS,
+    STATUS_MISSING,
+    BucketResult,
+    ObjectStoreConfigError,
+    ObjectStoreTarget,
+    head_bucket,
+    target_from_config,
+)
 from n06.config import (
     DEFAULT_CONFIG_DIR,
     REPO_ROOT,
@@ -603,6 +612,73 @@ def check_services(
     return results
 
 
+def check_object_store_buckets(
+    *,
+    cfg: AppConfig,
+    merged_env: Mapping[str, str],
+    config_dir: Path | None = None,
+    prober: Callable[[ObjectStoreTarget, str], BucketResult] | None = None,
+) -> list[CheckItem]:
+    """Kiểm bucket object store của profile đang dùng (`object_store.bucket`) có tồn tại không.
+
+    Báo đúng tên bucket thiếu; không in secret (lỗi chỉ gồm mã HTTP và mã lỗi S3).
+    """
+    bucket = cfg.object_store.bucket
+    check_id = f"bucket.{bucket}"
+    probe = prober if prober is not None else head_bucket
+    try:
+        target = target_from_config(cfg, merged_env, config_dir=config_dir)
+        result = probe(target, bucket)
+    except ObjectStoreConfigError as exc:
+        return [
+            CheckItem(
+                check_id=check_id,
+                category="bucket",
+                passed=False,
+                exit_code=int(ExitCode.CONFIG_ERROR),
+                summary=f"Cấu hình bucket '{bucket}' không hợp lệ",
+                detail=str(exc),
+            )
+        ]
+
+    if result.status == STATUS_EXISTS:
+        return [
+            CheckItem(
+                check_id=check_id,
+                category="bucket",
+                passed=True,
+                exit_code=int(ExitCode.OK),
+                summary=f"Bucket '{bucket}' đã tồn tại (profile={cfg.profile})",
+                detail=result.detail,
+            )
+        ]
+    if result.status == STATUS_MISSING:
+        return [
+            CheckItem(
+                check_id=check_id,
+                category="bucket",
+                passed=False,
+                exit_code=int(ExitCode.SERVICE_ERROR),
+                summary=f"Bucket '{bucket}' chưa tồn tại (profile={cfg.profile})",
+                detail=(
+                    f"Bucket '{bucket}' do cấu hình của profile '{cfg.profile}' định nghĩa "
+                    f"chưa được tạo. Chạy `n06 init-local --profile {cfg.profile}` "
+                    "(an toàn khi chạy lại)."
+                ),
+            )
+        ]
+    return [
+        CheckItem(
+            check_id=check_id,
+            category="bucket",
+            passed=False,
+            exit_code=int(ExitCode.SERVICE_ERROR),
+            summary=f"Không kiểm được bucket '{bucket}' (profile={cfg.profile})",
+            detail=result.detail,
+        )
+    ]
+
+
 def build_doctor_report(
     *,
     profile: str | None = None,
@@ -613,6 +689,7 @@ def build_doctor_report(
     resource_snapshot: SystemResourceSnapshot | None = None,
     thresholds: ResourceThresholds | None = None,
     skip_services: bool = False,
+    bucket_prober: Callable[[ObjectStoreTarget, str], BucketResult] | None = None,
 ) -> DoctorReport:
     """Thực hiện toàn bộ chuỗi kiểm tra của `n06 doctor` và trả về `DoctorReport`."""
     resolved_env_file = env_file if env_file is not None else (REPO_ROOT / ".env")
@@ -658,6 +735,16 @@ def build_doctor_report(
                 config_dir=config_dir,
             )
             checks.extend(svc_checks)
+            # 4. Bucket của profile: chỉ kiểm khi MinIO đã ổn (nếu không thì lỗi đã được báo ở trên)
+            if any(c.check_id == "service.minio" and c.passed for c in svc_checks):
+                checks.extend(
+                    check_object_store_buckets(
+                        cfg=loaded_cfg,
+                        merged_env=merged_env,
+                        config_dir=config_dir,
+                        prober=bucket_prober,
+                    )
+                )
 
     # Đảm bảo không có bất kỳ chuỗi secret nào lọt vào summary/detail của các CheckItem
     sanitized_checks: list[CheckItem] = []
