@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "N06 — Pipeline dữ liệu lớn cho giao dịch ngân hàng mô phỏng"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-dependencies = []
+dependencies = ["confluent-kafka==2.16.2"]
 
 [project.optional-dependencies]
 dev = [
