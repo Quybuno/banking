@@ -354,3 +354,73 @@ def test_symlink_pointing_outside_the_source_directory_is_rejected(
     (root / "manifests" / "evil.manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(SourceDataError):
         discover_event_files(root)
+
+
+# --- Tên file có dãy chữ số bất thường (review vòng hai) ---------------------------------------
+
+
+def _add_listed_event(root: Path, name: str, data: bytes) -> None:
+    """Thêm một mục manifest trỏ tới `events/<name>` mà không cần file đó tồn tại được trên đĩa."""
+    import hashlib
+    import uuid
+
+    manifest = {
+        "schema_version": "1.0.0",
+        "dataset_id": "n06-unit-test",
+        "source_batch_id": str(uuid.uuid4()),
+        "files": [
+            {
+                "path": f"events/{name}",
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "physical_rows": 1,
+            }
+        ],
+    }
+    (root / "manifests" / f"extra_{uuid.uuid4().hex}.manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+
+def test_manifest_path_with_huge_digit_run_exits_10_without_traceback(
+    tmp_path: Path, make_source: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name, value in CREDENTIALS.items():
+        monkeypatch.setenv(name, value)
+    line = line_of(tx_event("t1", "a", "b"))
+    root = make_source([[line]])
+    _add_listed_event(root, "e_" + "9" * 5000 + ".jsonl", line + b"\n")
+    env_file = tmp_path / "e.env"
+    env_file.write_text("", encoding="utf-8")
+    producer = FakeProducer()
+    out = io.StringIO()
+    code = run_publish(
+        profile="test",
+        env_file=env_file,
+        source_dir=root,
+        out=out,
+        broker_factory=lambda _bootstrap: FakeBroker(partitions=1),
+        producer_factory=lambda _config: producer,
+        as_json=True,
+    )
+    payload = json.loads(out.getvalue())
+    assert code == 10 and payload["ok"] is False, out.getvalue()
+    assert producer.calls == []  # chưa gửi message nào
+
+
+def test_names_differing_only_in_leading_zeros_have_a_fixed_order(
+    make_source: Callable[..., Path],
+) -> None:
+    line = line_of(tx_event("t1", "a", "b"))
+    root = make_source([[line]])
+    data = line + b"\n"
+    for name in ("batch_1.jsonl", "batch_01.jsonl", "batch_2.jsonl", "batch_10.jsonl"):
+        (root / "events" / name).write_bytes(data)
+        _add_listed_event(root, name, data)
+    order = [f.relative_path for f in discover_event_files(root).files]
+    batches = [p for p in order if p.startswith("events/batch_")]
+    assert batches == [
+        "events/batch_01.jsonl",
+        "events/batch_1.jsonl",
+        "events/batch_2.jsonl",
+        "events/batch_10.jsonl",
+    ]

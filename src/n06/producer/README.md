@@ -40,7 +40,7 @@ Lệnh CLI nằm ở `src/n06/cli/publish.py`: `n06 publish [--source-dir DIR] [
    file vẫn lấy nguyên từ manifest. `accounts.jsonl`, `control_report.json` và sao kê không được phát.
    Tiền tố thư mục manifest và nguồn là `--manifests-dir` và `--source-dir`. Mặc định được test chống lệch
    với `DEFAULT_LAYOUT` của generator T13.
-2. **Thứ tự phát theo số shard (sắp tự nhiên).** File được sắp theo khóa tự nhiên của đường dẫn (các dãy chữ số so sánh như số), nên `events_batch_99999` đứng trước `events_batch_100000` và tên không đệm 0 vẫn đúng thứ tự (trước đây sắp theo chuỗi sẽ sai im lặng từ shard 100000). Các ca biên được kiểm trong `tests/unit/publish/test_source_shard_order.py`.
+2. **Thứ tự phát theo số shard (sắp tự nhiên).** File được sắp theo khóa tự nhiên của đường dẫn (các dãy chữ số so sánh như số), nên `events_batch_99999` đứng trước `events_batch_100000` và tên không đệm 0 vẫn đúng thứ tự (trước đây sắp theo chuỗi sẽ sai im lặng từ shard 100000). Hai tên chỉ khác số 0 đầu (`events_batch_01` và `events_batch_1`) coi là cùng số shard và được phá hòa theo chuỗi đường dẫn; tên của T13 (5 chữ số cố định) không rơi vào ca này. Các ca biên được kiểm trong `tests/unit/publish/test_source_shard_order.py`.
 
 ## Chạy test và đọc kết quả
 

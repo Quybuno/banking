@@ -343,7 +343,6 @@ def test_real_producer_is_idempotent_on_the_broker_and_control_is_not(
         topic,
         {"bootstrap.servers": bootstrap, "enable.idempotence": False, "acks": "all"},
     )
-    assert control.get("idemp_state") != "Assigned" and control.get("producer_id", -1) == -1, (
-        control
-    )
+    # Dựa vào hành vi của librdkafka (không phát khối `eos` khi tắt idempotence), không phải một
+    # bảo đảm trong hợp đồng: nếu nâng phiên bản confluent-kafka làm assert này fail, xem lại.
     assert control == {}, f"Producer đối chứng không được có khối eos: {control}"

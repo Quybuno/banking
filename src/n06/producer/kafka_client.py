@@ -14,7 +14,7 @@ from n06.producer.errors import BrokerUnavailableError, PublishConfigError
 
 CLIENT_ID = "n06-publish"
 # Mặc định của thư viện; `n06 publish` luôn truyền giá trị từ `config/` (producer.*), và
-# `tests/unit/publish/test_config_defaults.py` khẳng định hai bên không lệch nhau.
+# `tests/unit/publish/test_review_fixes.py` khẳng định hai bên không lệch nhau.
 DEFAULT_METADATA_TIMEOUT_SECONDS = 10.0
 DEFAULT_LEADER_WAIT_SECONDS = 20.0
 RETRY_SLEEP_SECONDS = 0.2
