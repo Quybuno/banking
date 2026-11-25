@@ -23,7 +23,7 @@
 | `11` | `PYTHON_ENV_ERROR` | Phiên bản Python không thuộc nhánh `3.11.x` theo `ADR-0001` |
 | `12` | `RESOURCE_ERROR` | Tài nguyên máy chủ (CPU cores, RAM, hoặc ổ đĩa trống) thấp hơn ngưỡng tối thiểu; lỗi ghi đĩa khi `generate` đang sinh dữ liệu |
 | `13` | `DOCKER_ERROR` | Thiếu Docker CLI, thiếu plugin `docker compose`, hoặc Docker daemon chưa chạy |
-| `14` | `SERVICE_ERROR` | Một hoặc nhiều service hạ tầng (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, hoặc không mở kết nối port |
+| `14` | `SERVICE_ERROR` | Một hoặc nhiều service hạ tầng (`kafka`, `minio`, `postgres`, `spark`) đang tắt, `unhealthy`, không mở được cổng, im lặng, trả sai giao thức hoặc quá hạn; bucket object store thiếu, bị từ chối hoặc không kiểm được |
 | `15` | `KAFKA_DELIVERY_ERROR` | Lỗi giao nhận Kafka khi `publish` (không retry được) |
 | `16` | `CAPACITY_ERROR` | Từ chối vì không đủ dung lượng ổ đĩa, không xác định được ổ chứa dữ liệu, hoặc vượt `limits.max_transactions` (`generate`, `doctor`) |
 
@@ -62,3 +62,12 @@
 - `n06 generate` dùng hệ thống cấu hình chung nên vẫn đòi đủ 6 credential trong `.env` hoặc môi trường dù lệnh này không dùng chúng; chưa nới.
 - Giới hạn chưa kiểm: khi đích ghi nằm ở ổ khác với ổ chứa đĩa ảo (ví dụ `--out /mnt/c/...` còn Docker nằm ổ D), ước lượng gộp `pipeline_bytes_per_tx` (khi đã đo) vẫn chỉ so với ổ của đích, trong khi Kafka, MinIO và Postgres ghi vào ổ chứa đĩa ảo Docker; hiện vô hại vì phần pipeline chưa đo.
 - Giới hạn chưa kiểm: Docker Desktop có thể đặt đĩa ảo của nó trên ổ khác với đĩa ảo WSL của distro; guard chỉ đọc một ổ (ổ chứa distro, hoặc `limits.disk_probe_path`). Trên máy này hai đĩa ảo cùng nằm trên ổ D.
+
+## Probe dịch vụ của `n06 doctor`
+
+- Probe không ném lỗi mạng: dịch vụ từ chối kết nối, quá thời gian, ngắt kết nối, trả lời sai, tên host không mã hóa được, hay cổng ngoài miền tới được probe đều là FAIL mã `14` kèm tên dịch vụ. Lỗi lập trình (ngoại lệ khác) vẫn nổi lên.
+- Lỗi **suy địa chỉ từ cấu hình** (`N06_*_HOST_PORT` không phải số, `object_store.endpoint` hỏng hoặc cổng ngoài miền) là mã `10` cho cả bốn dịch vụ, thông báo nêu tên biến hoặc trường sai. Biến cổng rỗng dùng giá trị mặc định.
+- MinIO và Spark: HTTP GET, mã 2xx; **không dùng `http_proxy` của môi trường** và không đi theo chuyển hướng. Kafka: bắt tay `ApiVersions` phiên bản 0. PostgreSQL: gửi `SSLRequest`, chờ đúng một byte `S` hoặc `N`. Chỉ mở được cổng TCP **không** đủ để coi dịch vụ sống.
+- Bucket: `HEAD` có ký.
+- Thời gian: mỗi thao tác socket chờ 2-5 giây, mỗi probe có hạn tổng 8 giây (cố định trong mã), nên dịch vụ nhỏ giọt từng byte không treo được `doctor`.
+- Giới hạn: probe PostgreSQL không xác thực nên không chứng minh DB nhận được truy vấn; listener TLS/SASL của Kafka chưa kiểm (Compose chỉ dùng PLAINTEXT); khi `docker compose ps` thất bại, mọi service bị báo "chưa được tạo".

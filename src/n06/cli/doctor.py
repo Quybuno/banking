@@ -11,23 +11,27 @@ Các nguyên tắc bắt buộc:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, TextIO
-from urllib.parse import urlparse
+from typing import Any, TextIO, TypeVar
+from urllib.parse import urlparse, urlsplit
 
 from n06.cli.init_local import parse_dotenv_file
 from n06.cli.object_store import (
+    STATUS_ERROR,
     STATUS_EXISTS,
     STATUS_MISSING,
     BucketResult,
@@ -456,26 +460,170 @@ def _get_compose_service_states(
     return states
 
 
-def _probe_tcp(host: str, port: int, timeout_sec: float = 2.0) -> tuple[bool, str]:
-    """Kiểm tra kết nối TCP tới `(host, port)`."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout_sec):
-            return True, f"Kết nối TCP {host}:{port} thành công"
-    except OSError as exc:
-        return False, f"Không kết nối được TCP {host}:{port} ({exc})"
+class ProbeProtocolError(OSError):
+    """Dịch vụ nhận kết nối nhưng không trả lời đúng giao thức."""
 
 
-def _probe_http(url: str, timeout_sec: float = 2.5) -> tuple[bool, str]:
-    """Kiểm tra HTTP GET endpoint trả về mã 2xx."""
-    req = urllib.request.Request(url, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            status = getattr(resp, "status", 200)
-            if 200 <= status < 300:
-                return True, f"HTTP GET {url} -> {status} OK"
-            return False, f"HTTP GET {url} trả về mã {status}"
-    except urllib.error.URLError as exc:
-        return False, f"Không gọi được HTTP {url} ({exc})"
+# Mọi lỗi một probe mạng có thể gây ra: socket và HTTP; tên host không mã hóa được (UnicodeError
+# là ValueError); URL hỏng (ValueError); cổng ngoài miền (OverflowError).
+_PROBE_ERRORS = (OSError, http.client.HTTPException, ValueError, OverflowError)
+# Hạn tổng của một probe. Thời gian chờ socket chỉ áp cho từng thao tác, nên dịch vụ nhỏ giọt
+# từng byte có thể giữ probe rất lâu nếu không có hạn tổng.
+PROBE_DEADLINE_SECONDS = 8.0
+_MAX_ERROR_TEXT = 200
+_T = TypeVar("_T")
+
+
+def _describe_error(exc: BaseException) -> str:
+    """Tên loại lỗi và nội dung đã bỏ ký tự điều khiển (nội dung có thể do máy chủ gửi)."""
+    text = "".join(ch if ch.isprintable() else "?" for ch in str(exc))[:_MAX_ERROR_TEXT]
+    return f"{type(exc).__name__}: {text}"
+
+
+def _call_with_deadline(function: Callable[[], _T], deadline_sec: float) -> tuple[bool, _T | None]:
+    """Chạy `function` trong luồng nền; trả `(False, None)` nếu quá `deadline_sec`.
+
+    Ngoại lệ của `function` được ném lại ở luồng gọi. Luồng quá hạn là daemon và bị bỏ lại.
+    """
+    values: list[_T] = []
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            values.append(function())
+        except BaseException as exc:  # chuyển nguyên về luồng gọi
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(deadline_sec)
+    if thread.is_alive():
+        return False, None
+    if errors:
+        raise errors[0]
+    return True, values[0]
+
+
+# PostgreSQL `SSLRequest` (độ dài 8, mã 80877103): máy chủ trả đúng một byte `S` hoặc `N`.
+_POSTGRES_SSL_REQUEST = struct.pack("!ii", 8, 80877103)
+# Kafka `ApiVersions` (api_key 18) phiên bản 0: phản hồi lặp lại correlation_id rồi mã lỗi.
+_KAFKA_API_VERSIONS_KEY = 18
+_KAFKA_CORRELATION_ID = 0x4E3036
+_KAFKA_CLIENT_ID = b"n06-doctor"
+
+
+def _recv_exactly(sock: socket.socket, size: int) -> bytes:
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise ProbeProtocolError("dịch vụ đóng kết nối trước khi trả lời đủ")
+        data += chunk
+    return data
+
+
+def _postgres_handshake(sock: socket.socket) -> None:
+    sock.sendall(_POSTGRES_SSL_REQUEST)
+    # Máy chủ PostgreSQL trả đúng MỘT byte. Đọc dư để dịch vụ khác trả chuỗi bắt đầu bằng `S`
+    # (ví dụ SSH) không được coi là PostgreSQL.
+    reply = sock.recv(64)
+    if reply not in (b"S", b"N"):
+        raise ProbeProtocolError("phản hồi không phải của PostgreSQL")
+
+
+def _kafka_handshake(sock: socket.socket) -> None:
+    body = (
+        struct.pack(
+            "!hhih", _KAFKA_API_VERSIONS_KEY, 0, _KAFKA_CORRELATION_ID, len(_KAFKA_CLIENT_ID)
+        )
+        + _KAFKA_CLIENT_ID
+    )
+    sock.sendall(struct.pack("!i", len(body)) + body)
+    size, correlation_id, error_code = struct.unpack("!iih", _recv_exactly(sock, 10))
+    if correlation_id != _KAFKA_CORRELATION_ID or size < 6:
+        raise ProbeProtocolError("phản hồi không phải của Kafka broker")
+    if error_code != 0:
+        raise ProbeProtocolError(f"Kafka trả mã lỗi {error_code} cho ApiVersions")
+
+
+def _probe_tcp(
+    host: str,
+    port: int,
+    timeout_sec: float = 2.0,
+    exchange: Callable[[socket.socket], None] | None = None,
+    deadline_sec: float = PROBE_DEADLINE_SECONDS,
+) -> tuple[bool, str]:
+    """Kết nối TCP tới `(host, port)` rồi, nếu có `exchange`, bắt tay giao thức của dịch vụ.
+
+    Không ném lỗi mạng: từ chối kết nối, quá thời gian (`TimeoutError` là `OSError`), ngắt kết
+    nối, phản hồi sai, tên host hay cổng không hợp lệ đều trả `(False, lý do)`.
+    """
+    where = f"{host}:{port}"
+    if not 1 <= port <= 65535:
+        # `socket` quấn vòng cổng lớn hơn 65535 (84628 thành 19092) nên phải chặn trước.
+        return False, f"Cổng ngoài miền 1-65535: {where}"
+
+    def attempt() -> tuple[bool, str]:
+        try:
+            with socket.create_connection((host, port), timeout=timeout_sec) as sock:
+                if exchange is not None:
+                    exchange(sock)
+        except _PROBE_ERRORS as exc:
+            return False, f"Dịch vụ tại {where} không phản hồi đúng ({_describe_error(exc)})"
+        suffix = ", dịch vụ trả lời đúng giao thức" if exchange is not None else ""
+        return True, f"Kết nối TCP {where} thành công{suffix}"
+
+    finished, outcome = _call_with_deadline(attempt, deadline_sec)
+    if not finished or outcome is None:
+        return False, f"Dịch vụ tại {where} không phản hồi đúng (quá hạn tổng {deadline_sec:g} s)"
+    return outcome
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Probe sức khỏe không đi theo chuyển hướng: mã 3xx là lỗi của dịch vụ."""
+
+    def http_error_302(self, *args: Any, **kwargs: Any) -> None:
+        # Chặn trước khi `urllib` phân tích header `Location` (địa chỉ hỏng sẽ ném `ValueError`);
+        # trả `None` để bộ xử lý mặc định ném `HTTPError` mang mã 3xx.
+        return None
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+# Probe gọi thẳng tới dịch vụ: bỏ qua `http_proxy` của môi trường (proxy làm kết quả FAIL hoặc
+# PASS sai, và địa chỉ proxy hỏng có thể đưa mật khẩu proxy vào thông báo lỗi).
+_PROBE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def _probe_http(
+    url: str, timeout_sec: float = 2.5, deadline_sec: float = PROBE_DEADLINE_SECONDS
+) -> tuple[bool, str]:
+    """Kiểm tra HTTP GET endpoint trả về mã 2xx; không ném lỗi mạng.
+
+    `URLError` chỉ bọc lỗi lúc kết nối. Quá thời gian khi chờ phản hồi (`TimeoutError`), ngắt kết
+    nối và phản hồi rác (`http.client.HTTPException`) thoát ra trực tiếp nên phải bắt riêng.
+    """
+
+    def attempt() -> tuple[bool, str]:
+        try:
+            # `http.client` không chặn cổng lớn hơn 65535 (bị quấn vòng); thuộc tính `port`
+            # của `urlsplit` ném `ValueError` cho cổng ngoài miền.
+            _ = urlsplit(url).port
+            req = urllib.request.Request(url, method="GET")
+            with _PROBE_OPENER.open(req, timeout=timeout_sec) as resp:
+                status = getattr(resp, "status", 200)
+        except urllib.error.HTTPError as exc:
+            return False, f"HTTP GET {url} trả về mã {exc.code}"
+        except _PROBE_ERRORS as exc:
+            return False, f"Không gọi được HTTP {url} ({_describe_error(exc)})"
+        if 200 <= status < 300:
+            return True, f"HTTP GET {url} -> {status} OK"
+        return False, f"HTTP GET {url} trả về mã {status}"
+
+    finished, outcome = _call_with_deadline(attempt, deadline_sec)
+    if not finished or outcome is None:
+        return False, f"Không gọi được HTTP {url} (quá hạn tổng {deadline_sec:g} s)"
+    return outcome
 
 
 def _resolve_host_endpoints(
@@ -489,24 +637,36 @@ def _resolve_host_endpoints(
     resolved_dir = config_dir if config_dir is not None else DEFAULT_CONFIG_DIR
     test_cfg = load_config(profile="test", config_dir=resolved_dir, env=merged_env)
 
+    def host_port(variable: str, default: str) -> int:
+        # Biến rỗng nghĩa là dùng mặc định, như Compose `${VAR:-mặc định}`. Lỗi nêu tên biến.
+        raw = merged_env.get(variable, "").strip() or default
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"{variable} phải là số nguyên, nhận {raw!r}") from None
+
     # 1. Kafka bootstrap host & port
     kafka_host_raw, _, kafka_port_raw = test_cfg.kafka.bootstrap_servers.partition(":")
-    kafka_port = int(merged_env.get("N06_KAFKA_HOST_PORT", kafka_port_raw))
+    kafka_port = host_port("N06_KAFKA_HOST_PORT", kafka_port_raw)
 
     # 2. MinIO HTTP endpoint
-    parsed_minio = urlparse(test_cfg.object_store.endpoint)
+    try:
+        parsed_minio = urlparse(test_cfg.object_store.endpoint)
+        endpoint_port = parsed_minio.port or 0
+    except ValueError as exc:
+        raise ValueError(f"object_store.endpoint (profile test) không hợp lệ: {exc}") from None
     minio_host = parsed_minio.hostname or kafka_host_raw
-    minio_port = int(merged_env.get("N06_MINIO_API_HOST_PORT", str(parsed_minio.port or 0)))
+    minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port))
     minio_scheme = parsed_minio.scheme or "http"
     minio_health_url = f"{minio_scheme}://{minio_host}:{minio_port}/minio/health/live"
 
     # 3. PostgreSQL host & port
     pg_host = test_cfg.postgres.mart.host
-    pg_port = int(merged_env.get("N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port)))
+    pg_port = host_port("N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port))
 
     # 4. Spark Web UI host & port
     spark_host = pg_host
-    spark_port = int(merged_env.get("N06_SPARK_UI_HOST_PORT", "18080"))
+    spark_port = host_port("N06_SPARK_UI_HOST_PORT", "18080")
     spark_ui_url = f"http://{spark_host}:{spark_port}"
 
     return {
@@ -526,7 +686,20 @@ def check_services(
 ) -> list[CheckItem]:
     """Kiểm tra trạng thái container Compose, healthcheck và kết nối port của từng service."""
     states = _get_compose_service_states(docker_bin, compose_file, merged_env)
-    endpoints = _resolve_host_endpoints(merged_env, config_dir=config_dir)
+    try:
+        endpoints = _resolve_host_endpoints(merged_env, config_dir=config_dir)
+    except (ValueError, OverflowError) as exc:  # ví dụ N06_*_HOST_PORT không phải số
+        return [
+            CheckItem(
+                check_id=f"service.{svc}",
+                category="service",
+                passed=False,
+                exit_code=int(ExitCode.CONFIG_ERROR),
+                summary=f"Không suy được địa chỉ của service '{svc}' từ cấu hình",
+                detail=_describe_error(exc),
+            )
+            for svc in CORE_SERVICES
+        ]
     results: list[CheckItem] = []
 
     for svc in CORE_SERVICES:
@@ -596,7 +769,8 @@ def check_services(
         if svc in ("minio", "spark"):
             probe_ok, probe_msg = _probe_http(target_desc)
         else:
-            probe_ok, probe_msg = _probe_tcp(host, port)
+            handshake = _kafka_handshake if svc == "kafka" else _postgres_handshake
+            probe_ok, probe_msg = _probe_tcp(host, port, exchange=handshake)
 
         if not probe_ok:
             results.append(
@@ -634,6 +808,7 @@ def check_object_store_buckets(
     merged_env: Mapping[str, str],
     config_dir: Path | None = None,
     prober: Callable[[ObjectStoreTarget, str], BucketResult] | None = None,
+    deadline_sec: float = PROBE_DEADLINE_SECONDS,
 ) -> list[CheckItem]:
     """Kiểm bucket object store của profile đang dùng (`object_store.bucket`) có tồn tại không.
 
@@ -644,7 +819,16 @@ def check_object_store_buckets(
     probe = prober if prober is not None else head_bucket
     try:
         target = target_from_config(cfg, merged_env, config_dir=config_dir)
-        result = probe(target, bucket)
+        finished, probed = _call_with_deadline(lambda: probe(target, bucket), deadline_sec)
+        result = (
+            probed
+            if finished and probed is not None
+            else BucketResult(
+                bucket,
+                STATUS_ERROR,
+                f"object store không trả lời trong hạn tổng {deadline_sec:g} s",
+            )
+        )
     except ObjectStoreConfigError as exc:
         return [
             CheckItem(
@@ -689,7 +873,9 @@ def check_object_store_buckets(
             category="bucket",
             passed=False,
             exit_code=int(ExitCode.SERVICE_ERROR),
-            summary=f"Không kiểm được bucket '{bucket}' (profile={cfg.profile})",
+            summary=(
+                f"Không kiểm được bucket '{bucket}' trên object store MinIO (profile={cfg.profile})"
+            ),
             detail=result.detail,
         )
     ]
