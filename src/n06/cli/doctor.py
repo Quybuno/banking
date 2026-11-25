@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -278,12 +279,24 @@ def _collect_secret_values(env_map: Mapping[str, str]) -> set[str]:
 
 
 def redact_secrets(text: str, secret_values: set[str]) -> str:
-    """Thay thế mọi chuỗi giá trị secret xuất hiện trong `text` bằng `***REDACTED***`."""
+    """Thay thế mọi chuỗi giá trị secret xuất hiện trong `text` bằng `***REDACTED***`.
+
+    Không phân biệt hoa thường: tên host lấy qua `urlparse` bị hạ chữ thường.
+    """
     redacted = text
     for secret in sorted(secret_values, key=len, reverse=True):
-        if secret and secret in redacted:
-            redacted = redacted.replace(secret, "***REDACTED***")
+        if secret:
+            redacted = re.sub(re.escape(secret), "***REDACTED***", redacted, flags=re.IGNORECASE)
     return redacted
+
+
+# Phần `user:mat-khau@` trong một URL bất kỳ, kể cả URL do công cụ ngoài (docker) chép lại.
+_URL_USERINFO = re.compile(r"(://)[^/\s'\"]*@")
+
+
+def _sanitize(text: str, secret_values: set[str]) -> str:
+    """Che secret đã biết và mật khẩu nằm trong URL trước khi in."""
+    return _URL_USERINFO.sub(r"\1***@", redact_secrets(text, secret_values))
 
 
 def _describe_config_error(exc: Exception) -> str:
@@ -321,6 +334,21 @@ def check_configuration(
                     f"{safe_msg} (Gợi ý: chạy `n06 init-local` để khởi tạo `.env` hợp lệ "
                     "hoặc kiểm tra file TOML trong `config/`)."
                 ),
+            ),
+            None,
+        )
+    except (OSError, ValueError) as exc:
+        # Tên tệp quá dài, không có quyền đọc, số quá dài để phân tích: nội dung lỗi trích lại
+        # giá trị cấu hình nên chỉ in tên loại lỗi.
+        message = f"Không đọc hoặc phân tích được cấu hình ({type(exc).__name__})"
+        return (
+            CheckItem(
+                check_id="config.schema",
+                category="config",
+                passed=False,
+                exit_code=int(ExitCode.CONFIG_ERROR),
+                summary=message,
+                detail=f"{message}; kiểm biến N06_* và file TOML trong `config/`.",
             ),
             None,
         )
@@ -637,6 +665,10 @@ def _probe_http(
     return outcome
 
 
+# Tên máy (gồm tên service Compose có `_`) hoặc địa chỉ IPv6 không ngoặc vuông.
+_HOST_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,253}|[0-9A-Fa-f]*:[0-9A-Fa-f:.]+")
+
+
 def _resolve_host_endpoints(
     merged_env: Mapping[str, str],
     config_dir: Path | None = None,
@@ -659,19 +691,32 @@ def _resolve_host_endpoints(
                 f"{field_path} (profile test) không được chứa '@': credential chỉ lấy từ biến "
                 "môi trường, không đặt trong địa chỉ"
             )
+    # Tên đích được in ra, nên host phải đúng là tên máy hoặc địa chỉ IP: chuỗi kết nối kiểu
+    # `host=... password=...` bị từ chối trước khi in.
+    for field_path, host in (
+        ("kafka.bootstrap_servers", test_cfg.kafka.bootstrap_servers.partition(":")[0]),
+        ("postgres.mart.host", test_cfg.postgres.mart.host),
+    ):
+        if not _HOST_PATTERN.fullmatch(host):
+            raise ValueError(
+                f"{field_path} (profile test) không phải tên máy hoặc địa chỉ IP hợp lệ"
+            )
 
     def host_port(variable: str, default: str, default_field: str) -> int:
         # Biến rỗng nghĩa là dùng mặc định, như Compose `${VAR:-mặc định}`.
         from_variable = merged_env.get(variable, "").strip()
         try:
-            return int(from_variable or default)
+            port = int(from_variable or default)
         except ValueError:
+            port = 0
+        if not 1 <= port <= 65535:
             source = variable
             if not from_variable:
                 source = (
                     f"{variable} để trống nên dùng cổng của {default_field} (profile test); cổng đó"
                 )
-            raise ValueError(f"{source} phải là số nguyên") from None
+            raise ValueError(f"{source} phải là số nguyên từ 1 đến 65535")
+        return port
 
     # 1. Kafka bootstrap host & port
     kafka_host_raw, _, kafka_port_raw = test_cfg.kafka.bootstrap_servers.partition(":")
@@ -1087,12 +1132,12 @@ def build_doctor_report(
     for item in checks:
         sanitized_checks.append(
             CheckItem(
-                check_id=item.check_id,
+                check_id=_sanitize(item.check_id, secret_values),
                 category=item.category,
                 passed=item.passed,
                 exit_code=item.exit_code,
-                summary=redact_secrets(item.summary, secret_values),
-                detail=redact_secrets(item.detail, secret_values),
+                summary=_sanitize(item.summary, secret_values),
+                detail=_sanitize(item.detail, secret_values),
                 warning=item.warning,
             )
         )

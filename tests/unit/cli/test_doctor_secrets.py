@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import shutil
 from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,8 +30,11 @@ def _doctor_outputs(
     tmp_path: Path,
     overrides: Mapping[str, str],
     *,
-    profile: str = "test",
+    profile: str | None = "test",
     config_dir: Path | None = None,
+    docker: tuple[CheckItem, str | None] = FAKE_DOCKER,
+    services: list[CheckItem] | None = None,
+    states: Mapping[str, dict[str, str]] | None = None,
 ) -> list[tuple[int, str]]:
     env_file = tmp_path / ".env"
     run_init_local(target_path=env_file, skip_buckets=True, out=io.StringIO())
@@ -38,9 +42,17 @@ def _doctor_outputs(
     results = []
     for as_json in (False, True):
         out = io.StringIO()
+        services_patch = (
+            patch("n06.cli.doctor.check_services", return_value=services)
+            if services is not None
+            else nullcontext()
+        )
         with (
-            patch("n06.cli.doctor.check_docker_engine", return_value=FAKE_DOCKER),
-            patch("n06.cli.doctor._get_compose_service_states", return_value={}),
+            patch("n06.cli.doctor.check_docker_engine", return_value=docker),
+            patch("n06.cli.doctor._get_compose_service_states", return_value=dict(states or {})),
+            patch("n06.cli.doctor._probe_tcp", return_value=(False, "probe giả")),
+            patch("n06.cli.doctor._probe_http", return_value=(False, "probe giả")),
+            services_patch,
         ):
             code = run_doctor(
                 profile=profile,
@@ -143,3 +155,133 @@ def test_credential_written_in_a_toml_file_is_never_printed(tmp_path: Path, prof
     outputs = _doctor_outputs(tmp_path, {}, profile=profile, config_dir=config_dir)
 
     _assert_config_failure_without_marker(outputs, "object_store.secret_key")
+
+
+RUNNING = {
+    name: {"state": "running", "health": "healthy", "name": f"fake-{name}"}
+    for name in ("kafka", "minio", "postgres", "spark")
+}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "named"),
+    [
+        pytest.param(
+            {"N06__POSTGRES__MART__HOST": f"host=db user=n06 password={MARKER}"},
+            "postgres.mart.host",
+            id="postgres-key-value-string",
+        ),
+        pytest.param(
+            {"N06__POSTGRES__MART__HOST": f"jdbc:postgresql://db/n06?password={MARKER}"},
+            "postgres.mart.host",
+            id="postgres-jdbc-url",
+        ),
+        pytest.param(
+            {"N06__POSTGRES__MART__HOST": f"user:{MARKER}\uff20db"},
+            "postgres.mart.host",
+            id="postgres-fullwidth-at",
+        ),
+        pytest.param(
+            {"N06__KAFKA__BOOTSTRAP_SERVERS": f"password={MARKER};host:9092"},
+            "kafka.bootstrap_servers",
+            id="kafka-key-value-string",
+        ),
+    ],
+)
+def test_address_carrying_credentials_is_rejected_before_it_is_printed(
+    tmp_path: Path, overrides: dict[str, str], named: str
+) -> None:
+    outputs = _doctor_outputs(tmp_path, overrides, states=RUNNING)
+    _assert_config_failure_without_marker(outputs, named)
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "N06_KAFKA_HOST_PORT",
+        "N06_MINIO_API_HOST_PORT",
+        "N06_POSTGRES_HOST_PORT",
+        "N06_SPARK_UI_HOST_PORT",
+    ],
+)
+def test_out_of_range_port_value_is_not_echoed(tmp_path: Path, variable: str) -> None:
+    digits = "913700012345"
+    for code, text in _doctor_outputs(tmp_path, {variable: digits}, states=RUNNING):
+        assert digits not in text, text
+        assert variable in text and code == 10, text
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"N06_PROFILE": MARKER * 30}, id="profile-name-too-long-for-a-file"),
+        pytest.param({"N06__KAFKA__NUM_PARTITIONS": "9" * 5000}, id="integer-too-long-to-parse"),
+    ],
+)
+def test_unreadable_configuration_is_a_failure_without_traceback(
+    tmp_path: Path, overrides: dict[str, str]
+) -> None:
+    for code, text in _doctor_outputs(tmp_path, overrides, profile=None):
+        assert code == 10 and "config.schema" in text, text
+        assert MARKER not in text and "9" * 100 not in text, text
+
+
+KNOWN_SECRET = "KnownSecret_4471xyz"
+
+
+def _assert_known_secret_absent(outputs: list[tuple[int, str]]) -> None:
+    for _, text in outputs:
+        assert KNOWN_SECRET.lower() not in text.lower(), text
+        assert "***REDACTED***" in text, text
+
+
+def test_secret_used_as_bucket_name_is_redacted_in_check_id_too(tmp_path: Path) -> None:
+    minio_ok = CheckItem("service.minio", "service", True, 0, "giả", "giả")
+    outputs = _doctor_outputs(
+        tmp_path,
+        {
+            "N06_OBJECT_STORE_SECRET_KEY": KNOWN_SECRET,
+            "N06__OBJECT_STORE__BUCKET": KNOWN_SECRET,
+        },
+        services=[minio_ok],
+    )
+    _assert_known_secret_absent(outputs)
+
+
+def test_secret_lowercased_by_url_parsing_is_still_redacted(tmp_path: Path) -> None:
+    secret = "KnownSecret4471xyz"
+    outputs = _doctor_outputs(
+        tmp_path,
+        {
+            "N06_OBJECT_STORE_SECRET_KEY": secret,
+            "N06__OBJECT_STORE__ENDPOINT": f"http://{secret}:1",
+        },
+        states=RUNNING,
+    )
+    for _, text in outputs:
+        assert secret.lower() not in text.lower(), text
+        assert "***REDACTED***" in text, text
+
+
+def test_every_printed_field_of_a_check_is_redacted(tmp_path: Path) -> None:
+    leaked = CheckItem(
+        f"service.{KNOWN_SECRET}",
+        "service",
+        False,
+        14,
+        f"tóm tắt {KNOWN_SECRET}",
+        f"chi tiết {KNOWN_SECRET.upper()}",
+    )
+    outputs = _doctor_outputs(
+        tmp_path, {"N06_OBJECT_STORE_SECRET_KEY": KNOWN_SECRET}, services=[leaked]
+    )
+    _assert_known_secret_absent(outputs)
+
+
+def test_url_userinfo_in_tool_error_text_is_masked(tmp_path: Path) -> None:
+    """`docker info` chép nguyên `DOCKER_HOST` hỏng vào stderr."""
+    stderr = f'parse "tcp://user:{MARKER}@127.0.0.1:abc": invalid port'
+    failed = CheckItem("docker.engine", "docker", False, 13, "Docker lỗi", stderr)
+    for code, text in _doctor_outputs(tmp_path, {}, docker=(failed, None)):
+        assert MARKER not in text and "tcp://***@127.0.0.1:abc" in text, text
+        assert code == 13, text
