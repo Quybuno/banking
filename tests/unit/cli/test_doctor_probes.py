@@ -8,9 +8,13 @@ của yêu cầu và mã lỗi.
 
 from __future__ import annotations
 
+import inspect
 import io
+import os
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -22,6 +26,7 @@ from unittest.mock import patch
 import pytest
 
 from n06.cli.doctor import (
+    PROBE_DEADLINE_SECONDS,
     ExitCode,
     _kafka_handshake,
     _postgres_handshake,
@@ -303,10 +308,20 @@ def test_unencodable_host_name_fails_without_raising(host: str) -> None:
 
 
 @pytest.mark.parametrize("port", [0, -1, 65536, 84628, 2**63, 10**30])
-def test_port_outside_range_fails_without_connecting(port: int) -> None:
+def test_tcp_port_outside_range_fails_without_connecting(port: int) -> None:
     ok, message = _probe_tcp("127.0.0.1", port)
     assert ok is False and "ngoài miền" in message
-    assert _probe_http(f"http://127.0.0.1:{port}/", timeout_sec=SHORT)[0] is False
+
+
+@pytest.mark.parametrize("wrap", [65536, 131072])
+def test_http_port_outside_range_does_not_wrap_around_to_a_live_server(wrap: int) -> None:
+    """Máy chủ giả đang nghe ở cổng p và trả 200: cổng p+65536 phải FAIL, không được quấn về p."""
+    reply = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    with reply_server(lambda _request: reply) as port:
+        ok, message = _probe_http(f"http://127.0.0.1:{port + wrap}/", timeout_sec=1.0)
+        good, _ = _probe_http(f"http://127.0.0.1:{port}/", timeout_sec=1.0)
+    assert good is True
+    assert ok is False and "out of range" in message.lower()
 
 
 @pytest.mark.parametrize("url", ["http://[abc", "not a url", "http://a..b/"])
@@ -315,17 +330,18 @@ def test_broken_url_fails_without_raising(url: str) -> None:
     assert ok is False
 
 
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 @pytest.mark.parametrize(
     "location", ["http://[abc", "http://a..b/", "http://127.0.0.1:99999999999999999999/"]
 )
-def test_redirect_is_a_failure_and_is_not_followed(location: str) -> None:
+def test_redirect_is_a_failure_and_is_not_followed(location: str, status: int) -> None:
     reply = (
-        f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n"
+        f"HTTP/1.1 {status} Moved\r\nLocation: {location}\r\nContent-Length: 0\r\n"
         "Connection: close\r\n\r\n"
     ).encode()
     with reply_server(lambda _request: reply) as port:
         ok, message = _probe_http(f"http://127.0.0.1:{port}/health", timeout_sec=1.0)
-    assert ok is False and "mã 302" in message
+    assert ok is False and f"mã {status}" in message
 
 
 @pytest.mark.parametrize(
@@ -336,17 +352,30 @@ def test_redirect_is_a_failure_and_is_not_followed(location: str) -> None:
         "http://probeuser:ProxySecretMarker",
     ],
 )
-def test_http_probe_ignores_proxy_environment(monkeypatch: pytest.MonkeyPatch, proxy: str) -> None:
-    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "all_proxy"):
-        monkeypatch.setenv(name, proxy)
-    monkeypatch.delenv("no_proxy", raising=False)
-    monkeypatch.delenv("NO_PROXY", raising=False)
+def test_http_probe_ignores_proxy_environment(proxy: str) -> None:
+    """Chạy trong tiến trình con có `http_proxy` đặt TRƯỚC khi nạp module: bộ mở URL được dựng
+    lúc import nên đặt biến sau đó (monkeypatch) không bắt được hồi quy."""
+    env = {k: v for k, v in os.environ.items() if k.lower() not in ("no_proxy",)}
+    env.update({name: proxy for name in ("http_proxy", "HTTP_PROXY", "all_proxy")})
+    script = (
+        "import sys\nfrom n06.cli.doctor import _probe_http\n"
+        "print(_probe_http(sys.argv[1], timeout_sec=1.0))\n"
+        "print(_probe_http('http://127.0.0.1:1/health', timeout_sec=0.3))\n"
+    )
     ok_reply = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     with reply_server(lambda _request: ok_reply) as port:
-        ok, message = _probe_http(f"http://127.0.0.1:{port}/health", timeout_sec=1.0)
-    assert ok is True and "ProxySecretMarker" not in message
-    dead = _probe_http("http://127.0.0.1:1/health", timeout_sec=SHORT)
-    assert dead[0] is False and "ProxySecretMarker" not in dead[1]
+        done = subprocess.run(
+            [sys.executable, "-c", script, f"http://127.0.0.1:{port}/health"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    assert done.returncode == 0, done.stderr
+    alive, dead = done.stdout.strip().splitlines()
+    assert alive.startswith("(True,") and dead.startswith("(False,"), done.stdout
+    assert "ProxySecretMarker" not in done.stdout + done.stderr
 
 
 def _trickle(prefix: bytes) -> Callable[[socket.socket], None]:
@@ -356,7 +385,7 @@ def _trickle(prefix: bytes) -> Callable[[socket.socket], None]:
         conn.settimeout(2)
         conn.recv(4096)
         try:
-            for byte in prefix + b"x" * 40:
+            for byte in prefix + b"x" * 12:
                 conn.sendall(bytes([byte]))
                 time.sleep(0.15)
         except OSError:
@@ -435,3 +464,43 @@ def test_unexpected_programming_errors_still_surface() -> None:
 
     with silent_server() as port, pytest.raises(KeyError):
         _probe_tcp("127.0.0.1", port, exchange=broken)
+
+
+def test_default_total_deadline_is_bounded() -> None:
+    """Hạn tổng mặc định của mọi probe là 8 s (README); đổi giá trị này phải đổi cả tài liệu."""
+    assert PROBE_DEADLINE_SECONDS == 8.0
+    for function in (_probe_tcp, _probe_http, check_object_store_buckets):
+        default = inspect.signature(function).parameters["deadline_sec"].default
+        assert default == PROBE_DEADLINE_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "named"),
+    [
+        ("N06_SPARK_UI_HOST_PORT", "abc", "N06_SPARK_UI_HOST_PORT"),
+        ("N06__OBJECT_STORE__ENDPOINT", "http://[abc", "object_store.endpoint"),
+        ("N06__OBJECT_STORE__ENDPOINT", "http://localhost:99999", "object_store.endpoint"),
+    ],
+)
+def test_configuration_error_names_the_variable_or_field(
+    tmp_path: Path, variable: str, value: str, named: str
+) -> None:
+    env_file = tmp_path / ".env"
+    run_init_local(target_path=env_file, skip_buckets=True, out=io.StringIO())
+    env = {**parse_dotenv_file(env_file), variable: value}
+    with patch("n06.cli.doctor._get_compose_service_states", return_value={}):
+        results = check_services(
+            docker_bin="docker", compose_file=tmp_path / "compose.yml", merged_env=env
+        )
+    assert all(item.exit_code == 10 and named in item.detail for item in results), results
+
+
+def test_empty_port_variable_means_the_default(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    run_init_local(target_path=env_file, skip_buckets=True, out=io.StringIO())
+    env = {**parse_dotenv_file(env_file), "N06_KAFKA_HOST_PORT": ""}
+    with patch("n06.cli.doctor._get_compose_service_states", return_value={}):
+        results = check_services(
+            docker_bin="docker", compose_file=tmp_path / "compose.yml", merged_env=env
+        )
+    assert all(item.exit_code == 14 for item in results), results  # không còn là lỗi cấu hình

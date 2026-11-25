@@ -65,8 +65,8 @@
 
 ## Probe dịch vụ của `n06 doctor`
 
-- Probe không ném lỗi mạng: dịch vụ từ chối kết nối, quá thời gian, ngắt kết nối, trả lời sai, tên host không mã hóa được, URL hỏng hay cổng ngoài miền đều là FAIL mã `14` kèm tên dịch vụ. Lỗi lập trình (ngoại lệ khác) vẫn nổi lên.
-- Cổng đặt qua `N06_*_HOST_PORT` không phải số là lỗi cấu hình: mỗi dịch vụ FAIL mã `10`.
+- Probe không ném lỗi mạng: dịch vụ từ chối kết nối, quá thời gian, ngắt kết nối, trả lời sai, tên host không mã hóa được, hay cổng ngoài miền tới được probe đều là FAIL mã `14` kèm tên dịch vụ. Lỗi lập trình (ngoại lệ khác) vẫn nổi lên.
+- Lỗi **suy địa chỉ từ cấu hình** (`N06_*_HOST_PORT` không phải số, `object_store.endpoint` hỏng hoặc cổng ngoài miền) là mã `10` cho cả bốn dịch vụ, thông báo nêu tên biến hoặc trường sai. Biến cổng rỗng dùng giá trị mặc định.
 - MinIO và Spark: HTTP GET, mã 2xx; **không dùng `http_proxy` của môi trường** và không đi theo chuyển hướng. Kafka: bắt tay `ApiVersions` phiên bản 0. PostgreSQL: gửi `SSLRequest`, chờ đúng một byte `S` hoặc `N`. Chỉ mở được cổng TCP **không** đủ để coi dịch vụ sống.
 - Bucket: `HEAD` có ký.
 - Thời gian: mỗi thao tác socket chờ 2-5 giây, mỗi probe có hạn tổng 8 giây (cố định trong mã), nên dịch vụ nhỏ giọt từng byte không treo được `doctor`.

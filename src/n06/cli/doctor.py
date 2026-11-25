@@ -27,7 +27,7 @@ from dataclasses import dataclass, replace
 from enum import IntEnum
 from pathlib import Path
 from typing import Any, TextIO, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from n06.cli.init_local import parse_dotenv_file
 from n06.cli.object_store import (
@@ -606,6 +606,9 @@ def _probe_http(
 
     def attempt() -> tuple[bool, str]:
         try:
+            # `http.client` không chặn cổng lớn hơn 65535 (bị quấn vòng); thuộc tính `port`
+            # của `urlsplit` ném `ValueError` cho cổng ngoài miền.
+            _ = urlsplit(url).port
             req = urllib.request.Request(url, method="GET")
             with _PROBE_OPENER.open(req, timeout=timeout_sec) as resp:
                 status = getattr(resp, "status", 200)
@@ -634,24 +637,36 @@ def _resolve_host_endpoints(
     resolved_dir = config_dir if config_dir is not None else DEFAULT_CONFIG_DIR
     test_cfg = load_config(profile="test", config_dir=resolved_dir, env=merged_env)
 
+    def host_port(variable: str, default: str) -> int:
+        # Biến rỗng nghĩa là dùng mặc định, như Compose `${VAR:-mặc định}`. Lỗi nêu tên biến.
+        raw = merged_env.get(variable, "").strip() or default
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"{variable} phải là số nguyên, nhận {raw!r}") from None
+
     # 1. Kafka bootstrap host & port
     kafka_host_raw, _, kafka_port_raw = test_cfg.kafka.bootstrap_servers.partition(":")
-    kafka_port = int(merged_env.get("N06_KAFKA_HOST_PORT", kafka_port_raw))
+    kafka_port = host_port("N06_KAFKA_HOST_PORT", kafka_port_raw)
 
     # 2. MinIO HTTP endpoint
-    parsed_minio = urlparse(test_cfg.object_store.endpoint)
+    try:
+        parsed_minio = urlparse(test_cfg.object_store.endpoint)
+        endpoint_port = parsed_minio.port or 0
+    except ValueError as exc:
+        raise ValueError(f"object_store.endpoint (profile test) không hợp lệ: {exc}") from None
     minio_host = parsed_minio.hostname or kafka_host_raw
-    minio_port = int(merged_env.get("N06_MINIO_API_HOST_PORT", str(parsed_minio.port or 0)))
+    minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port))
     minio_scheme = parsed_minio.scheme or "http"
     minio_health_url = f"{minio_scheme}://{minio_host}:{minio_port}/minio/health/live"
 
     # 3. PostgreSQL host & port
     pg_host = test_cfg.postgres.mart.host
-    pg_port = int(merged_env.get("N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port)))
+    pg_port = host_port("N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port))
 
     # 4. Spark Web UI host & port
     spark_host = pg_host
-    spark_port = int(merged_env.get("N06_SPARK_UI_HOST_PORT", "18080"))
+    spark_port = host_port("N06_SPARK_UI_HOST_PORT", "18080")
     spark_ui_url = f"http://{spark_host}:{spark_port}"
 
     return {
