@@ -33,7 +33,7 @@ Thêm vào `pyproject.toml` (`dependencies`, vì mã trong `src/` chạy cả tr
 | `psycopg-binary` | `3.3.9` |
 | `typing-extensions` | `4.16.0` |
 
-Trong image, cài bằng `pip install --require-hashes` từ một tệp yêu cầu sinh từ `uv.lock`, không kéo theo `confluent-kafka` (chỉ host theo ADR-0010 và ma trận tương thích) hay chính dự án ở dạng editable: `uv export --frozen --no-dev --no-emit-project --no-emit-package confluent-kafka`. Đã chạy thử trên `uv.lock` hiện tại (chưa có `psycopg`) ngày 2026-11-25: lệnh chạy được; **chưa kiểm** đầu ra sau khi thêm `psycopg` và việc cài trong image.
+Trong image, cài bằng `pip install --require-hashes` từ một tệp yêu cầu sinh từ `uv.lock`, không kéo theo `confluent-kafka` (chỉ host theo ADR-0010 và ma trận tương thích) hay chính dự án ở dạng editable: `uv export --frozen --no-dev --no-emit-project --no-emit-package confluent-kafka`. Đây là danh sách loại trừ: gói chỉ dành cho host thêm vào `dependencies` sau này sẽ lọt vào image nếu không cập nhật lệnh. Đã chạy thử trên `uv.lock` hiện tại (chưa có `psycopg`) ngày 2026-11-25: lệnh chạy được; **chưa kiểm** đầu ra sau khi thêm `psycopg` và việc cài trong image.
 
 Lý do:
 
