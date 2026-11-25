@@ -40,8 +40,6 @@ from n06.producer.source import (
     discover_event_files,
 )
 
-DEFAULT_FLUSH_TIMEOUT_SECONDS = 120.0
-
 BrokerFactory = Callable[[str], BrokerAdmin]
 ProducerFactory = Callable[[dict[str, Any]], ProducerLike]
 
@@ -81,10 +79,10 @@ def run_publish(
     allow_non_empty_topic: bool = False,
     manifests_dir: str = DEFAULT_MANIFESTS_DIRNAME,
     events_dir: str = DEFAULT_EVENTS_DIRNAME,
-    flush_timeout_seconds: float = DEFAULT_FLUSH_TIMEOUT_SECONDS,
+    flush_timeout_seconds: float | None = None,
     as_json: bool = False,
     out: TextIO | None = None,
-    broker_factory: BrokerFactory = ConfluentBroker,
+    broker_factory: BrokerFactory | None = None,
     producer_factory: ProducerFactory = make_producer,
     config_overrides: dict[str, Any] | None = None,
 ) -> int:
@@ -99,7 +97,9 @@ def run_publish(
             stdout.write(f"[publish] Lỗi: {message}\n")
         return int(code)
 
-    if not (math.isfinite(flush_timeout_seconds) and flush_timeout_seconds > 0):
+    if flush_timeout_seconds is not None and not (
+        math.isfinite(flush_timeout_seconds) and flush_timeout_seconds > 0
+    ):
         return fail(
             ExitCode.CONFIG_ERROR,
             "--flush-timeout-seconds (thời gian chờ flush) phải > 0 và hữu hạn, "
@@ -130,7 +130,13 @@ def run_publish(
         partitions=cfg.kafka.num_partitions,
         replication_factor=cfg.kafka.replication_factor,
         allow_non_empty_topic=allow_non_empty_topic,
-        flush_timeout_seconds=flush_timeout_seconds,
+        # Tham số dòng lệnh thắng cấu hình `producer.flush_timeout_seconds`.
+        flush_timeout_seconds=(
+            flush_timeout_seconds
+            if flush_timeout_seconds is not None
+            else float(cfg.producer.flush_timeout_seconds)
+        ),
+        max_message_bytes=cfg.producer.max_message_bytes,
     )
     try:
         producer_config = build_producer_config(
@@ -138,6 +144,7 @@ def run_publish(
             acks=cfg.producer.acks,
             retries=cfg.producer.retries,
             batch_size=cfg.producer.batch_size,
+            max_message_bytes=cfg.producer.max_message_bytes,
         )
         source = discover_event_files(
             resolved_source, manifests_dirname=manifests_dir, events_dirname=events_dir
@@ -146,10 +153,19 @@ def run_publish(
             producer = producer_factory(producer_config)
         except KafkaException as exc:
             raise PublishConfigError(f"Cấu hình producer bị từ chối: {exc}") from exc
+        broker = (
+            broker_factory(cfg.kafka.bootstrap_servers)
+            if broker_factory is not None
+            else ConfluentBroker(
+                cfg.kafka.bootstrap_servers,
+                metadata_timeout_seconds=float(cfg.producer.metadata_timeout_seconds),
+                leader_wait_seconds=float(cfg.producer.leader_wait_seconds),
+            )
+        )
         stats = publish_events(
             source,
             settings=settings,
-            broker=broker_factory(cfg.kafka.bootstrap_servers),
+            broker=broker,
             producer=producer,
             report=None if as_json else stdout.write,
         )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -58,6 +59,27 @@ def _check_inside_source(source_dir: Path, relative: str, manifest_path: Path) -
         )
 
 
+_DIGIT_RUNS = re.compile(r"([0-9]+)")
+
+
+def _natural_key(relative_path: str) -> tuple[list[str | tuple[int, str]], str]:
+    """Khóa sắp xếp tự nhiên: `events_batch_99999` đứng trước `events_batch_100000`.
+
+    Sắp theo chuỗi sẽ sai im lặng khi số shard vượt 5 chữ số (`1000000` < `99999` theo chuỗi).
+    Dãy chữ số được so theo (độ dài sau khi bỏ số 0 đầu, chuỗi) chứ không đổi sang `int`, nên
+    dãy rất dài trong manifest không làm ném `ValueError`. Đường dẫn gốc phá hòa khi hai tên chỉ
+    khác số 0 đầu, để thứ tự luôn xác định.
+    """
+    parts: list[str | tuple[int, str]] = []
+    for index, part in enumerate(_DIGIT_RUNS.split(relative_path)):
+        if index % 2:  # phần tử lẻ của `split` có nhóm bắt là dãy chữ số
+            digits = part.lstrip("0")
+            parts.append((len(digits), digits))
+        else:
+            parts.append(part)
+    return parts, relative_path
+
+
 def discover_event_files(
     source_dir: Path,
     *,
@@ -74,7 +96,7 @@ def discover_event_files(
     for manifest_path in sorted(manifests_dir.glob("*.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             raise SourceDataError(
                 f"Manifest {manifest_path} không đọc được hoặc hỏng: {exc}"
             ) from exc
@@ -109,7 +131,7 @@ def discover_event_files(
     unlisted = sorted(on_disk - set(found))
     if unlisted:
         raise SourceDataError(f"File events không có trong manifest nào: {unlisted}")
-    return EventSource(files=tuple(found[rel] for rel in sorted(found)))
+    return EventSource(files=tuple(found[rel] for rel in sorted(found, key=_natural_key)))
 
 
 def verify_event_files(

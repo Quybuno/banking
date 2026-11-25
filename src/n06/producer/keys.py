@@ -20,6 +20,16 @@ _TRANSACTION_EVENT = "TRANSACTION_CREATED"
 _LEDGER_EVENT = "LEDGER_ENTRY_CREATED"
 
 
+def _encode_key(text: str, where: str) -> bytes:
+    """Mã hóa key UTF-8; ký tự không mã hóa được (ví dụ surrogate lẻ) là lỗi dữ liệu nguồn."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SourceDataError(
+            f"Giá trị key không mã hóa được UTF-8 tại {where} (ký tự không hợp lệ): {exc.reason}."
+        ) from exc
+
+
 def _required_text(container: dict[str, Any], name: str, where: str) -> str:
     value = container.get(name)
     if not isinstance(value, str) or not value:
@@ -51,8 +61,10 @@ class KeySelector:
             raise SourceDataError(f"Dòng trống tại {where}.")
         try:
             envelope = json.loads(line)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise SourceDataError(f"JSON hỏng tại {where}: {exc}") from exc
+        except (ValueError, RecursionError) as exc:
+            # ValueError gồm JSONDecodeError, UnicodeDecodeError và giới hạn số nguyên quá dài;
+            # RecursionError là JSON lồng quá sâu. Tất cả là lỗi dữ liệu nguồn (mã 10).
+            raise SourceDataError(f"JSON hỏng hoặc vượt giới hạn tại {where}: {exc}") from exc
         if not isinstance(envelope, dict):
             raise SourceDataError(f"Dòng không phải một object JSON tại {where}.")
         event_type = envelope.get("event_type")
@@ -63,12 +75,12 @@ class KeySelector:
             raise SourceDataError(f"Thiếu hoặc sai kiểu trường 'payload' tại {where}.")
         transaction_id = _required_text(payload, "transaction_id", where)
         if self._strategy == TRANSACTION_ID:
-            return transaction_id.encode("utf-8")
+            return _encode_key(transaction_id, where)
 
         if event_type == _TRANSACTION_EVENT:
             account_from = _required_text(payload, "account_from", where)
             self._account_from_by_transaction[transaction_id] = account_from
-            return account_from.encode("utf-8")
+            return _encode_key(account_from, where)
         account_from_known = self._account_from_by_transaction.get(transaction_id)
         if account_from_known is None:
             raise OrphanLedgerError(
@@ -77,4 +89,4 @@ class KeySelector:
                 f"có transaction event trước nó trong cùng file {file_path} "
                 f"(dòng {line_number}). Không thể chọn key theo {ACCOUNT_FROM}."
             )
-        return account_from_known.encode("utf-8")
+        return _encode_key(account_from_known, where)
