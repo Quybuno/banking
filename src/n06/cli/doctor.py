@@ -11,10 +11,12 @@ Các nguyên tắc bắt buộc:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import urllib.error
@@ -456,17 +458,78 @@ def _get_compose_service_states(
     return states
 
 
-def _probe_tcp(host: str, port: int, timeout_sec: float = 2.0) -> tuple[bool, str]:
-    """Kiểm tra kết nối TCP tới `(host, port)`."""
+class ProbeProtocolError(OSError):
+    """Dịch vụ nhận kết nối nhưng không trả lời đúng giao thức."""
+
+
+# PostgreSQL `SSLRequest` (độ dài 8, mã 80877103): máy chủ trả đúng một byte `S` hoặc `N`.
+_POSTGRES_SSL_REQUEST = struct.pack("!ii", 8, 80877103)
+# Kafka `ApiVersions` (api_key 18) phiên bản 0: phản hồi lặp lại correlation_id rồi mã lỗi.
+_KAFKA_API_VERSIONS_KEY = 18
+_KAFKA_CORRELATION_ID = 0x4E3036
+_KAFKA_CLIENT_ID = b"n06-doctor"
+
+
+def _recv_exactly(sock: socket.socket, size: int) -> bytes:
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise ProbeProtocolError("dịch vụ đóng kết nối trước khi trả lời đủ")
+        data += chunk
+    return data
+
+
+def _postgres_handshake(sock: socket.socket) -> None:
+    sock.sendall(_POSTGRES_SSL_REQUEST)
+    reply = _recv_exactly(sock, 1)
+    if reply not in (b"S", b"N"):
+        raise ProbeProtocolError("phản hồi không phải của PostgreSQL")
+
+
+def _kafka_handshake(sock: socket.socket) -> None:
+    body = (
+        struct.pack(
+            "!hhih", _KAFKA_API_VERSIONS_KEY, 0, _KAFKA_CORRELATION_ID, len(_KAFKA_CLIENT_ID)
+        )
+        + _KAFKA_CLIENT_ID
+    )
+    sock.sendall(struct.pack("!i", len(body)) + body)
+    size, correlation_id, error_code = struct.unpack("!iih", _recv_exactly(sock, 10))
+    if correlation_id != _KAFKA_CORRELATION_ID or size < 6 or error_code != 0:
+        raise ProbeProtocolError("phản hồi không phải của Kafka broker")
+
+
+def _probe_tcp(
+    host: str,
+    port: int,
+    timeout_sec: float = 2.0,
+    exchange: Callable[[socket.socket], None] | None = None,
+) -> tuple[bool, str]:
+    """Kết nối TCP tới `(host, port)` rồi, nếu có `exchange`, bắt tay giao thức của dịch vụ.
+
+    Không bao giờ ném: từ chối kết nối, quá thời gian (`TimeoutError` là `OSError`), ngắt kết nối
+    hay phản hồi sai đều trả `(False, lý do)`.
+    """
     try:
-        with socket.create_connection((host, port), timeout=timeout_sec):
-            return True, f"Kết nối TCP {host}:{port} thành công"
-    except OSError as exc:
-        return False, f"Không kết nối được TCP {host}:{port} ({exc})"
+        with socket.create_connection((host, port), timeout=timeout_sec) as sock:
+            if exchange is not None:
+                exchange(sock)
+            return True, f"Kết nối TCP {host}:{port} thành công" + (
+                ", dịch vụ trả lời đúng giao thức" if exchange is not None else ""
+            )
+    except (OSError, http.client.HTTPException) as exc:
+        return False, (
+            f"Dịch vụ tại {host}:{port} không phản hồi đúng ({type(exc).__name__}: {exc})"
+        )
 
 
 def _probe_http(url: str, timeout_sec: float = 2.5) -> tuple[bool, str]:
-    """Kiểm tra HTTP GET endpoint trả về mã 2xx."""
+    """Kiểm tra HTTP GET endpoint trả về mã 2xx; không bao giờ ném.
+
+    `URLError` chỉ bọc lỗi lúc kết nối. Quá thời gian khi chờ phản hồi (`TimeoutError`), ngắt kết
+    nối và phản hồi rác (`http.client.HTTPException`) thoát ra trực tiếp nên phải bắt riêng.
+    """
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
@@ -474,8 +537,8 @@ def _probe_http(url: str, timeout_sec: float = 2.5) -> tuple[bool, str]:
             if 200 <= status < 300:
                 return True, f"HTTP GET {url} -> {status} OK"
             return False, f"HTTP GET {url} trả về mã {status}"
-    except urllib.error.URLError as exc:
-        return False, f"Không gọi được HTTP {url} ({exc})"
+    except (OSError, http.client.HTTPException) as exc:
+        return False, f"Không gọi được HTTP {url} ({type(exc).__name__}: {exc})"
 
 
 def _resolve_host_endpoints(
@@ -596,7 +659,8 @@ def check_services(
         if svc in ("minio", "spark"):
             probe_ok, probe_msg = _probe_http(target_desc)
         else:
-            probe_ok, probe_msg = _probe_tcp(host, port)
+            handshake = _kafka_handshake if svc == "kafka" else _postgres_handshake
+            probe_ok, probe_msg = _probe_tcp(host, port, exchange=handshake)
 
         if not probe_ok:
             results.append(
@@ -689,7 +753,9 @@ def check_object_store_buckets(
             category="bucket",
             passed=False,
             exit_code=int(ExitCode.SERVICE_ERROR),
-            summary=f"Không kiểm được bucket '{bucket}' (profile={cfg.profile})",
+            summary=(
+                f"Không kiểm được bucket '{bucket}' trên object store MinIO (profile={cfg.profile})"
+            ),
             detail=result.detail,
         )
     ]

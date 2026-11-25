@@ -62,3 +62,12 @@
 - `n06 generate` dùng hệ thống cấu hình chung nên vẫn đòi đủ 6 credential trong `.env` hoặc môi trường dù lệnh này không dùng chúng; chưa nới.
 - Giới hạn chưa kiểm: khi đích ghi nằm ở ổ khác với ổ chứa đĩa ảo (ví dụ `--out /mnt/c/...` còn Docker nằm ổ D), ước lượng gộp `pipeline_bytes_per_tx` (khi đã đo) vẫn chỉ so với ổ của đích, trong khi Kafka, MinIO và Postgres ghi vào ổ chứa đĩa ảo Docker; hiện vô hại vì phần pipeline chưa đo.
 - Giới hạn chưa kiểm: Docker Desktop có thể đặt đĩa ảo của nó trên ổ khác với đĩa ảo WSL của distro; guard chỉ đọc một ổ (ổ chứa distro, hoặc `limits.disk_probe_path`). Trên máy này hai đĩa ảo cùng nằm trên ổ D.
+
+## Probe dịch vụ của `n06 doctor`
+
+- Không probe nào được ném ngoại lệ: dịch vụ từ chối kết nối, quá thời gian (`TimeoutError`), ngắt kết nối hay trả lời sai đều là FAIL mã `14` kèm tên dịch vụ.
+- MinIO và Spark: HTTP GET (mã 2xx). Kafka: bắt tay `ApiVersions` phiên bản 0. PostgreSQL: gửi `SSLRequest`, chờ `S` hoặc `N`. Chỉ mở được cổng TCP **không** đủ để coi dịch vụ sống.
+- Bucket: `HEAD` có ký; lỗi truyền tải là mã `14`.
+- Giới hạn: probe không xác thực với PostgreSQL và không kiểm quyền; thời gian chờ mỗi probe là 2-5 giây, cố định trong mã.
+- Còn tồn đọng: `n06 doctor` văng traceback khi `N06_*_HOST_PORT` không phải số (lỗi cấu hình, không thuộc probe).
+
