@@ -4,7 +4,7 @@
 - Người viết: agent (soạn theo yêu cầu của chủ dự án để mở khóa T22 và T23), 2026-11-25
 - Người duyệt: A (T22, T23; image Spark theo `infra/README.md`), C (Compose, cấu hình, `src/n06/cli/`), B (`src/n06/storage/`: control store, object store)
 - Ngày: 2026-11-25
-- Mục đặc tả liên quan (docs/spec.md): Phần I mục 6, 8.1; Phần II mục 4, 7
+- Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 3, 6, 8.1, 12; Phần II mục 4, 7
 
 Chưa được sửa `pyproject.toml`, `uv.lock` hay `infra/spark/Dockerfile` trước khi ADR này chuyển Accepted.
 Hai quyết định dưới đây độc lập, có thể duyệt riêng.
@@ -21,11 +21,11 @@ Hiện trạng kiểm tra ngày 2026-11-25:
 - **Không có bằng chứng đường `psycopg` của control store (`PsycopgControlStore`) đã chạy với PostgreSQL thật**, và không có unit test cho nó. Trên máy hiện tại host không có `psycopg` lẫn `psql`, nên test tích hợp Postgres đi qua `PsqlCliControlStore` bằng `docker compose exec ... psql` (đường dự phòng viết trong test).
 - `connect_control_store` và `n06.control.migrations` thử `psycopg`, rồi `psycopg2`, rồi `psql` **trên PATH của host**, rồi ném lỗi; chúng không dùng `psql` trong container, và không có nơi gọi nào trong `src/`.
 - Đặc tả mục 3: *"SQL có tham số cho giá trị; tên bảng/cột động chỉ nhận từ allowlist."* Đường `psql` hiện có ghép chuỗi SQL (`_escape_literal`), tức đã lệch yêu cầu này từ trước.
-- Đặc tả mục 3 cũng nói: *"Có một image job chứa Java, PySpark, các JAR đã ghim và gói `n06`."* và *"Spark chạy client mode ngay trong container của task: `local[N]` mặc định"*.
+- Đặc tả Phần I mục 2 ("Cách Airflow gọi Spark", dòng 201-202) nói: *"Có một image job chứa Java, PySpark, các JAR đã ghim và gói `n06`."* và *"Spark chạy client mode ngay trong container của task: `local[N]` mặc định"*.
 
 ## Quyết định 1: thêm `psycopg` ghim phiên bản
 
-Thêm vào `pyproject.toml` (`dependencies`), `uv.lock` và image Spark **cùng một bộ phiên bản** (kết quả `uv pip compile` cho Python 3.11, linux x86_64, ngày 2026-11-25):
+Thêm vào `pyproject.toml` (`dependencies`, vì mã trong `src/` chạy cả trên host), `uv.lock` và image Spark **cùng một bộ phiên bản** (kết quả `uv pip compile` cho Python 3.11, linux x86_64, ngày 2026-11-25):
 
 | Gói | Phiên bản |
 |---|---|
@@ -33,7 +33,7 @@ Thêm vào `pyproject.toml` (`dependencies`), `uv.lock` và image Spark **cùng 
 | `psycopg-binary` | `3.3.9` |
 | `typing-extensions` | `4.16.0` |
 
-Trong image, cài bằng `pip install --require-hashes` từ một tệp yêu cầu sinh từ `uv.lock`. Không được kéo theo `confluent-kafka` (chỉ host theo ADR-0010 và ma trận tương thích) hay chính dự án ở dạng editable: đề xuất đặt `psycopg` vào một nhóm riêng (ví dụ `[dependency-groups] spark-driver`, host cũng cài nhóm này) và xuất bằng `uv export --only-group spark-driver --no-emit-project`. **Chưa chạy thử** lệnh này.
+Trong image, cài bằng `pip install --require-hashes` từ một tệp yêu cầu sinh từ `uv.lock`, không kéo theo `confluent-kafka` (chỉ host theo ADR-0010 và ma trận tương thích) hay chính dự án ở dạng editable: `uv export --frozen --no-dev --no-emit-project --no-emit-package confluent-kafka`. Đã chạy thử trên `uv.lock` hiện tại (chưa có `psycopg`) ngày 2026-11-25: lệnh chạy được; **chưa kiểm** đầu ra sau khi thêm `psycopg` và việc cài trong image.
 
 Lý do:
 
@@ -51,7 +51,7 @@ Lý do **không** được dùng để biện minh: "mã upsert đã kiểm vớ
 ### Phương án đã loại
 
 - **(b) JDBC driver của PostgreSQL trong image.** Thêm một JAR phải ghim phiên bản và checksum. `DataFrameWriter` JDBC của Spark không có upsert `ON CONFLICT`, nên vẫn phải tự gọi JDBC qua py4j trong driver: một đường truy cập DB thứ hai, không dùng lại control store bằng Python.
-- **(c) Chạy driver Spark trên máy host.** Trái đặc tả mục 3 (image job chứa Java, PySpark, JAR và gói `n06`; Spark client mode ngay trong container của task). Còn phải thêm `pyspark` và Java đúng phiên bản trên host làm phụ thuộc, trong khi bộ JAR đã ghim (ADR-0001) chỉ có trong image nên môi trường chạy lệch khỏi ma trận tương thích. Với `spark://` (profile cluster), executor trong mạng Docker còn phải kết nối ngược về driver trên host; với `local[N]` mặc định thì không.
+- **(c) Chạy driver Spark trên máy host.** Theo cách hiểu của người viết, lệch Phần I mục 2 (có một image job chứa Java, PySpark, JAR và gói `n06`; đoạn nói về Airflow gọi Spark ghi Spark chạy client mode ngay trong container của task). Dòng 554 chỉ nói `stream` "chạy terminal/service riêng", không nói host hay container. Còn phải thêm `pyspark` và Java đúng phiên bản trên host làm phụ thuộc, trong khi bộ JAR đã ghim (ADR-0001) chỉ có trong image nên môi trường chạy lệch khỏi ma trận tương thích. Với `spark://` (profile cluster), executor trong mạng Docker còn phải kết nối ngược về driver trên host; với `local[N]` mặc định thì không.
 - **(d) Cài `postgresql-client` vào image và dùng đường `psql`** (không nằm trong ba lựa chọn ban đầu, nêu để người duyệt biết). Đây là đường duy nhất đã có bằng chứng trên Postgres thật, nhưng ghép chuỗi SQL, **trái yêu cầu SQL tham số hóa của đặc tả**: chọn (d) phải viết lại để tham số hóa hoặc lập ADR ngoại lệ. Ngoài ra vẫn là phụ thuộc mới của image và một tiến trình con mỗi batch.
 
 ### Tác động
@@ -66,7 +66,7 @@ Lý do **không** được dùng để biện minh: "mã upsert đã kiểm vớ
 
 T23 đưa file sao kê lên MinIO theo thứ tự file dữ liệu, manifest, rồi biên nhận `_ingest/`; tải lại cùng khóa chỉ được khi `sha256` giống (ADR-0002 mục 4).
 
-**Giả định:** T23 được chạy từ host như các lệnh `n06` hiện nay. Đặc tả mục 3 lại nói job chạy CLI trong image job; nếu T23 chạy trong image thì phương án B phải cài thêm gói vào image, còn A chạy được ở cả hai nơi.
+**Giả định:** T23 được chạy từ host như các lệnh `n06` hiện nay. Phần I mục 2 nói *"Toàn bộ job chạy qua CLI `n06`. Có một image job chứa Java, PySpark, các JAR đã ghim và gói `n06`."*; người viết hiểu rằng job có thể được chạy trong image đó. Nếu T23 chạy trong image thì phương án B phải cài thêm gói vào image; A không cần gói, nhưng cả hai cần cách suy địa chỉ MinIO trong mạng Docker (`resolve_host_endpoint` hiện chỉ suy địa chỉ cho host).
 
 **Liệt kê object:** ADR-0002 mục 4 yêu cầu pipeline liệt kê `_ingest/` để phát hiện file mới, và T25 phải liệt kê S3 thật trước khi ghi một run. Chưa quyết thành phần nào liệt kê bằng Python, thành phần nào dùng S3A/Hadoop FS trong Spark; câu trả lời ảnh hưởng lựa chọn dưới đây.
 
@@ -85,12 +85,12 @@ Giới hạn của S3: một lần `PUT` tối đa 5 GiB; multipart yêu cầu m
 
 ### Phương án A: mở rộng bộ ký SigV4 bằng thư viện chuẩn
 
-Thêm `PUT` object (và `HEAD` object) cạnh `src/n06/cli/object_store.py`.
+Thêm `PUT` object (và `HEAD` object), đặt trong `src/n06/storage/` cùng phần ký chuyển từ `src/n06/cli/object_store.py`.
 
 - Phải viết: gửi thân yêu cầu theo luồng với `Content-Length`; tính SHA-256 của payload trước khi gửi (bộ ký đã nhận `payload_sha256`); lưu `sha256` vào metadata và đọc lại bằng `HEAD` để giữ tính bất biến; ánh xạ lỗi và thử lại. Phần nào liệt kê bằng Python thì phải tự phân trang `ListObjectsV2` và phân tích XML.
-- Quy tắc hiện tại cấm rõ, cả trong docstring lẫn `src/n06/cli/README.md` (C sở hữu): *"Đây không phải thư viện S3 dùng chung: mã đọc/ghi dữ liệu (T22, T23, T25) không được import module này."* Chọn A là **đổi quy tắc đó**, cần C đồng ý; đề xuất chuyển phần ký và gọi HTTP sang `src/n06/storage/` (B sở hữu, đúng mục đích *"Object store"*), `cli` nhập từ đó.
+- Quy tắc hiện tại cấm rõ: `src/n06/cli/README.md` (C sở hữu) ghi *"Đây không phải thư viện S3 dùng chung: mã đọc/ghi dữ liệu (T22, T23, T25) không được import module này."*; docstring `object_store.py` ghi *"[...] mã đọc/ghi dữ liệu (T22, T23, T25) không được dựa vào module này."* Chọn A là **đổi quy tắc đó**, cần C đồng ý; đề xuất chuyển phần ký và gọi HTTP sang `src/n06/storage/` (B sở hữu, đúng mục đích *"Object store"*), `cli` nhập từ đó.
 - Không thêm phụ thuộc. Không có multipart; đối tượng lớn hơn giới hạn một lần `PUT` sẽ không ghi được.
-- Kiểm thử: bộ ví dụ ký của AWS hiện có đã gồm một `PUT` có thân. Với MinIO thật, bộ ký **mới được kiểm cho `HEAD`/`PUT` bucket thân rỗng**; `PUT` object có thân và metadata **chưa kiểm**. Máy chủ S3 giả hiện có không đọc thân yêu cầu nên phải mở rộng; thêm test tích hợp MinIO thật (ghi, đọc lại, so `sha256`, ghi đè khác nội dung bị từ chối, file lớn).
+- Kiểm thử: bộ ví dụ ký của AWS hiện có đã gồm một `PUT` có thân. Với MinIO thật, bộ ký **mới được kiểm cho các yêu cầu thân rỗng** (`HEAD`/`PUT` bucket; test tích hợp còn ký `GET /` và `DELETE` bucket); `PUT` object có thân và metadata **chưa kiểm**. Máy chủ S3 giả hiện có không đọc thân yêu cầu nên phải mở rộng; thêm test tích hợp MinIO thật (ghi, đọc lại, so `sha256`, ghi đè khác nội dung bị từ chối, file lớn).
 
 ### Phương án B: thêm client S3 (`boto3`)
 
