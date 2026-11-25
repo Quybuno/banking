@@ -1,10 +1,10 @@
-# ADR-0012: Driver PostgreSQL cho Spark (T22) và cách ghi object lên MinIO (T23)
+# ADR-0012: Driver PostgreSQL trong image Spark (T22) và cách ghi object lên MinIO (T23)
 
 - Trạng thái: Proposed
 - Người viết: agent (soạn theo yêu cầu của chủ dự án để mở khóa T22 và T23), 2026-11-25
 - Người duyệt: A (T22, T23; image Spark theo `infra/README.md`), C (Compose, cấu hình, `src/n06/cli/`), B (`src/n06/storage/`: control store, object store)
 - Ngày: 2026-11-25
-- Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 3, 6, 8.1, 12; Phần II mục 4, 7
+- Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 3, 6, 8.1; Phần II mục 4, 7
 
 Chưa được sửa `pyproject.toml`, `uv.lock` hay `infra/spark/Dockerfile` trước khi ADR này chuyển Accepted.
 Hai quyết định dưới đây độc lập, có thể duyệt riêng.
@@ -13,62 +13,68 @@ Hai quyết định dưới đây độc lập, có thể duyệt riêng.
 
 Đặc tả mục 8.1 bước 3: *"Sau khi mọi output của batch đã ghi xong, upsert một dòng vào bảng control `ingest_batches` [...] Callback chỉ trả thành công sau bước này."* Callback `foreachBatch` chạy trong driver Python của Spark nên driver phải ghi được PostgreSQL.
 
-Hiện trạng kiểm tra ngày 2026-11-25:
+### Driver mà control store của T21/T24 đang dùng ở host
 
-- Image `n06-spark:3.5.8-py311` không có `psycopg` lẫn `psycopg2`.
-- **`psycopg` không có trong `pyproject.toml` hay `uv.lock`, và không cài trên máy host.** Vì vậy chưa có "phiên bản đã ghim ở host" để image dùng trùng; quyết định này phải thêm cùng một phiên bản vào cả hai nơi.
-- **Control store chưa có upsert cho `ingest_batches`.** `src/n06/storage/control_store.py` chỉ có `list_committed_ingest_batches`; các câu `ON CONFLICT` hiện có là của `current_snapshot`.
-- **Không có bằng chứng đường `psycopg` của control store (`PsycopgControlStore`) đã chạy với PostgreSQL thật**, và không có unit test cho nó. Trên máy hiện tại host không có `psycopg` lẫn `psql`, nên test tích hợp Postgres đi qua `PsqlCliControlStore` bằng `docker compose exec ... psql` (đường dự phòng viết trong test).
-- `connect_control_store` và `n06.control.migrations` thử `psycopg`, rồi `psycopg2`, rồi `psql` **trên PATH của host**, rồi ném lỗi; chúng không dùng `psql` trong container, và không có nơi gọi nào trong `src/`.
-- Đặc tả mục 3: *"SQL có tham số cho giá trị; tên bảng/cột động chỉ nhận từ allowlist."* Đường `psql` hiện có ghép chuỗi SQL (`_escape_literal`), tức đã lệch yêu cầu này từ trước.
-- Đặc tả Phần I mục 2 ("Cách Airflow gọi Spark", dòng 201-202) nói: *"Có một image job chứa Java, PySpark, các JAR đã ghim và gói `n06`."* và *"Spark chạy client mode ngay trong container của task: `local[N]` mặc định"*.
+**`psql` bên trong container `postgres`, gọi bằng `docker compose exec`, qua lớp `PsqlCliControlStore`** (và bộ chạy `psql` riêng của test migration). Bằng chứng đo ngày 2026-11-25 trên máy phát triển, Postgres thật 16.6 (lệnh ở phụ lục A):
 
-## Quyết định 1: thêm `psycopg` ghim phiên bản
-
-Thêm vào `pyproject.toml` (`dependencies`, vì mã trong `src/` chạy cả trên host), `uv.lock` và image Spark **cùng một bộ phiên bản** (kết quả `uv pip compile` cho Python 3.11, linux x86_64, ngày 2026-11-25):
-
-| Gói | Phiên bản |
+| Quan sát | Kết quả |
 |---|---|
-| `psycopg[binary]` (`psycopg`) | `3.3.9` |
-| `psycopg-binary` | `3.3.9` |
-| `typing-extensions` | `4.16.0` |
+| `tests/integration/test_control_migrations.py` (T21) và `tests/integration/test_commit_postgres.py` (T24) | 2/2 PASS, không skip |
+| `import psycopg`, `import psycopg2` trên host | không có |
+| `psql` trên PATH của host | không có |
+| Lệnh con chạm Postgres | 44 lần `docker compose -f docker-compose.yml exec -T ... postgres psql` |
+| Phương thức `PsqlCliControlStore` được gọi | `_run_sql` 17, `commit_run_atomic` 5, `start_run` 4, `get_run` 4, `resolve_current_snapshot` 4, `fail_run` 1 |
+| Phương thức `PsycopgControlStore` được gọi | **0** |
 
-Trong image, cài bằng `pip install --require-hashes` từ một tệp yêu cầu sinh từ `uv.lock`, không kéo theo `confluent-kafka` (chỉ host theo ADR-0010 và ma trận tương thích) hay chính dự án ở dạng editable: `uv export --frozen --no-dev --no-emit-project --no-emit-package confluent-kafka`. Đây là danh sách loại trừ: gói chỉ dành cho host thêm vào `dependencies` sau này sẽ lọt vào image nếu không cập nhật lệnh. Đã chạy thử trên `uv.lock` hiện tại (chưa có `psycopg`) ngày 2026-11-25: lệnh chạy được; **chưa kiểm** đầu ra sau khi thêm `psycopg` và việc cài trong image.
+Hệ quả: không có bằng chứng đường `psycopg` đã chạy với PostgreSQL thật; `psycopg` cũng không có trong `pyproject.toml`, `uv.lock`. Control store chưa có upsert `ingest_batches` (chỉ có `list_committed_ingest_batches`).
 
-Lý do:
+Hiện trạng khác:
 
-1. Truy vấn tham số hóa qua DB-API, đúng yêu cầu *"SQL có tham số cho giá trị"* của đặc tả mục 3, thay vì ghép chuỗi như đường `psql`.
-2. Một transaction ngay trong driver, không tạo tiến trình con cho mỗi batch và không đưa mật khẩu qua `PGPASSWORD`.
-3. Dùng lại giao diện `ControlStore` và lớp `PsycopgControlStore` đã viết, vốn đã là lựa chọn đầu tiên của mã hiện có.
+- `connect_control_store` thử `psycopg`, rồi `psycopg2`, rồi `psql` trên PATH, rồi ném lỗi. Image `n06-spark:3.5.8-py311` không có cái nào trong ba.
+- Đặc tả mục 3: *"SQL có tham số cho giá trị; tên bảng/cột động chỉ nhận từ allowlist."* `PsqlCliControlStore` hiện **ghép chuỗi SQL** (`_escape_literal`), tức đã lệch yêu cầu này từ trước.
 
-Lý do **không** được dùng để biện minh: "mã upsert đã kiểm với Postgres thật" (xem Bối cảnh: chưa đúng). Upsert mới nằm trong `src/n06/storage/` (B sở hữu) trong khi T22 thuộc A, nên cần B duyệt phần đó. Việc cập nhật phụ thuộc, image và ma trận chưa có thẻ nào trong `docs/TASKS.md`; người duyệt quyết gộp vào T22 hay tách task.
+## Quyết định 1: image Spark dùng cùng `psql` 16.6 mà host đang dùng
 
-Điều kiện bắt buộc khi hiện thực (thuộc T22 hoặc một task mở đường):
+Tiêu chí: **khớp với host nếu chạy được trong image**. Đường của host chạy được trong image (đo ngày 2026-11-25 trong container tạm, không sửa image hay Dockerfile):
 
-- Chạy test PostgreSQL hiện có qua đường `psycopg` trên Postgres thật trước khi viết mã mới. `tests/integration/test_commit_postgres.py` hiện bắt `except Exception` rồi chuyển sang `psql`, và có `pytest.skip`: phải sửa để lỗi của đường `psycopg` không bị che.
-- Viết upsert `ingest_batches` với `ON CONFLICT (query_name, batch_id) DO UPDATE` (ADR-0003) và test trên Postgres thật, gồm ca gọi hai lần cùng khóa.
+| Thử nghiệm | Kết quả |
+|---|---|
+| Chép `psql` và `libpq.so.5` từ `postgres:16.6-bookworm` vào image Spark (build nhiều tầng tạm, đã xóa image) | `ldd` đủ thư viện; `psql (PostgreSQL) 16.6`; nối được server 16.6 |
+| `connect_control_store` trong container Spark có `psql` trên PATH (bản `postgresql-client-16` 16.16 từ kho PGDG) | chọn `PsqlCliControlStore`; truy vấn đọc `ingest_batches` thật thành công |
+| Truyền tham số: `psql -v val=...` và `SELECT $1::text \bind :val \g` (16.6) | giá trị chứa dấu nháy, `;`, `\`, khoảng trắng được giữ nguyên, không cần tự escape |
+
+**Chốt đề xuất:**
+
+1. `infra/spark/Dockerfile` thêm một tầng `FROM postgres:16.6-bookworm` và chép `psql` cùng `libpq.so.5`. Image nguồn ghim theo tag và digest `sha256:557fea37a744d5f4c8faab304b0a90858b53ab119735a88c131fd19dab802f36`; đây chính là image Compose đang dùng cho server, nên client và server cùng 16.6.
+2. Không thêm gói Python và không đổi `pyproject.toml`, `uv.lock`.
+3. **Điều kiện bắt buộc trước khi T22 dùng:** câu lệnh có giá trị (gồm upsert `ingest_batches` mới và các câu hiện có của `PsqlCliControlStore`) phải truyền giá trị bằng biến `-v` và `\bind`, bỏ ghép chuỗi, để đáp ứng yêu cầu SQL tham số hóa; test trên Postgres thật với giá trị có dấu nháy, `;`, `\`. Việc này sửa mã của B (T24).
+4. Upsert `ingest_batches` dùng `ON CONFLICT (query_name, batch_id) DO UPDATE` (ADR-0003), test gọi hai lần cùng khóa.
+
+Giới hạn đã biết:
+
+- Mỗi lần ghi là một tiến trình con.
+- Giá trị truyền qua `-v` nằm trong argv, xem được bằng `ps` trong container (dữ liệu control không phải secret; mật khẩu đi qua `PGPASSWORD`).
+- Linux giới hạn một đối số khoảng 128 KiB; `topic_offsets` nhỏ hơn nhiều, **chưa kiểm** ở nhiều partition.
+- Chưa kiểm một transaction nhiều câu lệnh dùng `\bind` qua mã Python, và hook chèn lỗi của `commit_run_atomic`.
+- Host vẫn dùng `docker compose exec`; image dùng `psql` cục bộ: cùng client, khác cách gọi.
 
 ### Phương án đã loại
 
-- **(b) JDBC driver của PostgreSQL trong image.** Thêm một JAR phải ghim phiên bản và checksum. `DataFrameWriter` JDBC của Spark không có upsert `ON CONFLICT`, nên vẫn phải tự gọi JDBC qua py4j trong driver: một đường truy cập DB thứ hai, không dùng lại control store bằng Python.
-- **(c) Chạy driver Spark trên máy host.** Theo cách hiểu của người viết, lệch Phần I mục 2 (có một image job chứa Java, PySpark, JAR và gói `n06`; đoạn nói về Airflow gọi Spark ghi Spark chạy client mode ngay trong container của task). Dòng 554 chỉ nói `stream` "chạy terminal/service riêng", không nói host hay container. Còn phải thêm `pyspark` và Java đúng phiên bản trên host làm phụ thuộc, trong khi bộ JAR đã ghim (ADR-0001) chỉ có trong image nên môi trường chạy lệch khỏi ma trận tương thích. Với `spark://` (profile cluster), executor trong mạng Docker còn phải kết nối ngược về driver trên host; với `local[N]` mặc định thì không.
-- **(d) Cài `postgresql-client` vào image và dùng đường `psql`** (không nằm trong ba lựa chọn ban đầu, nêu để người duyệt biết). Đây là đường duy nhất đã có bằng chứng trên Postgres thật, nhưng ghép chuỗi SQL, **trái yêu cầu SQL tham số hóa của đặc tả**: chọn (d) phải viết lại để tham số hóa hoặc lập ADR ngoại lệ. Ngoài ra vẫn là phụ thuộc mới của image và một tiến trình con mỗi batch.
+- **`psycopg` ghim phiên bản** (đề xuất trước của người viết). Không khớp host (host không dùng và chưa từng cài), thêm phụ thuộc Python mới vào `pyproject.toml`, `uv.lock` và image, và đưa vào sử dụng một đường chưa có bằng chứng chạy. Đổi lại sẽ có tham số hóa qua DB-API mà không phải viết lại lệnh `psql`.
+- **`postgresql-client-16` từ kho apt PGDG.** Chạy được (16.16), nhưng thêm kho và khóa ngoài lúc build, phiên bản cũ có thể bị gỡ khỏi kho, và lệch minor với server.
+- **`postgresql-client` của Debian bookworm (15).** Không có `\bind` (chỉ từ 16).
+- **JDBC driver trong image.** Thêm JAR phải ghim; `DataFrameWriter` JDBC không có upsert `ON CONFLICT`, phải gọi qua py4j: đường truy cập thứ hai, không dùng lại control store Python.
+- **Chạy driver Spark trên host.** Theo cách hiểu của người viết, lệch Phần I mục 2 (một image job chứa Java, PySpark, JAR và gói `n06`; đoạn nói về Airflow gọi Spark ghi Spark chạy client mode ngay trong container của task; dòng 554 chỉ nói `stream` "chạy terminal/service riêng"). Cần thêm `pyspark` và Java trên host, môi trường lệch khỏi ma trận tương thích.
 
 ### Tác động
 
-- `docs/compatibility-matrix.md`: thêm ba dòng gói Python ở trên kèm SHA-256 của wheel (lấy từ PyPI khi hiện thực) và cách kiểm lại; ghi rõ chúng nằm cả ở host lẫn image, khác dòng `confluent-kafka` (chỉ host).
-- Build image: thêm một lớp `pip install` sau các JAR; build cần truy cập PyPI (ADR-0001 chỉ cấm tải lúc chạy job). Phải dựng lại image (`docker compose --profile core build spark`) trên mọi máy; kiểm bằng `docker run --rm n06-spark:3.5.8-py311 python3 -c "import psycopg"`.
-- Giấy phép `psycopg`: LGPL-3.0 theo hiểu biết của người viết, **chưa kiểm** từ gói.
-- Khi `psycopg` được cài trên host, `connect_control_store` và migration hết ném lỗi trên máy này và dùng `psycopg`; **test** hiện có chuyển từ `psql` trong container sang `psycopg`.
-- Chưa quyết ở ADR này: cách đưa gói `n06` và `contracts/` vào image (đặc tả yêu cầu image job chứa gói `n06`; image hiện tại chưa có) và cách khởi chạy `n06 stream` (thuộc kế hoạch T22).
+- `docs/compatibility-matrix.md`: thêm dòng `psql`/`libpq` 16.6 lấy từ `postgres:16.6-bookworm` kèm digest và cách kiểm (`docker run --rm n06-spark:3.5.8-py311 psql --version`).
+- Build image cần sẵn `postgres:16.6-bookworm` (Compose đã kéo về); thêm một tầng nhỏ; phải dựng lại image trên mọi máy.
+- Chưa quyết ở ADR này: cách đưa gói `n06` và `contracts/` vào image (đặc tả yêu cầu image job chứa gói `n06`; image hiện tại chưa có) và cách khởi chạy `n06 stream` (kế hoạch T22).
 
-## Quyết định 2: ghi object lên MinIO từ Python (T23)
+## Quyết định 2: T23 ghi object bằng bộ ký SigV4 sẵn có, mở rộng sang `PUT` object
 
 T23 đưa file sao kê lên MinIO theo thứ tự file dữ liệu, manifest, rồi biên nhận `_ingest/`; tải lại cùng khóa chỉ được khi `sha256` giống (ADR-0002 mục 4).
-
-**Giả định:** T23 được chạy từ host như các lệnh `n06` hiện nay. Phần I mục 2 nói *"Toàn bộ job chạy qua CLI `n06`. Có một image job chứa Java, PySpark, các JAR đã ghim và gói `n06`."*; người viết hiểu rằng job có thể được chạy trong image đó. Nếu T23 chạy trong image thì phương án B phải cài thêm gói vào image; A không cần gói, nhưng cả hai cần cách suy địa chỉ MinIO trong mạng Docker (`resolve_host_endpoint` hiện chỉ suy địa chỉ cho host).
-
-**Liệt kê object:** ADR-0002 mục 4 yêu cầu pipeline liệt kê `_ingest/` để phát hiện file mới, và T25 phải liệt kê S3 thật trước khi ghi một run. Chưa quyết thành phần nào liệt kê bằng Python, thành phần nào dùng S3A/Hadoop FS trong Spark; câu trả lời ảnh hưởng lựa chọn dưới đây.
 
 ### Số đo file sao kê của dataset do generator sinh
 
@@ -83,35 +89,42 @@ Mỗi file có một manifest 285 byte trở xuống. **Ngoại suy tuyến tín
 
 Giới hạn của S3: một lần `PUT` tối đa 5 GiB; multipart yêu cầu mỗi phần (trừ phần cuối) tối thiểu 5 MiB. Mọi mức ở trên nằm xa dưới 5 GiB, nên **không cần multipart**.
 
-### Phương án A: mở rộng bộ ký SigV4 bằng thư viện chuẩn
+### Nội dung
 
-Thêm `PUT` object (và `HEAD` object), đặt trong `src/n06/storage/` cùng phần ký chuyển từ `src/n06/cli/object_store.py`.
+1. Thêm `PUT` object và `HEAD` object dùng bộ ký SigV4 bằng thư viện chuẩn. Chuyển phần ký và gọi HTTP từ `src/n06/cli/object_store.py` sang `src/n06/storage/` (B sở hữu, mục đích *"Object store"*); `cli` nhập từ đó.
+2. Việc này **đổi một quy tắc hiện hành**: `src/n06/cli/README.md` ghi *"Đây không phải thư viện S3 dùng chung: mã đọc/ghi dữ liệu (T22, T23, T25) không được import module này."*, docstring `object_store.py` ghi *"[...] mã đọc/ghi dữ liệu (T22, T23, T25) không được dựa vào module này."* Cần C và B đồng ý; cập nhật cả hai chỗ.
+3. Gửi thân yêu cầu theo luồng với `Content-Length`; tính SHA-256 của payload trước khi gửi; lưu `sha256` vào metadata và đọc lại bằng `HEAD` để giữ tính bất biến; ánh xạ lỗi và thử lại có giới hạn.
+4. Không multipart (mọi kích thước đo và ngoại suy nằm xa dưới giới hạn một lần `PUT`).
+5. Không thêm phụ thuộc.
 
-- Phải viết: gửi thân yêu cầu theo luồng với `Content-Length`; tính SHA-256 của payload trước khi gửi (bộ ký đã nhận `payload_sha256`); lưu `sha256` vào metadata và đọc lại bằng `HEAD` để giữ tính bất biến; ánh xạ lỗi và thử lại. Phần nào liệt kê bằng Python thì phải tự phân trang `ListObjectsV2` và phân tích XML.
-- Quy tắc hiện tại cấm rõ: `src/n06/cli/README.md` (C sở hữu) ghi *"Đây không phải thư viện S3 dùng chung: mã đọc/ghi dữ liệu (T22, T23, T25) không được import module này."*; docstring `object_store.py` ghi *"[...] mã đọc/ghi dữ liệu (T22, T23, T25) không được dựa vào module này."* Chọn A là **đổi quy tắc đó**, cần C đồng ý; đề xuất chuyển phần ký và gọi HTTP sang `src/n06/storage/` (B sở hữu, đúng mục đích *"Object store"*), `cli` nhập từ đó.
-- Không thêm phụ thuộc. Không có multipart; đối tượng lớn hơn giới hạn một lần `PUT` sẽ không ghi được.
-- Kiểm thử: bộ ví dụ ký của AWS hiện có đã gồm một `PUT` có thân. Với MinIO thật, bộ ký **mới được kiểm cho các yêu cầu thân rỗng** (`HEAD`/`PUT` bucket; test tích hợp còn ký `GET /` và `DELETE` bucket); `PUT` object có thân và metadata **chưa kiểm**. Máy chủ S3 giả hiện có không đọc thân yêu cầu nên phải mở rộng; thêm test tích hợp MinIO thật (ghi, đọc lại, so `sha256`, ghi đè khác nội dung bị từ chối, file lớn).
+### Kiểm thử
 
-### Phương án B: thêm client S3 (`boto3`)
+- Dùng lại known-answer test **PUT Object** của AWS đã có: `tests/unit/cli/test_object_store_sigv4.py` (vector `PUT Object (test$file.text)`, thân `Welcome to Amazon S3.`), chuyển theo mã đã dời.
+- Bộ ký **mới được kiểm trên MinIO thật cho yêu cầu thân rỗng** (`HEAD`/`PUT` bucket, `GET /`, `DELETE` bucket); `PUT` object có thân và metadata **chưa kiểm**. Máy chủ S3 giả hiện có không đọc thân yêu cầu nên phải mở rộng.
+- Test tích hợp MinIO thật: ghi, đọc lại, so `sha256`, tải lại cùng nội dung không đổi, khác nội dung bị từ chối, file lớn nhất theo ngoại suy.
 
-- Ghim `boto3 1.44.11`, `botocore 1.44.11`, `s3transfer 0.19.3`, `jmespath 1.1.0`, `python-dateutil 2.9.0.post0`, `six 1.17.0`, `urllib3 2.8.0` (kết quả giải phụ thuộc ngày 2026-11-25, **chưa cài thử**) vào `pyproject.toml` và `uv.lock`; thêm vào ma trận tương thích. Chỉ host, trừ khi T23 hoặc T25 chạy trong image.
-- Có sẵn multipart, thử lại, phân trang liệt kê, `HeadObject`. Ít mã tự bảo trì hơn.
-- Rủi ro **chưa kiểm**: các bản `boto3` từ 1.36 đổi mặc định về checksum toàn vẹn, một số kho tương thích S3 không chấp nhận; phải kiểm với image MinIO đã ghim và có thể phải cấu hình lại.
-- Kho mã sẽ có hai đường gọi S3 (quản trị bucket bằng bộ ký tự viết, ghi dữ liệu bằng `boto3`).
-- Kiểm thử: `botocore.stub.Stubber` cho unit test, MinIO thật cho tích hợp.
+### Phương án đã loại
 
-(`minio` SDK cũng làm được; kết quả giải ngày 2026-11-25 là chín gói, có gói biên dịch mã hóa, **chưa cài thử**; không đề xuất.)
+- **`boto3`.** Thêm bảy gói (`boto3 1.44.11` cùng `botocore`, `s3transfer`, `jmespath`, `python-dateutil`, `six`, `urllib3`; kết quả giải phụ thuộc ngày 2026-11-25, **chưa cài thử**), có sẵn multipart, thử lại, phân trang liệt kê mà T23 chưa cần; các bản từ 1.36 đổi mặc định checksum, tương thích với MinIO đã ghim **chưa kiểm**.
+- **`minio` SDK.** Chín gói theo kết quả giải ngày 2026-11-25, **chưa cài thử**.
 
-### Quyết định 2 (đề xuất)
+### Còn mở
 
-Chọn **A**, đặt phần ký và gọi HTTP trong `src/n06/storage/`, phạm vi chỉ `PUT` và `HEAD` object cho T23. Lý do: kích thước file nhỏ so với giới hạn một lần `PUT`, không thêm phụ thuộc, chạy được ở host lẫn image. Điều kiện xem lại: nếu T23 hoặc T25 phải liệt kê object từ Python và ghi nhiều đối tượng lớn thì B đáng chi phí hơn. Cần B và C đồng ý trước khi Accepted.
+- **Liệt kê object:** ADR-0002 mục 4 yêu cầu pipeline liệt kê `_ingest/` và T25 phải liệt kê S3 thật trước khi ghi một run. Quyết định này chỉ phủ `PUT`/`HEAD`; nếu việc liệt kê làm bằng Python thì phải thêm `ListObjectsV2` (phân trang, XML), còn dùng S3A/Hadoop FS trong Spark thì không cần. Chủ: B, trước T25.
+- **Giả định:** T23 chạy từ host như các lệnh `n06` hiện nay. Phần I mục 2 nói *"Toàn bộ job chạy qua CLI `n06`. Có một image job [...]"*; nếu T23 chạy trong image thì cần suy địa chỉ MinIO trong mạng Docker (`resolve_host_endpoint` hiện chỉ suy cho host).
 
 ## Hệ quả chung
 
-- Sau khi Accepted: một task cập nhật phụ thuộc, image và ma trận; T22 phụ thuộc quyết định 1, T23 phụ thuộc quyết định 2.
-- Nếu chỉ một quyết định được duyệt, task tương ứng được mở khóa riêng.
+- Sau khi Accepted: T22 phụ thuộc quyết định 1, T23 phụ thuộc quyết định 2; duyệt quyết định nào mở khóa task đó.
+- Việc cập nhật image, ma trận tương thích, viết lại lệnh `psql` và dời bộ ký chưa có thẻ trong `docs/TASKS.md`; người duyệt quyết gộp vào T22/T23 hay tách task.
 
-## Phụ lục: tái hiện số đo file sao kê
+## Phụ lục A: bằng chứng đường kết nối (đo 2026-11-25)
+
+- Host: chạy hai test tích hợp trên với một plugin pytest tạm (ngoài repo) bọc `subprocess.run` (che `PGPASSWORD`) và đếm phương thức của `PsqlCliControlStore`, `PsycopgControlStore`.
+- Image, bản 16.6: Dockerfile tạm gồm `FROM postgres:16.6-bookworm AS pg`, `FROM n06-spark:3.5.8-py311`, `COPY --from=pg /usr/lib/postgresql/16/bin/psql /usr/local/bin/psql`, `COPY --from=pg /usr/lib/x86_64-linux-gnu/libpq.so.5 /usr/lib/x86_64-linux-gnu/`; chạy `ldd`, `psql --version`, `psql -h postgres ... -c 'select version()'` trên mạng `n06_network`.
+- Image, control store: container tạm `--user root`, cài `postgresql-client-16` từ PGDG, gắn `src/` và `config/` chỉ đọc, gọi `connect_control_store(load_config(profile="default").postgres.control).list_committed_ingest_batches(...)`.
+
+## Phụ lục B: tái hiện số đo file sao kê
 
 ```bash
 uv run n06 generate --profile demo \

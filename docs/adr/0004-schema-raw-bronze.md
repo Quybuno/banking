@@ -6,7 +6,7 @@
 - Ngày: 2026-11-25
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 4.1, 6, 8.1 (streaming), 10, 12, 14.2; Phần II mục 3, 4, 8
 
-**Phạm vi: chỉ Raw và Bronze của luồng sự kiện Kafka. Silver và Gold: chưa quyết, B bổ sung trước T25.**
+**Phạm vi: chỉ Raw và Bronze của luồng sự kiện Kafka.** Bronze của accounts và statement là việc mở (mục "Việc mở"). Silver ngoài phạm vi. Schema Gold thuộc ADR-005 theo `docs/TASKS.md`, không thuộc ADR này.
 ADR này chưa được dùng làm căn cứ code cho tới khi chuyển Accepted và các câu hỏi ở mục "Câu hỏi phải chốt" có đáp án.
 
 ## Bối cảnh
@@ -26,6 +26,7 @@ Nguồn trích (số dòng của `docs/spec.md`):
 - S384, S385, S387 (mục 8.1 streaming): ghi Raw rồi Bronze (kèm bản ghi parse lỗi) theo `batch_id`; upsert `ingest_batches` khóa (query_name, batch_id) kèm khoảng offset theo topic-partition và số bản ghi; *"Chết sau bước 3 nhưng trước khi checkpoint ghi nhận: phát lại ghi đè cùng nội dung và upsert không tạo dòng mới."*
 - S746: *"[...] source pointer gồm file/checksum/line number hoặc topic/partition/offset."*
 - Các dòng dùng thêm: S234 (tiền là số nguyên), S300 (*"Lưu statement nguyên bản cùng manifest/checksum [...]"*), S309 (tiêu đề `#### Silver`, S317 nằm dưới mục này), S313-S316 (dedup ở Silver), S322 (*"Tách các đếm: physical Kafka records, unique event, unique business record, rejected record, nghiệp vụ hợp lệ."*), S386 (*"Job batch chỉ đọc các `batch_id` có trong `ingest_batches`."*), S432 (chờ *"offset/record kỳ vọng đã commit"*), S621 (độ trễ = `ingested_at` − `kafka_timestamp`), S740 (*"Accounts và statements đều là JSONL trong v1 [...] Bronze chuyển sang Parquet là bước pipeline."*), S891 (`ENVELOPE_PAYLOAD_MISMATCH`: *"event_type/dataset/time không khớp payload"*).
+- S379 (mục 8.1, batch, bước 6): *"[...] run_id/timestamp vận hành được phép khác."*; S384: ghi theo `batch_id`, *"chế độ overwrite"*; S385 gồm câu *"Callback chỉ trả thành công sau bước này."*; S724: *"Envelope dataset_id/event_time phải trùng payload; event_type đúng entity, source_batch_id nằm trong manifest nguồn."*
 - S876 (Phần II mục 8): thứ tự ưu tiên mã lỗi; *"Nếu một record có nhiều lỗi cùng mức, lưu tất cả issue_codes, chọn primary theo thứ tự mã đã tài liệu hóa."*
 - Phần II mục 3: schema chốt kiểu, miền giá trị, enum, trường bắt buộc, cấm trường ngoài schema; các kiểm tra join giữa file (account tồn tại, ledger khớp transaction, envelope khớp payload, ...) cần domain validator.
 
@@ -141,15 +142,46 @@ Theo ADR-0002: `<raw_prefix>/<query_name>/ingestion_date=<d>/batch_id=<id>/` và
 
 Một batch hoàn tất tương ứng đúng một dòng khóa `(query_name, batch_id)`, upsert **sau** khi mọi output đã ghi (S385).
 
+**Đề xuất (Q1): `dataset_id` không bắt buộc trong `ingest_batches`.** S385 liệt kê nội dung của dòng (khóa, khoảng offset, số bản ghi) và không có `dataset_id`; S298 đặt `dataset_id` ở từng record Raw (*"nếu parse được"*). Một microbatch có thể chứa nhiều dataset hoặc record không đọc được. Vì vậy:
+
+- Migration **mới** `0002` (không sửa `0001`): `ALTER TABLE ingest_batches ALTER COLUMN dataset_id DROP NOT NULL`. Bước `down` đặt lại `NOT NULL` và **thất bại rõ ràng nếu còn dòng NULL** (không xóa dữ liệu).
+- Streaming ghi `dataset_id = NULL`; `dataset_id` nằm ở từng dòng Raw và Bronze.
+
 | Cột bảng | Giá trị |
 |---|---|
-| `query_name`, `batch_id` | của query `foreachBatch` |
-| `dataset_id` | **chưa quyết**, xem câu hỏi Q1 |
+| `query_name`, `batch_id` | của query `foreachBatch` (S385) |
+| `dataset_id` | `NULL` (cần migration 0002) |
 | `ingestion_date` | như mục 7 |
-| `topic_offsets` | khoảng offset theo topic-partition của batch (S385); dạng JSON: xem Q3 |
-| `record_count` | số record Raw của batch (giả định G7) |
+| `topic_offsets` | khoảng offset theo topic-partition của batch (S385); dạng: Q3 |
+| `record_count` | số record Raw của batch (G7) |
 | `raw_path`, `bronze_path` | URI `s3a://` theo ADR-0002 |
 | `status` | `COMMITTED` |
+
+Hệ quả phải làm cùng migration 0002 (thuộc task hiện thực sau khi Accepted, cần B duyệt vì đụng ADR-0003 và mã của T24):
+
+- `IngestBatchRecord.dataset_id` đổi sang `str | None`.
+- `list_committed_ingest_batches(dataset_id=...)` đang lọc `WHERE dataset_id = %s` nên sẽ **không trả dòng nào**; phải liệt kê theo `query_name`.
+- Test đang kỳ vọng đúng một migration `0001` phải cập nhật. Chỉ mục `idx_ingest_batches_dataset_date` không còn hữu ích.
+
+### 9. `n06 wait-ingestion --dataset-id X` làm được khi `ingest_batches.dataset_id` là NULL
+
+**Thuật toán.**
+
+1. Tập kỳ vọng `E` = các `event_id` phân biệt trong những file events được manifest nguồn của dataset `X` liệt kê (thư mục nguồn lấy từ cấu hình `paths.generator_output_dir`). Đây là nguồn đã công bố, không phải ground truth.
+2. Tập quan sát `O` = các `event_id` trong Bronze `transaction` và `ledger_entry` có `envelope_dataset_id = X`, chỉ đọc các `batch_id` có trong `ingest_batches` của `query_name` đang chờ (S386).
+3. Sẵn sàng khi và chỉ khi `E ⊆ O` (kiểm bằng left anti join trong Spark). Chưa đủ thì đợi và đọc thêm batch mới; quá `--timeout-seconds` thì thoát mã khác 0, nêu `|E|`, số còn thiếu và số dòng `parse_error` có `dataset_id = X`.
+
+**Lập luận.**
+
+- *Không báo sẵn sàng sai.* Dòng `ingest_batches` chỉ tồn tại sau khi mọi output của batch đã ghi xong (S385), và chỉ batch đó được đọc (S386). `E ⊆ O` nghĩa là mọi sự kiện nguồn đã nằm bền vững trong Bronze.
+- *Tiến tới sẵn sàng.* Producer gửi đúng các dòng của file events (test `tests/integration/test_publish_kafka.py::test_default_key_count_matches_manifest_and_bytes_identical`: số message và đa tập byte trùng file nguồn); Raw giữ mọi record (S298); mỗi record Raw cho đúng một dòng Bronze (G11) và record hợp lệ giữ `event_id`. Khi mọi offset đã commit thì `O ⊇ E`.
+- *Không bị bản lặp đánh lừa.* Quan hệ bao hàm tập hợp không đổi khi có event replay, khi phát lại cả dataset bằng `--allow-non-empty-topic`, hay khi Spark phát lại batch (S387). Đếm số dòng thì sai: đo ngày 2026-11-25 trên `generator.demo-faults.json` 20.000 giao dịch, manifest ghi 57.727 dòng nhưng chỉ có 57.538 `event_id` phân biệt; phát lại một phần rồi phát lại toàn bộ có thể đạt số đếm khi còn thiếu dòng.
+
+**Giới hạn (đều theo hướng an toàn: hết giờ chứ không báo sẵn sàng sai).**
+
+- Dòng nguồn vi phạm schema vào `parse_error` và không vào `O`, nên lệnh hết giờ. Generator hiện không phát dòng vi phạm schema; fixture âm thì có.
+- Chỉ so `event_id`, không so nội dung; cùng `event_id` khác nội dung là việc của Silver (`EVENT_ID_CONFLICT`).
+- Lệnh cần đọc được thư mục nguồn và Parquet Bronze, nên chạy như job Spark trong image job (S201). **Chưa hiện thực và chưa đo chi phí** ở quy mô lớn.
 
 ## Giả định (mỗi mục cần người duyệt đồng ý hoặc sửa)
 
@@ -167,39 +199,49 @@ Một batch hoàn tất tương ứng đúng một dòng khóa `(query_name, bat
 - **G12.** Tính null của cột Raw (`key`, `value` được null; còn lại như bảng). S298 không nói tính null.
 - **G13.** Khóa kỹ thuật của bảng Bronze là `(topic, partition, offset)`.
 - **G14.** `parse_error` dùng bộ trường quarantine của S317.
-- **G15.** `entity` là `transaction` hoặc `ledger_entry` suy từ `event_type` khi đọc được, ngược lại null; `business_key` là `transaction_id` (transaction) hoặc `entry_id` (ledger) chỉ khi đọc được và là UUID hợp lệ, ngược lại null (không tạo key giả). Cần chốt ở Q5.
+- **G15.** Cách suy `entity` và `business_key` theo Q5.
 - **G16.** `issue_codes` lưu mã ở **mọi** mức (đúng hành vi validator hiện có); S876 chỉ yêu cầu khi *"nhiều lỗi cùng mức"*.
 
-## Câu hỏi phải chốt trước khi Accepted
+## Tờ quyết định (chủ repo trả lời một lượt)
 
-- **Q1 (chặn T22). `ingest_batches.dataset_id` là một giá trị `NOT NULL`, nhưng một microbatch có thể chứa nhiều `dataset_id` hoặc record không đọc được `dataset_id`.** S385 không nhắc `dataset_id`; cột này do ADR-0003 thêm. Kịch bản nghiệm thu lại gọi `n06 wait-ingestion --dataset-id acceptance-01` (dòng 549; cú pháp được phép điều chỉnh theo dòng 540).
-  - (a) Lấy `dataset.dataset_id` từ cấu hình của lệnh `stream`; record của dataset khác vẫn lưu; đếm theo dataset phải đọc Bronze.
-  - (b) Migration mới thêm bảng con `(query_name, batch_id, dataset_id, record_count)`; `ingest_batches.dataset_id` bỏ `NOT NULL`. Hệ quả: sửa ADR-0003; `IngestBatchRecord.dataset_id` và `list_committed_ingest_batches(dataset_id)` của T24 (đã DONE) đổi; test đang kỳ vọng đúng một migration `0001` sẽ vỡ. Record không có `dataset_id` vẫn không quy được về dataset nào, cần nói bảng con lưu chúng ra sao.
-  - (c) Một topic chỉ chứa một dataset; batch có record dataset khác thì thất bại (một record hỏng có thể làm query dừng mãi).
-  - (d) `wait-ingestion` chờ theo offset hoặc số record kỳ vọng đã commit (S432), dựa vào `topic_offsets`/`record_count`; `ingest_batches.dataset_id` lấy như (a). Phải nói rõ `--dataset-id` ánh xạ sang offset hoặc số record kỳ vọng nào (ví dụ từ manifest nguồn của dataset), và `record_count` gộp cả record của dataset khác lẫn bản phát lại (G7) nên không so trực tiếp được khi topic dùng chung.
-  - Đề xuất của người viết: cân nhắc (d) trước vì không đổi schema, với điều kiện trả lời được hai điểm trên; nếu không thì (b). B (control store) và C quyết.
-- **Q2. Phát lại batch ghi đè "cùng nội dung" (S387) trong khi `ingested_at` và `ingestion_run_id` khác nhau giữa hai lần chạy; S317 lại yêu cầu *"Không ghi đè lỗi cũ mất dấu vết"* mà overwrite `parse_error` khi phát lại (S384) làm mất hai giá trị của lần đầu.** Đề xuất: "cùng nội dung" là mọi cột trừ `ingested_at`, `ingestion_run_id` (tương tự mục 8.1 bước 6 của batch); yêu cầu "không ghi đè lỗi" áp cho quarantine của Silver, còn `parse_error` là output của batch nên được ghi đè.
-- **Q3. Dạng `topic_offsets`.** Tiền lệ trong `tests/integration/test_control_migrations.py`: `{"events": {"0": [0, 10]}}`. Cần chốt đầu cuối có tính cả hay không. Trong tiền lệ đó `[0, 10]` đi cùng `record_count = 10`, gợi ý đầu cuối **không** tính. Đề xuất: `{"<topic>": {"<partition>": [<offset đầu>, <offset cuối, tính cả>]}}`; nếu người duyệt muốn theo tiền lệ thì đổi thành đầu cuối không tính.
-- **Q4. `dataset_id` của Raw và `parse_error` lấy từ envelope hay payload, và xử lý thế nào khi sai kiểu, sai pattern, hoặc hai bên lệch nhau.** Đề xuất: lấy từ envelope nếu là chuỗi khớp pattern, ngược lại null.
-- **Q5. `entity` và `business_key` của `parse_error`** (G15) có đúng ý người duyệt không; có cần `event_id` không.
-- **Q6. Batch không có `parse_error` (hoặc không có entity nào đó) thì ghi thư mục rỗng hay không ghi.** T25 đọc đường dẫn không tồn tại sẽ khác. Đề xuất: không ghi; T25 coi thiếu thư mục là rỗng. Khi đó lần phát lại phải ghi đè **cả** thư mục `batch_id=<id>/` (ADR-0002 mục 2 và 6), không ghi đè từng entity, để không còn thư mục cũ.
-- **Q7. `ingested_at` gán một lần cho cả batch hay mỗi lần ghi; Raw và Bronze của cùng record có bằng nhau không** (S621 dùng nó đo độ trễ). Đề xuất: một giá trị cho cả batch, dùng chung cho Raw và Bronze.
-- **Q8. Với G1, `event_type` lệch payload vào `parse_error` nên mã `ENVELOPE_PAYLOAD_MISMATCH` cho `event_type` (S891) không bao giờ xuất hiện ở Silver.** Chấp nhận, hay Bronze phải gắn mã đó?
+"Spec im lặng" nghĩa là chọn phương án nhỏ nhất và dễ đảo ngược.
+
+| # | Câu hỏi | Đề xuất | Nguồn |
+|---|---|---|---|
+| Q1 | `ingest_batches.dataset_id` đang `NOT NULL`; một batch có thể chứa nhiều dataset hoặc record hỏng | Cho `NULL` bằng migration mới `0002`; `dataset_id` ở từng dòng Raw/Bronze; `wait-ingestion` theo mục 9 | S385 (không có `dataset_id`), S298 |
+| Q2 | Phát lại batch ghi đè "cùng nội dung" nhưng `ingested_at`, `ingestion_run_id` khác | "Cùng nội dung" là mọi cột trừ hai cột đó. Yêu cầu "không ghi đè lỗi cũ" áp cho quarantine của Silver; `parse_error` là output của batch nên bị ghi đè khi phát lại | S387; S379 (nói cho batch); S317 nằm dưới mục Silver (S309); S384. Spec im lặng cho streaming |
+| Q3 | Dạng `topic_offsets` | `{"<topic>": {"<partition>": [<đầu>, <cuối, không tính>]}}`, như tiền lệ `{"events": {"0": [0, 10]}}` đi cùng `record_count = 10` | S385 (chỉ nói "khoảng offset"); `tests/integration/test_control_migrations.py:175-176`. Spec im lặng về dạng. Quy ước offset cuối không tính của Spark: chưa kiểm trong repo |
+| Q4 | `dataset_id` của Raw và `parse_error` lấy ở đâu | `envelope.dataset_id` nếu là chuỗi khớp pattern của contract, ngược lại `NULL`; không lấy từ payload. Lệch envelope và payload để Silver kiểm | S298 "nếu parse được"; S724; `event_envelope.schema.json` |
+| Q5 | `entity`, `business_key` của `parse_error` | `entity`: theo `event_type` nếu nhận ra (`transaction`, `ledger_entry`), ngược lại `NULL`. `business_key`: `transaction_id` hoặc `entry_id` nếu đọc được và là UUID, ngược lại `NULL`; không tạo key giả. Không thêm cột `event_id` | S317 "entity/business key". Spec im lặng về cách suy |
+| Q6 | Entity không có dòng nào trong batch | Không ghi thư mục; phát lại ghi đè **cả** thư mục `batch_id=<id>/` nên không sót thư mục cũ; bên đọc coi thiếu thư mục là rỗng | S384; ADR-0002 mục 2 (*"Chế độ overwrite chỉ áp dụng cho đúng thư mục `batch_id=<id>/`"*). Spec im lặng |
+| Q7 | `ingested_at` gán lúc nào | Một giá trị cho cả batch, lấy khi callback bắt đầu, giống nhau ở Raw và Bronze | S238, S621. Spec im lặng về độ hạt |
+| Q8 | Mã `ENVELOPE_PAYLOAD_MISMATCH` khi `event_type` lệch payload | Định tuyến vẫn theo schema (G1); riêng dòng `parse_error` tính `issue_codes` bằng `validate_event_envelope` (không truyền accounts) nên mã này xuất hiện; mã chính chọn theo thứ tự ưu tiên. Lệch `dataset_id`/`event_time` vẫn qua schema nên Silver gắn mã | S891 (bảng mã), S724, S876. Đã chạy thử 2026-11-25: validator domain thêm mã này, mã chính là `MISSING_REQUIRED_FIELD` |
+
+## Việc mở
+
+| Việc | Chủ | Hạn |
+|---|---|---|
+| Schema Bronze của accounts và statement (S740: *"Accounts và statements đều là JSONL trong v1 [...] Bronze chuyển sang Parquet là bước pipeline."*; S300 yêu cầu lưu statement nguyên bản), gồm cả nơi lưu `accounts.jsonl` | B (Quang) | trước khi bắt đầu T25 |
+| Schema Silver | B (Quang) | trước khi bắt đầu T25 |
 
 ## Phương án đã cân nhắc
 
+- Q1, lấy `dataset_id` từ cấu hình của lệnh `stream`: gán sai khi topic có record của dataset khác hoặc record hỏng.
+- Q1, bảng con `(query_name, batch_id, dataset_id, record_count)`: thêm bảng control và vẫn không quy được record không có `dataset_id`; nặng hơn một lần `DROP NOT NULL`.
+- Q1, một topic chỉ chứa một dataset và batch lạ thì thất bại: một record hỏng làm query dừng mãi.
+- Q1, `wait-ingestion` chờ theo offset hoặc `record_count` (S432): không ánh xạ được `--dataset-id` khi topic dùng chung, và bản lặp làm số đếm sai (mục 9).
 - Bronze giữ một bảng duy nhất với `payload` dạng chuỗi JSON: không "tách entity" theo S304.
 - Chuyển kiểu `date`/`timestamp` ngay ở Bronze: lấn việc chuẩn hóa của Silver (S311). (Record sai định dạng không vào bảng entity theo G1 và Raw vẫn giữ nguyên bytes, nên lý do không phải là mất dữ liệu.)
 - Đưa record sai miền (ví dụ `amount_minor <= 0`) vào bảng entity để Silver lọc: cột entity phải cho null và kiểu lỏng hơn; xem G1.
 
 ## Hệ quả
 
-- T22 dùng được `parse_and_validate_json_schema` (chỉ thư viện chuẩn); bộ kiểm đọc schema từ `contracts/`. Phần I mục 2 (S201) yêu cầu image job chứa Java, PySpark, JAR đã ghim và gói `n06`; image hiện tại chưa chứa `n06` và `contracts/` (kế hoạch T22 quyết).
+- T22 dùng được `parse_and_validate_json_schema` và `validate_event_envelope` (chỉ thư viện chuẩn); bộ kiểm đọc schema từ `contracts/`. Phần I mục 2 (S201) yêu cầu image job chứa Java, PySpark, JAR đã ghim và gói `n06`; image hiện tại chưa chứa `n06` và `contracts/` (kế hoạch T22 quyết).
+- Migration `0002` và thay đổi mã control store (mục 8) làm cùng T22 sau khi Accepted.
 - T25 đọc Bronze theo `ingest_batches`; T30 dựng quarantine từ `parse_error` và lỗi ngữ nghĩa của Silver.
 - Thêm cột sau này cần ADR mới.
 
-## Ngoài phạm vi (chưa quyết)
+## Ngoài phạm vi
 
-- **Silver và Gold: chưa quyết, B bổ sung trước T25.** Lưu ý: `docs/TASKS.md` giao schema **Gold** cho ADR-005 (C viết, trước T41), không phải ADR này; chủ dự án quyết giữ theo bảng đó hay gộp.
-- **Bronze của accounts và statement: ADR này thu hẹp phạm vi "Raw và Bronze" thành luồng sự kiện Kafka**, dù S740 nói accounts và statement cũng chuyển sang Parquet ở Bronze và S300 yêu cầu lưu statement nguyên bản. Đề xuất: B bổ sung trước T25 (T25 cần đầu vào sao kê); cần người duyệt đồng ý.
-- Nơi lưu `accounts.jsonl`.
+- Silver (xem "Việc mở").
+- Gold: ADR-005 theo `docs/TASKS.md`.
