@@ -162,6 +162,7 @@ Một batch hoàn tất tương ứng đúng một dòng khóa `(query_name, bat
 
 - `IngestBatchRecord.dataset_id` đổi sang `str | None`.
 - `list_committed_ingest_batches(dataset_id=...)` đang lọc `WHERE dataset_id = %s` nên sẽ **không trả dòng nào**; phải liệt kê theo `query_name`. Đổi cả giao diện `ControlStore` (`control_store.py`), hai hiện thực, `src/n06/storage/commit.py` và store giả trong `tests/unit/storage/test_commit_protocol.py`.
+- `tests/unit/control/test_control_migrations_unit.py` (dòng 119, 126, 131) kỳ vọng `["0001"]` trên thư mục migration thật nên sẽ đỏ khi thêm `0002`.
 - `tests/integration/test_control_migrations.py` đang kỳ vọng đúng migration `0001` và gọi `migrate_down` trên DB control dùng chung: khi đã có dòng `dataset_id` NULL, bước `down` của 0002 làm test thất bại, nên test cần DB riêng hoặc dọn dòng của chính nó.
 - Chỉ mục `idx_ingest_batches_dataset_date` không còn hữu ích.
 
@@ -169,7 +170,7 @@ Một batch hoàn tất tương ứng đúng một dòng khóa `(query_name, bat
 
 **Thuật toán** (so byte của nguồn với byte đã lưu ở Raw):
 
-1. Thư mục nguồn lấy từ `--source-dir`, mặc định `<paths.generator_output_dir>/source` (**không** dùng thư mục gốc, vì gốc còn chứa ground truth). Đọc và kiểm nguồn bằng đúng bước của producer (liệt kê theo manifest, kiểm `sha256`, `physical_rows`, từ chối file events không có trong manifest), chỉ lấy manifest có `dataset_id = X`. Không có manifest của `X`, không có file events, hoặc lệch manifest: thoát ngay với lỗi cấu hình, không chờ.
+1. Thư mục nguồn lấy từ `--source-dir`, mặc định `<paths.generator_output_dir>/source` (**không** dùng thư mục gốc, vì gốc còn chứa ground truth). Đọc và kiểm nguồn bằng đúng bước của producer (liệt kê theo manifest, kiểm `sha256`, `physical_rows`, từ chối file events không có trong manifest), chỉ lấy manifest có `dataset_id = X`. Phép kiểm dùng lại là: liệt kê theo manifest, `sha256`, `physical_rows`, và từ chối file events không có trong manifest; **không** dùng phần chọn key của producer (phần đó còn từ chối dòng không phải object JSON, `event_type` lạ hay thiếu `transaction_id`, nên nguồn có dòng như vậy cũng không publish được bằng `n06 publish`). Không có manifest của `X`, không có file events, lệch manifest, hoặc không có dòng nào (`M` rỗng): thoát ngay với lỗi cấu hình, không chờ.
 2. Đa tập kỳ vọng `M`: với mỗi dòng của các file events đó, `sha256` của byte dòng (không gồm LF) và số lần xuất hiện.
 3. Đa tập quan sát `N`: `sha256(value)` và số lần, trên các dòng **Raw** của những batch có trong `ingest_batches` của `query_name` đang chờ (S386).
 4. Sẵn sàng khi và chỉ khi với mọi giá trị băm `h` trong `M`: `N[h] ≥ M[h]` (join hai bảng đã gộp trong Spark). Chưa đủ thì đợi batch mới; quá `--timeout-seconds` thì thoát mã khác 0, nêu số dòng còn thiếu và số dòng `parse_error`.
@@ -193,7 +194,7 @@ Raw được dùng vì giữ **mọi** record và byte `value` nguyên dạng (S
 ## Giả định (mỗi mục cần người duyệt đồng ý hoặc sửa)
 
 - **G1.** Bước parse của Bronze là **chỉ kiểm JSON Schema của contract**, tức hàm `parse_and_validate_json_schema(raw, "event_envelope")` của `src/n06/domain/schema_validator.py`; kiểm tra ngữ nghĩa (Phần II mục 3) thuộc Silver, **không** dùng `validate_event_envelope` hay `validate_transaction_record` để định tuyến. Record vi phạm bất kỳ mã mức schema nào (`INVALID_JSON`, `UNSUPPORTED_SCHEMA_VERSION`, `MISSING_REQUIRED_FIELD`, `SCHEMA_TYPE`, `UNSUPPORTED_CURRENCY`, `AMOUNT_OUT_OF_RANGE`, `SCHEMA_VALUE`) vào `parse_error`. Đặc tả không nói rõ ranh giới giữa "parse lỗi" và "quality".
-  **Một record xấu không được làm hỏng batch (S298, S304).** Đo ngày 2026-11-25, bộ kiểm hiện tại: số nguyên 5000 chữ số ném `ValueError`; mảng lồng 200.000 cấp ném `RecursionError`; `bytearray` của một dòng hợp lệ trả `SCHEMA_TYPE`; byte UTF-8 hỏng bị thay thế rồi cho mã khác (`errors="replace"`). Vì vậy T22 phải: ép `value` về `bytes`; giải mã UTF-8 nghiêm ngặt, thất bại là `INVALID_JSON`; bắt `ValueError` và `RecursionError` quanh bộ kiểm và ghi `INVALID_JSON`. Đây là thiếu sót của bộ kiểm T10, nên sửa ở task riêng.
+  **Một record xấu không được làm hỏng batch (S298, S304).** Đo ngày 2026-11-25, bộ kiểm hiện tại: số nguyên 5000 chữ số ném `ValueError`; mảng lồng 200.000 cấp ném `RecursionError`; `bytearray` của một dòng hợp lệ trả `SCHEMA_TYPE`; byte UTF-8 hỏng bị thay thế rồi cho mã khác (`errors="replace"`). Vì vậy T22 phải: xử lý `value` null (tombstone, Raw cho phép null) **trước** khi ép kiểu, ghi vào `parse_error` với mã `SCHEMA_TYPE` (`bytes(None)` ném `TypeError`); ép `value` còn lại về `bytes`; giải mã UTF-8 nghiêm ngặt, thất bại là `INVALID_JSON`; bắt `ValueError` và `RecursionError` quanh bộ kiểm và ghi `INVALID_JSON`. Đây là thiếu sót của bộ kiểm T10, nên sửa ở task riêng.
 - **G2.** Tên cột trùng nhau giữa envelope và payload (`schema_version`, `dataset_id`, `event_time`) được giữ cả hai, bản của envelope có tiền tố `envelope_`, để Silver kiểm `ENVELOPE_PAYLOAD_MISMATCH`.
 - **G3.** Trường thời gian và ngày của contract giữ nguyên kiểu `string` ở Bronze; chuẩn hóa kiểu là việc của Silver (S311).
 - **G4.** Cột phân vùng không lặp lại trong file.

@@ -43,7 +43,7 @@ Tiêu chí của chủ dự án: **khớp với host nếu chạy được trong
 |---|---|---|
 | Chép `psql` và `libpq.so.5` từ `postgres:16.6-bookworm` vào image Spark (build nhiều tầng tạm, đã xóa image) | `ldd` đủ thư viện; `psql (PostgreSQL) 16.6`; nối server 16.6 | chỉ `--version` và `select version()` |
 | `connect_control_store` trong container Spark có `psql` trên PATH (`postgresql-client-16` **16.16** từ PGDG) | chọn `PsqlCliControlStore`; `list_committed_ingest_batches` đọc bảng thật | **chỉ đọc**, bản 16.16, không phải bản chép 16.6 |
-| Trong container postgres (`psql` 16.6): giá trị truyền bằng một biến JSON `-v params=...`, nạp bằng `:'params'::jsonb` vào bảng tạm `ON COMMIT DROP`, đọc trong khối `DO` | chuỗi chứa nháy, `;`, `\`, `$$`, xuống dòng giữ nguyên (46 ký tự); `null` giữ là NULL; transaction `ROLLBACK` | cơ chế, chưa qua mã Python của control store |
+| Trong container postgres (`psql` 16.6): giá trị truyền bằng một biến JSON `-v params=...`, nạp bằng `:'params'::jsonb` vào bảng tạm `ON COMMIT DROP`, đọc trong khối `DO` | chuỗi chứa nháy, `;`, `\`, `$$`, xuống dòng và tiếng Việt giữ nguyên (`md5` phía Python bằng `md5` trong SQL và trong khối `DO`); `null` giữ là NULL; transaction `ROLLBACK` | cơ chế, chưa qua mã Python của control store |
 
 **Chưa chạy:** tổ hợp bản chép 16.6 cùng `PsqlCliControlStore`; đường **ghi** trong image qua nhánh `subprocess` cục bộ của `_run_sql`.
 
@@ -62,13 +62,13 @@ Tiêu chí của chủ dự án: **khớp với host nếu chạy được trong
 Giới hạn đã biết:
 
 - Mỗi lần ghi là một tiến trình con.
-- Biến `-v` nằm trong argv, xem được bằng `ps` trong container; gồm cả `error_summary`, `input_versions`, `topic_offsets`. Linux giới hạn một đối số khoảng 128 KiB, **chưa kiểm** với giá trị dài. Trên host, `make_compose_psql_runner` đưa `PGPASSWORD` vào argv của `docker`.
+- Biến `-v` nằm trong argv, xem được bằng `ps` trong container; gồm cả `error_summary`, `input_versions`, `topic_offsets`. Linux giới hạn một đối số khoảng 128 KiB, và với một biến JSON duy nhất giới hạn đó áp cho **tổng** các giá trị; **chưa kiểm** với giá trị dài. Task hiện thực nên cân nhắc đưa tham số qua stdin (chưa thử). Trên host, `make_compose_psql_runner` đưa `PGPASSWORD` vào argv của `docker`.
 - Đường dẫn thư viện `x86_64-linux-gnu` khóa image vào kiến trúc x86_64.
 - Host vẫn dùng `docker compose exec`; image dùng `psql` cục bộ: cùng client, khác cách gọi.
 
 ### Phương án đã loại
 
-- **`psycopg` ghim phiên bản** (đề xuất trước của người viết). Bị loại theo tiêu chí "khớp với host": host không dùng và chưa cài; thêm phụ thuộc Python vào `pyproject.toml`, `uv.lock`, image; đường `PsycopgControlStore` chưa có bằng chứng chạy. **Ưu điểm bị bỏ:** `PsycopgControlStore` đã dùng tham số phía server (`%s`) nên không phải viết lại SQL, truyền NULL tự nhiên, transaction thật trong một kết nối. Chi phí của đường `psql` (viết lại SQL và giao diện của T24) lớn hơn ước lượng ban đầu; người duyệt có thể đảo quyết định vì lý do này.
+- **`psycopg` ghim phiên bản** (đề xuất trước của người viết). Bị loại theo tiêu chí "khớp với host": host không dùng và chưa cài; thêm phụ thuộc Python vào `pyproject.toml`, `uv.lock`, image; đường `PsycopgControlStore` chưa có bằng chứng chạy. **Ưu điểm bị bỏ:** `PsycopgControlStore` đã dùng tham số `%s`, với `psycopg` 3 là tham số phía server (`psycopg2`, mà mã cũng chấp nhận, gắn tham số phía client theo hiểu biết, chưa chạy) nên không phải viết lại SQL, truyền NULL tự nhiên, transaction thật trong một kết nối. Chi phí của đường `psql` (viết lại SQL và giao diện của T24) lớn hơn ước lượng ban đầu; người duyệt có thể đảo quyết định vì lý do này.
 - **`postgresql-client-16` từ kho apt PGDG.** Chạy được (16.16), nhưng thêm kho và khóa ngoài lúc build, phiên bản cũ có thể bị gỡ khỏi kho, và lệch minor với server.
 - **`postgresql-client` của Debian bookworm (15).** Lệch major với server 16.
 - **JDBC driver trong image.** Thêm JAR phải ghim; `DataFrameWriter` JDBC không có upsert `ON CONFLICT`, phải gọi qua py4j: đường truy cập thứ hai, không dùng lại control store Python.
@@ -108,8 +108,8 @@ Giới hạn của S3: một lần `PUT` tối đa 5 GiB; multipart yêu cầu m
 
 ### Kiểm thử
 
-- Vector này chỉ kiểm hàm ký; phải thêm test cho đường gửi `PUT` thật (thân, `Content-Length`, hash payload).
 - Dùng lại known-answer test **PUT Object** của AWS đã có: `tests/unit/cli/test_object_store_sigv4.py` (vector `PUT Object (test$file.text)`, thân `Welcome to Amazon S3.`), chuyển theo mã đã dời.
+- Vector này chỉ kiểm hàm ký; phải thêm test cho đường gửi `PUT` thật (thân, `Content-Length`, hash payload).
 - Bộ ký **mới được kiểm trên MinIO thật cho yêu cầu thân rỗng** (`HEAD`/`PUT` bucket, `GET /`, `DELETE` bucket); `PUT` object có thân và metadata **chưa kiểm**. Máy chủ S3 giả hiện có không đọc thân yêu cầu nên phải mở rộng.
 - Test tích hợp MinIO thật: ghi, đọc lại, so `sha256`, tải lại cùng nội dung không đổi, khác nội dung bị từ chối, file lớn nhất theo ngoại suy.
 
@@ -152,18 +152,93 @@ Chạy `ldd /usr/local/bin/psql`, `psql --version`, `psql -h postgres -U <user> 
 
 **Image, control store (16.16, chỉ đọc).** `docker run --rm --user root --network n06_network --env-file .env`, cài `postgresql-client-16` từ kho PGDG, gắn `src/` và `config/` chỉ đọc, chạy `connect_control_store(load_config(profile="default").postgres.control).list_committed_ingest_batches(dataset_id="n06-adr-probe")`.
 
-**Biến JSON** (trong container postgres, `psql -X -v ON_ERROR_STOP=1 -v params=<json>`):
+**Biến JSON** (chạy trên host, `psql` 16.6 trong container postgres, transaction `ROLLBACK`; nạp `.env` trước):
 
-```sql
-BEGIN;
+```python
+import hashlib
+import json
+import os
+import subprocess
+
+from n06.config import load_config
+
+db = load_config(profile="default", env=dict(os.environ)).postgres.control
+value = "x'; DROP TABLE ingest_batches; -- \\ \"y\" $$ \n tiếng Việt z"
+params = json.dumps({"a": value, "dataset_id": None}, ensure_ascii=False)
+script = """BEGIN;
 CREATE TEMP TABLE n06_params ON COMMIT DROP AS SELECT :'params'::jsonb AS j;
 DO $$
 DECLARE v jsonb;
 BEGIN
   SELECT j INTO v FROM n06_params;
-  RAISE NOTICE 'do_dai=% dataset_null=%', length(v->>'a'), (v->>'dataset_id') IS NULL;
+  RAISE NOTICE 'trong_DO md5=% dataset_null=%', md5(v->>'a'), (v->>'dataset_id') IS NULL;
 END $$;
+SELECT md5(j->>'a'), (j->>'dataset_id') IS NULL, to_regclass('ingest_batches') IS NOT NULL FROM n06_params;
 ROLLBACK;
+"""
+argv = ["docker", "compose", "--profile", "core", "exec", "-T", "-e", "PGPASSWORD", "postgres",
+        "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", db.user, "-d", db.database, "-At", "-v", f"params={params}"]
+res = subprocess.run(argv, input=script, capture_output=True, text=True, env={**os.environ, "PGPASSWORD": db.password})
+expected = hashlib.md5(value.encode("utf-8")).hexdigest()
+print("exit", res.returncode)
+print("md5 phía Python :", expected)
+print("đầu ra psql     :", res.stdout.split())
+print("notice trong DO :", res.stderr.strip().splitlines()[-1][:120])
+print("nội dung giữ nguyên:", expected in res.stdout and f"md5={expected}" in res.stderr)
+```
+
+Kết quả đo: `nội dung giữ nguyên: True`.
+
+**Plugin đếm đường kết nối** (nội dung của `n06_trace_plugin.py` dùng ở trên):
+
+```python
+"""Plugin pytest chỉ để lấy bằng chứng: ghi driver nào chạm Postgres (mật khẩu bị che)."""
+import collections
+import subprocess
+
+_calls = collections.Counter()
+_methods = collections.Counter()
+_original = subprocess.run
+
+
+def _traced(*args, **kwargs):
+    argv = args[0] if args else kwargs.get("args")
+    if isinstance(argv, (list, tuple)):
+        parts = [str(a) for a in argv]
+        if "psql" in " ".join(parts):
+            shown = [p for p in parts if not p.startswith("PGPASSWORD=")]
+            prefix = shown[: shown.index("psql") + 1] if "psql" in shown else shown[:6]
+            _calls[" ".join(p.rsplit("/", 1)[-1] if p.endswith((".yml", "docker")) else p for p in prefix)] += 1
+    return _original(*args, **kwargs)
+
+
+def pytest_configure(config):
+    subprocess.run = _traced
+    from n06.storage import control_store
+
+    for cls_name in ("PsqlCliControlStore", "PsycopgControlStore"):
+        cls = getattr(control_store, cls_name)
+        for name, function in list(vars(cls).items()):
+            if callable(function) and not name.startswith("__"):
+                def wrapper(*a, _f=function, _k=f"{cls_name}.{name}", **kw):
+                    _methods[_k] += 1
+                    return _f(*a, **kw)
+                setattr(cls, name, wrapper)
+
+
+def pytest_terminal_summary(terminalreporter):
+    import importlib.util
+    import shutil
+
+    write = terminalreporter.write_line
+    write("=== BẰNG CHỨNG ĐƯỜNG KẾT NỐI POSTGRES ===")
+    for module in ("psycopg", "psycopg2"):
+        write(f"import {module} trên host: {'có' if importlib.util.find_spec(module) else 'KHÔNG'}")
+    write(f"psql trên PATH của host: {shutil.which('psql') or 'KHÔNG'}")
+    for command, count in _calls.items():
+        write(f"lệnh con ({count} lần): {command}")
+    for method, count in sorted(_methods.items()):
+        write(f"phương thức control store được gọi ({count} lần): {method}")
 ```
 
 ## Phụ lục B: tái hiện số đo file sao kê
