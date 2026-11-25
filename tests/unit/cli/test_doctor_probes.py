@@ -12,6 +12,7 @@ import io
 import socket
 import struct
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import partial
@@ -56,7 +57,10 @@ def _server(handle: Callable[[socket.socket], None] | None) -> Iterator[int]:
                 held.append(conn)
                 continue
             with conn:
-                handle(conn)
+                try:
+                    handle(conn)
+                except OSError:
+                    continue  # phía probe đã đóng kết nối (hết hạn); không phải lỗi của test
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
@@ -238,3 +242,196 @@ def test_probes_still_report_connection_refused() -> None:
         port = probe.getsockname()[1]
     assert _probe_tcp("127.0.0.1", port, exchange=_kafka_handshake)[0] is False
     assert _probe_http(f"http://127.0.0.1:{port}/", timeout_sec=SHORT)[0] is False
+
+
+# --- Bổ sung sau review độc lập ----------------------------------------------------------------
+
+
+def test_kafka_request_bytes_follow_the_protocol() -> None:
+    """Yêu cầu viết tay: độ dài 20, api_key 18, version 0, correlation_id, client_id 10 byte."""
+    seen: list[bytes] = []
+
+    def answer(request: bytes) -> bytes:
+        seen.append(request)
+        return _kafka_ok(request)
+
+    with reply_server(answer) as port:
+        ok, _ = _probe_tcp("127.0.0.1", port, exchange=_kafka_handshake)
+    assert ok is True
+    expected = "0000001400120000004e3036000a" + b"n06-doctor".hex()
+    assert seen == [bytes.fromhex(expected)]
+
+
+def test_kafka_response_split_into_fragments_is_read_completely() -> None:
+    def handle(conn: socket.socket) -> None:
+        conn.settimeout(2)
+        reply = _kafka_ok(conn.recv(4096))
+        for index in range(0, len(reply), 3):
+            conn.sendall(reply[index : index + 3])
+            time.sleep(0.02)
+
+    with _server(handle) as port:
+        ok, message = _probe_tcp("127.0.0.1", port, exchange=_kafka_handshake)
+    assert ok is True, message
+
+
+@pytest.mark.parametrize(
+    ("reply", "fragment"),
+    [
+        (struct.pack("!iih", 5, 0x4E3036, 0), "không phải của Kafka"),  # size quá nhỏ
+        (struct.pack("!iih", 6, 0x4E3036, 35), "mã lỗi 35"),
+    ],
+)
+def test_kafka_error_messages_are_specific(reply: bytes, fragment: str) -> None:
+    with reply_server(lambda _request: reply) as port:
+        ok, message = _probe_tcp("127.0.0.1", port, exchange=_kafka_handshake)
+    assert ok is False and fragment in message
+
+
+def test_service_banner_starting_with_s_is_not_postgres() -> None:
+    with reply_server(lambda _request: b"SSH-2.0-OpenSSH\r\n") as port:
+        ok, _ = _probe_tcp("127.0.0.1", port, exchange=_postgres_handshake)
+    assert ok is False
+
+
+@pytest.mark.parametrize("host", ["a..b", "x" * 300])
+def test_unencodable_host_name_fails_without_raising(host: str) -> None:
+    tcp_ok, tcp_message = _probe_tcp(host, 9, timeout_sec=SHORT)
+    http_ok, http_message = _probe_http(f"http://{host}:9/health", timeout_sec=SHORT)
+    assert (tcp_ok, http_ok) == (False, False)
+    assert "không phản hồi đúng" in tcp_message and "Không gọi được HTTP" in http_message
+
+
+@pytest.mark.parametrize("port", [0, -1, 65536, 84628, 2**63, 10**30])
+def test_port_outside_range_fails_without_connecting(port: int) -> None:
+    ok, message = _probe_tcp("127.0.0.1", port)
+    assert ok is False and "ngoài miền" in message
+    assert _probe_http(f"http://127.0.0.1:{port}/", timeout_sec=SHORT)[0] is False
+
+
+@pytest.mark.parametrize("url", ["http://[abc", "not a url", "http://a..b/"])
+def test_broken_url_fails_without_raising(url: str) -> None:
+    ok, _ = _probe_http(url, timeout_sec=SHORT)
+    assert ok is False
+
+
+@pytest.mark.parametrize(
+    "location", ["http://[abc", "http://a..b/", "http://127.0.0.1:99999999999999999999/"]
+)
+def test_redirect_is_a_failure_and_is_not_followed(location: str) -> None:
+    reply = (
+        f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode()
+    with reply_server(lambda _request: reply) as port:
+        ok, message = _probe_http(f"http://127.0.0.1:{port}/health", timeout_sec=1.0)
+    assert ok is False and "mã 302" in message
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "http://127.0.0.1:1",
+        "http:/probeuser:ProxySecretMarker@proxyhost",
+        "http://probeuser:ProxySecretMarker",
+    ],
+)
+def test_http_probe_ignores_proxy_environment(monkeypatch: pytest.MonkeyPatch, proxy: str) -> None:
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, proxy)
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    ok_reply = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    with reply_server(lambda _request: ok_reply) as port:
+        ok, message = _probe_http(f"http://127.0.0.1:{port}/health", timeout_sec=1.0)
+    assert ok is True and "ProxySecretMarker" not in message
+    dead = _probe_http("http://127.0.0.1:1/health", timeout_sec=SHORT)
+    assert dead[0] is False and "ProxySecretMarker" not in dead[1]
+
+
+def _trickle(prefix: bytes) -> Callable[[socket.socket], None]:
+    """Gửi từng byte cách 0,15 s: mỗi thao tác socket đều kịp, nhưng tổng thời gian rất dài."""
+
+    def handle(conn: socket.socket) -> None:
+        conn.settimeout(2)
+        conn.recv(4096)
+        try:
+            for byte in prefix + b"x" * 40:
+                conn.sendall(bytes([byte]))
+                time.sleep(0.15)
+        except OSError:
+            return
+
+    return handle
+
+
+@pytest.mark.parametrize("kind", ["kafka", "http"])
+def test_trickling_service_is_cut_off_by_the_total_deadline(kind: str) -> None:
+    prefix = b"\x00\x00\x00" if kind == "kafka" else b"HTTP/1.1 200 OK\r\nX: "
+    with _server(_trickle(prefix)) as port:
+        started = time.monotonic()
+        if kind == "kafka":
+            ok, message = _probe_tcp(
+                "127.0.0.1", port, timeout_sec=0.5, exchange=_kafka_handshake, deadline_sec=0.6
+            )
+        else:
+            ok, message = _probe_http(
+                f"http://127.0.0.1:{port}/h", timeout_sec=0.5, deadline_sec=0.6
+            )
+        elapsed = time.monotonic() - started
+    assert ok is False and "quá hạn tổng" in message
+    assert elapsed < 2.0, elapsed
+
+
+def test_trickling_object_store_is_cut_off_by_the_total_deadline(tmp_path: Path) -> None:
+    with _server(_trickle(b"HTTP/1.1 200 OK\r\nX: ")) as port:
+        cfg, env = _minio_env(tmp_path, port)
+        started = time.monotonic()
+        (item,) = check_object_store_buckets(
+            cfg=cfg,  # type: ignore[arg-type]
+            merged_env=env,
+            prober=partial(head_bucket, timeout=0.5),
+            deadline_sec=0.6,
+        )
+        elapsed = time.monotonic() - started
+    assert not item.passed and item.exit_code == 14 and "hạn tổng" in item.detail
+    assert elapsed < 2.0, elapsed
+
+
+def test_server_supplied_control_characters_are_not_echoed() -> None:
+    with reply_server(lambda _request: b"\x1b[31mRED\r\n\r\n") as port:
+        ok, message = _probe_http(f"http://127.0.0.1:{port}/", timeout_sec=1.0)
+    assert ok is False and "\x1b" not in message
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["N06_KAFKA_HOST_PORT", "N06_MINIO_API_HOST_PORT", "N06_POSTGRES_HOST_PORT"],
+)
+def test_non_numeric_port_variable_is_a_config_failure_for_each_service(
+    tmp_path: Path, variable: str
+) -> None:
+    env_file = tmp_path / ".env"
+    run_init_local(target_path=env_file, skip_buckets=True, out=io.StringIO())
+    env = {**parse_dotenv_file(env_file), variable: "abc"}
+    with patch("n06.cli.doctor._get_compose_service_states", return_value={}):
+        results = check_services(
+            docker_bin="docker", compose_file=tmp_path / "compose.yml", merged_env=env
+        )
+    assert [item.check_id for item in results] == [
+        "service.kafka",
+        "service.minio",
+        "service.postgres",
+        "service.spark",
+    ]
+    assert all(not item.passed and item.exit_code == 10 for item in results)
+
+
+def test_unexpected_programming_errors_still_surface() -> None:
+    """Hạn tổng chạy trong luồng nền nhưng không được nuốt lỗi lập trình."""
+
+    def broken(_sock: socket.socket) -> None:
+        raise KeyError("lỗi lập trình")
+
+    with silent_server() as port, pytest.raises(KeyError):
+        _probe_tcp("127.0.0.1", port, exchange=broken)
