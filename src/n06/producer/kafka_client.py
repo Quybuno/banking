@@ -186,10 +186,25 @@ class ConfluentBroker:
         except TimeoutError as exc:
             raise BrokerUnavailableError(f"Hết giờ khi tạo topic {topic}.") from exc
 
+    def _expected_partition_count(self, topic: str) -> int:
+        """Số partition của topic phải đã tồn tại.
+
+        Lệnh tạo topic trả về trước khi metadata của broker kịp có topic mới, nên "chưa thấy"
+        được thử lại tới hạn `leader_wait_seconds` rồi mới coi là lỗi.
+        """
+        deadline = self._clock() + self._leader_wait
+        while True:
+            count = self.partition_count(topic)
+            if count is not None:
+                return count
+            if self._clock() >= deadline:
+                raise BrokerUnavailableError(
+                    f"Topic {topic} không tồn tại khi đọc offset (đã chờ {self._leader_wait:g} s)."
+                )
+            self._sleep(RETRY_SLEEP_SECONDS)
+
     def end_offsets(self, topic: str) -> dict[int, int]:
-        count = self.partition_count(topic)
-        if count is None:
-            raise BrokerUnavailableError(f"Topic {topic} không tồn tại khi đọc offset.")
+        count = self._expected_partition_count(topic)
         consumer = None
         try:
             # Dựng consumer cũng có thể ném KafkaException: phải nằm trong khối này để thành mã 14.

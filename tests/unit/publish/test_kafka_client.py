@@ -153,3 +153,21 @@ def test_create_topic_timeout_is_broker_unavailable() -> None:
 def test_create_topic_already_exists_is_tolerated() -> None:
     error = KafkaException(KafkaError(KafkaError.TOPIC_ALREADY_EXISTS))
     _broker(FakeAdmin([{}], create_result=error)).create_topic("t", 3, 1)
+
+
+def test_end_offsets_waits_until_a_just_created_topic_shows_in_metadata() -> None:
+    """Metadata của broker có thể chậm hơn lệnh tạo topic: hai lần đọc đầu chưa thấy topic."""
+    admin = FakeAdmin([{}, {}, {"t": _topic(None, partitions=1)}])
+    clock = Clock()
+
+    assert _broker(admin, FakeConsumer([], high=0), clock).end_offsets("t") == {0: 0}
+    assert admin.list_calls == 3
+    assert len(clock.sleeps) == 2
+
+
+def test_end_offsets_gives_up_on_a_topic_that_never_appears() -> None:
+    clock = Clock()
+    with pytest.raises(BrokerUnavailableError, match="không tồn tại"):
+        _broker(FakeAdmin([{}]), clock=clock).end_offsets("t")
+    # Chờ có hạn: đúng bằng hạn chờ leader mặc định (20 s) cộng tối đa một bước thử lại.
+    assert 20.0 <= clock.now <= 20.5
