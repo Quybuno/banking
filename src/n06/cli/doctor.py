@@ -286,6 +286,17 @@ def redact_secrets(text: str, secret_values: set[str]) -> str:
     return redacted
 
 
+def _describe_config_error(exc: Exception) -> str:
+    """Thông báo lỗi cấu hình không kèm giá trị sai: giá trị đó có thể là mật khẩu.
+
+    Bộ lọc `redact_secrets` chỉ biết giá trị của các biến secret, không biết mật khẩu bị đặt nhầm
+    vào địa chỉ, vào trường khác hoặc vào tệp TOML.
+    """
+    if isinstance(exc, ConfigValidationError):
+        return f"Lỗi cấu hình tại trường '{exc.field_path}': {exc.reason}"
+    return str(exc)
+
+
 def check_configuration(
     *,
     profile: str | None,
@@ -298,7 +309,7 @@ def check_configuration(
     try:
         cfg = load_config(profile=profile, config_dir=resolved_dir, env=merged_env)
     except (ConfigValidationError, FileNotFoundError) as exc:
-        safe_msg = redact_secrets(str(exc), secret_values)
+        safe_msg = redact_secrets(_describe_config_error(exc), secret_values)
         return (
             CheckItem(
                 check_id="config.schema",
@@ -637,36 +648,58 @@ def _resolve_host_endpoints(
     resolved_dir = config_dir if config_dir is not None else DEFAULT_CONFIG_DIR
     test_cfg = load_config(profile="test", config_dir=resolved_dir, env=merged_env)
 
-    def host_port(variable: str, default: str) -> int:
-        # Biến rỗng nghĩa là dùng mặc định, như Compose `${VAR:-mặc định}`. Lỗi nêu tên biến.
-        raw = merged_env.get(variable, "").strip() or default
+    # Mọi lỗi ở đây chỉ nêu tên trường hoặc biến, không in giá trị (có thể chứa mật khẩu).
+    for field_path, address in (
+        ("kafka.bootstrap_servers", test_cfg.kafka.bootstrap_servers),
+        ("object_store.endpoint", test_cfg.object_store.endpoint),
+        ("postgres.mart.host", test_cfg.postgres.mart.host),
+    ):
+        if "@" in address:
+            raise ValueError(
+                f"{field_path} (profile test) không được chứa '@': credential chỉ lấy từ biến "
+                "môi trường, không đặt trong địa chỉ"
+            )
+
+    def host_port(variable: str, default: str, default_field: str) -> int:
+        # Biến rỗng nghĩa là dùng mặc định, như Compose `${VAR:-mặc định}`.
+        from_variable = merged_env.get(variable, "").strip()
         try:
-            return int(raw)
+            return int(from_variable or default)
         except ValueError:
-            raise ValueError(f"{variable} phải là số nguyên, nhận {raw!r}") from None
+            source = variable
+            if not from_variable:
+                source = (
+                    f"{variable} để trống nên dùng cổng của {default_field} (profile test); cổng đó"
+                )
+            raise ValueError(f"{source} phải là số nguyên") from None
 
     # 1. Kafka bootstrap host & port
     kafka_host_raw, _, kafka_port_raw = test_cfg.kafka.bootstrap_servers.partition(":")
-    kafka_port = host_port("N06_KAFKA_HOST_PORT", kafka_port_raw)
+    kafka_port = host_port("N06_KAFKA_HOST_PORT", kafka_port_raw, "kafka.bootstrap_servers")
 
     # 2. MinIO HTTP endpoint
     try:
         parsed_minio = urlparse(test_cfg.object_store.endpoint)
         endpoint_port = parsed_minio.port or 0
-    except ValueError as exc:
-        raise ValueError(f"object_store.endpoint (profile test) không hợp lệ: {exc}") from None
+    except ValueError:
+        # Không chép nội dung lỗi của `urlparse`: nó trích lại một phần endpoint.
+        raise ValueError(
+            "object_store.endpoint (profile test) không hợp lệ: không đọc được host hoặc cổng"
+        ) from None
     minio_host = parsed_minio.hostname or kafka_host_raw
-    minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port))
+    minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port), "object_store.endpoint")
     minio_scheme = parsed_minio.scheme or "http"
     minio_health_url = f"{minio_scheme}://{minio_host}:{minio_port}/minio/health/live"
 
     # 3. PostgreSQL host & port
     pg_host = test_cfg.postgres.mart.host
-    pg_port = host_port("N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port))
+    pg_port = host_port(
+        "N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port), "postgres.mart.port"
+    )
 
     # 4. Spark Web UI host & port
     spark_host = pg_host
-    spark_port = host_port("N06_SPARK_UI_HOST_PORT", "18080")
+    spark_port = host_port("N06_SPARK_UI_HOST_PORT", "18080", "cổng Spark UI mặc định")
     spark_ui_url = f"http://{spark_host}:{spark_port}"
 
     return {
@@ -696,7 +729,11 @@ def check_services(
                 passed=False,
                 exit_code=int(ExitCode.CONFIG_ERROR),
                 summary=f"Không suy được địa chỉ của service '{svc}' từ cấu hình",
-                detail=_describe_error(exc),
+                detail=(
+                    _describe_config_error(exc)
+                    if isinstance(exc, ConfigValidationError)
+                    else _describe_error(exc)
+                ),
             )
             for svc in CORE_SERVICES
         ]
