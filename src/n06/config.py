@@ -27,6 +27,7 @@ VALID_KEY_STRATEGIES = ("transaction_id", "account_from")
 VALID_CURRENCIES = ("VND", "USD")
 POSTGRES_ROLES = ("mart", "control", "airflow", "metabase")
 DATASET_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
+QUERY_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{2,63}$")
 ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Danh sách đường dẫn trường nhạy cảm chỉ được phép lấy từ biến môi trường, cấm đặt trong file TOML.
@@ -64,6 +65,7 @@ FIELD_TYPES: dict[str, type] = {
     "kafka.num_partitions": int,
     "kafka.replication_factor": int,
     "kafka.consumer_group": str,
+    "kafka.query_name": str,
     "kafka.max_offsets_per_trigger": int,
     "kafka.trigger_interval_seconds": int,
     "object_store.endpoint": str,
@@ -170,6 +172,7 @@ class KafkaConfig:
     num_partitions: int
     replication_factor: int
     consumer_group: str
+    query_name: str
     max_offsets_per_trigger: int
     trigger_interval_seconds: int
 
@@ -429,6 +432,17 @@ def _load_toml_file(path: Path, field_context: str) -> dict[str, Any]:
         ) from exc
 
 
+def _require_query_name(value: str) -> str:
+    """Tên query streaming là một đoạn đường dẫn và khóa của `ingest_batches` (ADR-0002)."""
+    if not QUERY_NAME_PATTERN.fullmatch(value):
+        raise ConfigValidationError(
+            "kafka.query_name",
+            value,
+            "query_name không khớp mẫu '^[a-z][a-z0-9_-]{2,63}$'.",
+        )
+    return value
+
+
 def _require_typed(data: Mapping[str, Any], field_path: str) -> Any:
     """Lấy trường bắt buộc và kiểm tra đúng kiểu dữ liệu (không cho bool trượt qua int)."""
     found, value = _get_dotted(data, field_path)
@@ -540,6 +554,7 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
             1,
         ),
         consumer_group=_require_typed(merged, "kafka.consumer_group"),
+        query_name=_require_query_name(_require_typed(merged, "kafka.query_name")),
         max_offsets_per_trigger=_require_min_int(
             "kafka.max_offsets_per_trigger",
             _require_typed(merged, "kafka.max_offsets_per_trigger"),
