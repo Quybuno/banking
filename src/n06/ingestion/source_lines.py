@@ -30,9 +30,13 @@ def dataset_event_files(source_dir: Path, dataset_id: str) -> tuple[list[EventFi
         rows = 0
         try:
             with item.path.open("rb") as handle:
-                for line in handle:
+                for line_number, line in enumerate(handle, start=1):
                     digest.update(line)
-                    rows += line.endswith(b"\n")
+                    if not line.endswith(b"\n"):
+                        raise SourceDataError(
+                            f"Dòng cuối thiếu ký tự LF tại {item.relative_path} dòng {line_number}."
+                        )
+                    rows += 1
         except OSError as exc:
             raise SourceDataError(
                 f"Không đọc được file events {item.relative_path} ({type(exc).__name__})."

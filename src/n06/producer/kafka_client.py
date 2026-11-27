@@ -12,7 +12,25 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer, Topi
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from n06.producer.errors import BrokerUnavailableError, PublishConfigError
-from n06.producer.message_limits import DEFAULT_MAX_MESSAGE_BYTES
+from n06.producer.message_limits import (
+    DEFAULT_MAX_MESSAGE_BYTES,
+    MESSAGE_OVERHEAD_MARGIN_BYTES,
+)
+
+__all__ = [
+    "BrokerAdmin",
+    "CLIENT_ID",
+    "ConfluentBroker",
+    "DEFAULT_LEADER_WAIT_SECONDS",
+    "DEFAULT_MAX_MESSAGE_BYTES",
+    "DEFAULT_METADATA_TIMEOUT_SECONDS",
+    "MESSAGE_OVERHEAD_MARGIN_BYTES",
+    "ProducerLike",
+    "RETRY_SLEEP_SECONDS",
+    "build_producer_config",
+    "make_producer",
+    "rejected_producer_message",
+]
 
 CLIENT_ID = "n06-publish"
 # Mặc định của thư viện; `n06 publish` luôn truyền giá trị từ `config/` (producer.*), và

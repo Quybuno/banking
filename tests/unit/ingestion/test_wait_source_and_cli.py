@@ -67,6 +67,7 @@ def test_only_files_of_the_requested_dataset_are_counted(tmp_path: Path) -> None
         pytest.param(b"a\n", {"sha256": "0" * 64}, "ds-one", id="checksum-mismatch"),
         pytest.param(b"a\n", {"physical_rows": 2}, "ds-one", id="row-count-mismatch"),
         pytest.param(b"", {}, "ds-one", id="no-lines"),
+        pytest.param(b"a\nb", {"physical_rows": 1}, "ds-one", id="missing-trailing-lf"),
     ],
 )
 def test_unusable_source_is_refused(
@@ -75,6 +76,13 @@ def test_unusable_source_is_refused(
     _write(tmp_path, "events_batch_00000", "ds-one", data, **override)
     with pytest.raises(SourceDataError):
         dataset_event_files(tmp_path, dataset_id)
+
+
+def test_unlisted_event_file_is_refused(tmp_path: Path) -> None:
+    _write(tmp_path, "events_batch_00000", "ds-one", b"a\n")
+    (tmp_path / "events" / "stray.jsonl").write_bytes(b"b\n")
+    with pytest.raises(SourceDataError):
+        dataset_event_files(tmp_path, "ds-one")
 
 
 class _Runner:
