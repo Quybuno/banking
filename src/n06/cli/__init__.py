@@ -41,6 +41,7 @@ from n06.cli.init_local import (
     run_init_local,
 )
 from n06.cli.publish import run_publish
+from n06.cli.statements import run_ingest_statements
 from n06.cli.validate import parse_as_of_time_utc, run_validate
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "redact_secrets",
     "run_doctor",
     "run_generate",
+    "run_ingest_statements",
     "run_init_local",
     "run_publish",
     "run_validate",
@@ -103,7 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor,validate,publish,generate,stream,wait-ingestion}",
+        metavar=(
+            "{init-local,doctor,validate,publish,generate,stream,wait-ingestion,ingest-statements}"
+        ),
     )
 
     # Lệnh 1: n06 init-local
@@ -410,6 +414,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="In kết quả dạng JSON có cấu trúc.",
     )
 
+    # Lệnh 6: n06 ingest-statements (T23)
+    ingest_stmt_parser = subparsers.add_parser(
+        "ingest-statements",
+        help="Đưa file sao kê lên MinIO theo lịch giao và biên nhận _ingest/ (ADR-0002, ADR-0012).",
+        description=(
+            "Đọc statement_deliveries.jsonl và manifest từng lô sao kê trong source/, kiểm sha256 "
+            "và số dòng, chỉ tải các lô có file_available_at <= as_of_time theo thứ tự: file dữ "
+            "liệu -> manifest -> biên nhận _ingest/<delivery_order:09d>.json."
+        ),
+    )
+    ingest_stmt_parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=None,
+        help="Thư mục source/ chứa statement_deliveries.jsonl, manifests/, statements/.",
+    )
+    ingest_stmt_parser.add_argument(
+        "--as-of-time",
+        default=None,
+        help="Đồng hồ giả lập UTC dạng YYYY-MM-DDTHH:MM:SSZ (mặc định: thời điểm hiện tại UTC).",
+    )
+    ingest_stmt_parser.add_argument(
+        "--dataset-id",
+        default=None,
+        help="Lọc đúng dataset_id nếu lịch giao chứa nhiều dataset.",
+    )
+    ingest_stmt_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình (default | demo | benchmark | test).",
+    )
+    ingest_stmt_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    ingest_stmt_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
+    )
+
     return parser
 
 
@@ -522,6 +568,17 @@ def main(
             generator_config=parsed.generator_config,
             out_dir=parsed.out_dir,
             transactions=parsed.transactions,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            as_json=parsed.as_json,
+            out=stdout,
+        )
+
+    if parsed.command == "ingest-statements":
+        return run_ingest_statements(
+            source_dir=parsed.source_dir,
+            as_of_time=parsed.as_of_time,
+            dataset_id=parsed.dataset_id,
             profile=parsed.profile,
             env_file=parsed.env_file,
             as_json=parsed.as_json,
