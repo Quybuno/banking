@@ -4,6 +4,7 @@
 - Người viết: agent (soạn theo yêu cầu của chủ dự án để mở khóa T22), 2026-11-25
 - Người duyệt: B (người viết theo `docs/TASKS.md` mục 3) và A (người duyệt theo bảng đó)
 - Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27
+- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27
 - Ngày: 2026-11-25
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 4.1, 6, 8.1 (streaming), 10, 12, 14.2; Phần II mục 3, 4, 8
 
