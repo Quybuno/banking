@@ -41,6 +41,7 @@ from n06.cli.object_store import (
     ObjectStoreTarget,
     head_bucket,
     target_from_config,
+    validate_bucket_name,
 )
 from n06.config import (
     DEFAULT_CONFIG_DIR,
@@ -755,13 +756,17 @@ def _resolve_host_endpoints(
         raise ValueError(
             "object_store.endpoint (profile test) không hợp lệ: không đọc được host hoặc cổng"
         ) from None
+    if parsed_minio.scheme not in ("http", "https"):
+        raise ValueError(
+            "object_store.endpoint (profile test) phải bắt đầu bằng http:// hoặc https://"
+        )
     if parsed_minio.hostname and not _HOST_PATTERN.fullmatch(parsed_minio.hostname):
         raise ValueError(
             "object_store.endpoint (profile test) không phải tên máy hoặc địa chỉ IP hợp lệ"
         )
     minio_host = parsed_minio.hostname or kafka_host_raw
     minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port), "object_store.endpoint")
-    minio_scheme = parsed_minio.scheme or "http"
+    minio_scheme = parsed_minio.scheme
     minio_health_url = f"{minio_scheme}://{minio_host}:{minio_port}/minio/health/live"
 
     # 3. PostgreSQL host & port
@@ -928,6 +933,8 @@ def check_object_store_buckets(
     check_id = f"bucket.{bucket}"
     probe = prober if prober is not None else head_bucket
     try:
+        # Kiểm tên bucket trước: lỗi cấu hình khác không được in một tên chưa kiểm.
+        validate_bucket_name(bucket)
         target = target_from_config(cfg, merged_env, config_dir=config_dir)
         finished, probed = _call_with_deadline(lambda: probe(target, bucket), deadline_sec)
         result = (

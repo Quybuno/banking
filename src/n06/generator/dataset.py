@@ -227,7 +227,11 @@ def build_dataset(
     cfg_res = validate_generator_config_data(config, registry=reg)
     if not cfg_res.is_valid:
         detail = "; ".join(f"{i.code.value}@{i.field_path}: {i.message}" for i in cfg_res.issues)
-        raise FaultConfigError(f"Cấu hình generator vi phạm ràng buộc: {detail}")
+        where = "; ".join(f"{i.code.value}@{i.field_path}" for i in cfg_res.issues)
+        raise FaultConfigError(
+            f"Cấu hình generator vi phạm ràng buộc: {detail}",
+            public_message=f"Cấu hình generator vi phạm ràng buộc: {where}",
+        )
     params = DatasetParams.from_config(config)
     check_statement_delays(params)
     basis_points = fault_basis_points(config)
@@ -236,7 +240,10 @@ def build_dataset(
     truth_dir = layout.ground_truth_dir(out_root)
     for directory in (source_dir, truth_dir):
         if directory.exists() and any(directory.iterdir()):
-            raise FaultConfigError(f"Thư mục đầu ra phải trống: {directory}")
+            raise FaultConfigError(
+                f"Thư mục đầu ra phải trống: {directory}",
+                public_message="Thư mục đầu ra phải trống (--out hoặc paths.generator_output_dir).",
+            )
     source_dir.mkdir(parents=True, exist_ok=True)
     truth_dir.mkdir(parents=True, exist_ok=True)
 

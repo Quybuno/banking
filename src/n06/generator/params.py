@@ -14,6 +14,12 @@ LOGICAL_SHARD_ROWS = 10_000  # quy ước identity v1 (Phần II mục 5.2 đi�
 class FaultConfigError(ValueError):
     """Cấu hình generator vi phạm ràng buộc của hợp đồng hoặc của phần tiêm lỗi."""
 
+    def __init__(self, message: str, *, public_message: str | None = None) -> None:
+        super().__init__(message)
+        # Thông báo để in ra output. Nơi nào chép giá trị bị từ chối vào `message` thì phải đưa
+        # `public_message` không kèm giá trị.
+        self.public_message = public_message or message
+
 
 @dataclass(frozen=True)
 class DatasetParams:
@@ -82,7 +88,8 @@ def check_statement_delays(params: DatasetParams) -> None:
     if params.normal_statement_delay_seconds < 0:
         raise FaultConfigError(
             "normal_statement_delay_seconds không được âm: "
-            f"{params.normal_statement_delay_seconds}."
+            f"{params.normal_statement_delay_seconds}.",
+            public_message="normal_statement_delay_seconds không được âm.",
         )
     window = params.statement_file_window_seconds
     worst_file_after_d = (
@@ -96,5 +103,9 @@ def check_statement_delays(params: DatasetParams) -> None:
             f"không trước cutoff = D + allowed_lateness_seconds "
             f"({params.allowed_lateness_seconds}); đúng cutoff đã quá hạn. "
             "Yêu cầu normal_statement_delay_seconds + statement_file_window_seconds <= "
-            f"{params.allowed_lateness_seconds}."
+            f"{params.allowed_lateness_seconds}.",
+            public_message=(
+                "normal_statement_delay_seconds + statement_file_window_seconds phải <= "
+                "allowed_lateness_seconds; đúng cutoff đã quá hạn."
+            ),
         )

@@ -102,10 +102,18 @@ def run_generate(
         )
 
     target_dir = out_dir if out_dir is not None else Path(cfg.paths.generator_output_dir)
+    try:
+        existing_parent = _nearest_existing_parent(target_dir)
+    except OSError as exc:
+        return fail(
+            ExitCode.CONFIG_ERROR,
+            "Thư mục đầu ra (--out hoặc paths.generator_output_dir) không dùng được "
+            f"({type(exc).__name__}).",
+        )
     verdict = ensure_capacity(
         requested,
         cfg.limits,
-        _nearest_existing_parent(target_dir),
+        existing_parent,
         probe=disk_probe,
         target_path=target_dir,
     )
@@ -124,9 +132,13 @@ def run_generate(
     try:
         summary = build(generator_cfg, target_dir)
     except OSError as exc:
-        return fail(ExitCode.RESOURCE_ERROR, f"Lỗi ghi đĩa khi sinh dữ liệu: {exc}")
+        # `strerror` không chứa đường dẫn; `str(exc)` thì có.
+        return fail(
+            ExitCode.RESOURCE_ERROR,
+            f"Lỗi ghi đĩa khi sinh dữ liệu ({type(exc).__name__}: {exc.strerror})",
+        )
     except (FaultConfigError, ScenarioConfigError) as exc:
-        return fail(ExitCode.CONFIG_ERROR, str(exc))
+        return fail(ExitCode.CONFIG_ERROR, exc.public_message)
 
     result = {
         "ok": True,

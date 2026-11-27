@@ -179,6 +179,10 @@ class ConfluentBroker:
             if code in _TRANSIENT_ERRORS and self._clock() <= deadline:
                 self._sleep(RETRY_SLEEP_SECONDS)
                 continue
+            if code == KafkaError.TOPIC_EXCEPTION:
+                raise BrokerUnavailableError(
+                    "Broker từ chối tên topic ở kafka.events_topic (TOPIC_EXCEPTION)."
+                )
             raise BrokerUnavailableError(
                 f"Không lấy được metadata của topic {topic} (lỗi {found.error})."
             )
@@ -195,9 +199,13 @@ class ConfluentBroker:
                 return
             if code in _CONFIG_ERRORS:
                 raise PublishConfigError(
-                    f"Cụm broker từ chối tạo topic {topic} với {partitions} partition và "
-                    f"replication_factor={replication_factor} (kafka.num_partitions, "
-                    f"kafka.replication_factor): {exc}"
+                    "Cụm broker từ chối tạo topic; kiểm kafka.events_topic, "
+                    "kafka.num_partitions, kafka.replication_factor "
+                    f"({exc.args[0].name()})."
+                ) from exc
+            if code == KafkaError.TOPIC_EXCEPTION:
+                raise BrokerUnavailableError(
+                    "Broker từ chối tên topic ở kafka.events_topic (TOPIC_EXCEPTION)."
                 ) from exc
             raise BrokerUnavailableError(f"Không tạo được topic {topic}: {exc}") from exc
         except TimeoutError as exc:

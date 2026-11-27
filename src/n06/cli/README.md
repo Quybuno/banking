@@ -70,6 +70,9 @@
 - Secret trong output (text và `--json`). **Quy tắc: không in giá trị của trường cấu hình bị từ chối**, chỉ nêu tên trường hoặc biến và lý do. Áp dụng cho `doctor`, `generate`, `publish`.
   - `doctor`: giá trị của các biến `*PASSWORD*`, `*SECRET*`, `*ACCESS_KEY*`, `*TOKEN*` (từ 4 ký tự) bị che ở tên bucket trong `check_id`, tóm tắt và chi tiết, không phân biệt hoa thường. Phần `user:mat-khau@` của URL dạng `scheme://` bị che khi mật khẩu không chứa `/`, khoảng trắng hay dấu nháy.
   - Khi `DOCKER_HOST` được đặt, `doctor` không in nội dung lỗi của `docker`.
+  - `generate`: trường sai trong tệp `--generator-config` chỉ được nêu bằng mã lỗi và đường dẫn trường (ví dụ `SCHEMA_TYPE@$.seed`); thư mục đầu ra không dùng được thì không in đường dẫn.
+  - `publish`: `kafka.bootstrap_servers` chứa `@` bị từ chối (mã `10`) trước khi tạo client; khi broker từ chối tên topic, số partition hay replication factor, thông báo không chép giá trị.
+  - `doctor`: `object_store.endpoint` phải bắt đầu bằng `http://` hoặc `https://`; tên bucket được kiểm trước các thiết lập object store khác.
   - **Giới hạn:** giá trị được chấp nhận (tên profile hợp lệ, tên bucket hợp lệ, tên host, đường dẫn đọc được) vẫn được in để chẩn đoán; mật khẩu đặt nhầm vào đó, đúng cú pháp và không trùng biến secret nào, sẽ bị in. `init-local` vẫn nêu tên bucket không hợp lệ. Tham số dòng lệnh sai được in lại. `doctor` văng traceback khi tệp `.env` không phải UTF-8 hoặc không đọc được.
 - MinIO và Spark: HTTP GET, mã 2xx; **không dùng `http_proxy` của môi trường** và không đi theo chuyển hướng. Kafka: bắt tay `ApiVersions` phiên bản 0. PostgreSQL: gửi `SSLRequest`, chờ đúng một byte `S` hoặc `N`. Chỉ mở được cổng TCP **không** đủ để coi dịch vụ sống.
 - Bucket: `HEAD` có ký.

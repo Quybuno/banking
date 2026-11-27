@@ -10,10 +10,13 @@ import io
 import json
 import subprocess
 from collections.abc import Mapping
+from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from confluent_kafka import KafkaError, KafkaException
 
 from n06.cli.doctor import (
     CheckItem,
@@ -25,8 +28,8 @@ from n06.cli.generate import run_generate
 from n06.cli.init_local import parse_dotenv_file, run_init_local
 from n06.cli.publish import run_publish
 from n06.limits import METHOD_CONFIG, DiskProbe, resolve_disk_probe
-from n06.producer.errors import PublishConfigError
-from n06.producer.kafka_client import build_producer_config, make_producer
+from n06.producer.errors import BrokerUnavailableError, PublishConfigError
+from n06.producer.kafka_client import ConfluentBroker, build_producer_config, make_producer
 
 MARKER = "SentinelPw5521"
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -238,3 +241,156 @@ def test_docker_error_text_is_kept_when_docker_host_is_unset(
     ):
         item, _ = check_docker_engine()
     assert "permission denied" in item.detail
+
+
+# --- Năm đường lộ do review PR #14 tìm ra -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("seed", MARKER),
+        ("currency", MARKER),
+        ("from_date", MARKER),
+        ("account_selection", MARKER),
+        ("account_count", MARKER),
+    ],
+)
+def test_generate_does_not_echo_a_rejected_generator_field(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    config = json.loads(GENERATOR_CONFIG.read_text("utf-8"))
+    config[field] = value
+    path = tmp_path / "generator.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    for as_json in (False, True):
+        out = io.StringIO()
+        code = run_generate(
+            generator_config=path,
+            out_dir=tmp_path / f"out{int(as_json)}",
+            profile="demo",
+            env_file=tmp_path / "none.env",
+            as_json=as_json,
+            out=out,
+            env=dict(CREDENTIALS),
+            disk_probe=DiskProbe(900 * 1000**3, None, METHOD_CONFIG),
+        )
+        _assert_rejected(code, out.getvalue(), field)
+
+
+def test_generate_does_not_echo_a_rejected_statement_delay(tmp_path: Path) -> None:
+    config = json.loads(GENERATOR_CONFIG.read_text("utf-8"))
+    config["normal_statement_delay_seconds"] = 7654321
+    path = tmp_path / "generator.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    out = io.StringIO()
+    code = run_generate(
+        generator_config=path,
+        out_dir=tmp_path / "out",
+        profile="demo",
+        env_file=tmp_path / "none.env",
+        out=out,
+        env=dict(CREDENTIALS),
+        disk_probe=DiskProbe(900 * 1000**3, None, METHOD_CONFIG),
+    )
+    assert "7654321" not in out.getvalue(), out.getvalue()
+    assert code == 10 and "normal_statement_delay_seconds" in out.getvalue()
+
+
+@pytest.mark.parametrize("command", ["generate", "publish"])
+def test_unusable_configured_output_directory_is_not_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    env = {**CREDENTIALS, "N06__PATHS__GENERATOR_OUTPUT_DIR": MARKER + "a" * 300}
+    out = io.StringIO()
+    if command == "generate":
+        code = run_generate(
+            generator_config=GENERATOR_CONFIG,
+            profile="demo",
+            env_file=tmp_path / "none.env",
+            out=out,
+            env=env,
+        )
+    else:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        code = run_publish(profile="test", env_file=tmp_path / "none.env", out=out)
+    assert MARKER not in out.getvalue(), out.getvalue()
+    assert code == 10 and "generator_output_dir" in out.getvalue()
+
+
+def test_publish_refuses_a_bootstrap_address_with_credentials_before_connecting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    env = {**CREDENTIALS, "N06__KAFKA__BOOTSTRAP_SERVERS": f"user:{MARKER}@127.0.0.1:1"}
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    out = io.StringIO()
+    code = run_publish(profile="test", env_file=tmp_path / "none.env", source_dir=tmp_path, out=out)
+    captured = capfd.readouterr()  # librdkafka tự ghi ra stderr
+    assert MARKER not in out.getvalue() + captured.out + captured.err
+    assert code == 10 and "kafka.bootstrap_servers" in out.getvalue()
+
+
+class _RefusingAdmin:
+    def __init__(self, code: int, *, on_create: bool) -> None:
+        self.code, self.on_create = code, on_create
+
+    def list_topics(self, timeout: float) -> object:
+        topics = {}
+        if not self.on_create:
+            error = KafkaError(self.code, f"rejected {MARKER}")
+            topics = {MARKER: SimpleNamespace(error=error, partitions={})}
+        return SimpleNamespace(topics=topics)
+
+    def create_topics(self, new_topics: list) -> dict:
+        future: Future = Future()
+        future.set_exception(KafkaException(KafkaError(self.code, f"rejected {MARKER} 31337")))
+        return {new_topics[0].topic: future}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [KafkaError.TOPIC_EXCEPTION, KafkaError.INVALID_REPLICATION_FACTOR],
+)
+def test_topic_creation_refused_by_the_broker_hides_the_rejected_values(code: int) -> None:
+    broker = ConfluentBroker("h:1", admin=_RefusingAdmin(code, on_create=True))
+    with pytest.raises((PublishConfigError, BrokerUnavailableError)) as refused:
+        broker.create_topic(MARKER, 3, 31337)
+    text = str(refused.value)
+    assert MARKER not in text and "31337" not in text, text
+    assert "kafka.events_topic" in text
+
+
+def test_topic_name_refused_in_metadata_is_not_printed() -> None:
+    broker = ConfluentBroker(
+        "h:1", admin=_RefusingAdmin(KafkaError.TOPIC_EXCEPTION, on_create=False)
+    )
+    with pytest.raises(BrokerUnavailableError) as refused:
+        broker.partition_count(MARKER)
+    assert MARKER not in str(refused.value), str(refused.value)
+    assert "kafka.events_topic" in str(refused.value)
+
+
+def test_doctor_checks_the_bucket_name_before_other_object_store_settings(tmp_path: Path) -> None:
+    code, text = _doctor(
+        tmp_path,
+        {"N06__OBJECT_STORE__BUCKET": f"Bad_{MARKER}", "N06__OBJECT_STORE__REGION": "bad region"},
+    )
+    _assert_rejected(code, text, "object_store.bucket")
+
+
+def test_doctor_does_not_print_an_endpoint_without_an_http_scheme(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    run_init_local(target_path=env_file, skip_buckets=True, out=io.StringIO())
+    env = {**parse_dotenv_file(env_file), "N06__OBJECT_STORE__ENDPOINT": f"{MARKER}:9000"}
+    out = io.StringIO()
+    docker = (CheckItem("docker.engine", "docker", True, 0, "giả", "giả"), "docker")
+    with (
+        patch("n06.cli.doctor.check_docker_engine", return_value=docker),
+        patch("n06.cli.doctor._get_compose_service_states", return_value={}),
+    ):
+        code = run_doctor(
+            profile="test", env_file=env_file, env=env, resource_snapshot=SNAPSHOT, out=out
+        )
+    _assert_rejected(code, out.getvalue(), "object_store.endpoint")

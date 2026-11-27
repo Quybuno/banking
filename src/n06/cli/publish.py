@@ -119,6 +119,13 @@ def run_publish(
     except ConfigValidationError as exc:
         return fail(ExitCode.CONFIG_ERROR, exc.public_message)
 
+    # Từ chối trước khi tạo client: librdkafka tự ghi địa chỉ ra stderr.
+    if "@" in cfg.kafka.bootstrap_servers:
+        return fail(
+            ExitCode.CONFIG_ERROR,
+            "kafka.bootstrap_servers không được chứa '@': credential không đặt trong địa chỉ.",
+        )
+
     resolved_source = (
         source_dir
         if source_dir is not None
@@ -181,7 +188,11 @@ def run_publish(
     except KafkaException as exc:  # lưới an toàn: lỗi Kafka chưa được bọc ở lớp dưới
         return fail(ExitCode.KAFKA_DELIVERY_ERROR, f"Lỗi Kafka: {exc}")
     except OSError as exc:  # lưới an toàn: lỗi đọc file nguồn chưa được bọc
-        return fail(ExitCode.CONFIG_ERROR, f"Không đọc được dữ liệu nguồn: {exc}")
+        return fail(
+            ExitCode.CONFIG_ERROR,
+            f"Không đọc được dữ liệu nguồn ({type(exc).__name__}: {exc.strerror}); kiểm "
+            "--source-dir hoặc paths.generator_output_dir.",
+        )
 
     if as_json:
         stdout.write(json.dumps({"ok": True, **stats.to_dict()}, ensure_ascii=False) + "\n")
