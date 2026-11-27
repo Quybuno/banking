@@ -798,6 +798,7 @@ class PsqlCliControlStore:
                 cmd,
                 input=sql,
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
                 env=env,
                 check=True,
@@ -1026,6 +1027,7 @@ def make_compose_psql_runner(
                 cwd=repo_root,
                 input=sql,
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
                 check=True,
             )
