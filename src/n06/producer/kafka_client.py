@@ -12,6 +12,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer, Topi
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from n06.producer.errors import BrokerUnavailableError, PublishConfigError
+from n06.producer.message_limits import DEFAULT_MAX_MESSAGE_BYTES
 
 CLIENT_ID = "n06-publish"
 # Mặc định của thư viện; `n06 publish` luôn truyền giá trị từ `config/` (producer.*), và
@@ -19,10 +20,6 @@ CLIENT_ID = "n06-publish"
 DEFAULT_METADATA_TIMEOUT_SECONDS = 10.0
 DEFAULT_LEADER_WAIT_SECONDS = 20.0
 RETRY_SLEEP_SECONDS = 0.2
-# Giới hạn kích thước message (key + value) của producer; librdkafka từ chối message lớn hơn
-# `message.max.bytes` ngay khi gọi produce(). Chừa biên cho phần overhead của bản ghi.
-DEFAULT_MAX_MESSAGE_BYTES = 1_000_000
-MESSAGE_OVERHEAD_MARGIN_BYTES = 1024
 # Topic vừa tạo cần một lúc để bầu leader; các lỗi này là tạm thời và được thử lại có hạn.
 _TRANSIENT_ERRORS = frozenset(
     {

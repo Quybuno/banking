@@ -14,8 +14,8 @@ from pathlib import Path, PurePosixPath
 
 from n06.domain import parse_and_validate_json_schema
 from n06.producer.errors import SourceDataError
-from n06.producer.kafka_client import DEFAULT_MAX_MESSAGE_BYTES, MESSAGE_OVERHEAD_MARGIN_BYTES
 from n06.producer.keys import KeySelector
+from n06.producer.message_limits import DEFAULT_MAX_MESSAGE_BYTES, MESSAGE_OVERHEAD_MARGIN_BYTES
 
 # Tên mặc định của bố cục do generator T13 sinh; đều ghi đè được bằng tham số CLI.
 DEFAULT_SOURCE_DIRNAME = "source"

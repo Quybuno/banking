@@ -29,7 +29,11 @@ from n06.cli.doctor import (
     run_doctor,
 )
 from n06.cli.generate import run_generate
-from n06.cli.ingestion import run_stream
+from n06.cli.ingestion import (
+    DEFAULT_WAIT_TIMEOUT_SECONDS,
+    run_stream,
+    run_wait_ingestion,
+)
 from n06.cli.init_local import (
     InitLocalResult,
     generate_local_env,
@@ -99,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor,validate,publish,generate,stream}",
+        metavar="{init-local,doctor,validate,publish,generate,stream,wait-ingestion}",
     )
 
     # Lệnh 1: n06 init-local
@@ -246,6 +250,39 @@ def build_parser() -> argparse.ArgumentParser:
             "Một query foreachBatch đọc topic events, ghi Raw rồi Bronze theo batch_id và upsert "
             "ingest_batches. Tiến trình dài hạn; dừng bằng Ctrl+C."
         ),
+    )
+    wait_parser = subparsers.add_parser(
+        "wait-ingestion",
+        help="Chờ tới khi mọi dòng events của một dataset đã nằm trong Raw đã commit.",
+        description=(
+            "So byte của file events nguồn với Raw của các batch có trong ingest_batches; thoát 0 "
+            "khi đủ, 14 khi hết thời gian chờ."
+        ),
+    )
+    wait_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    wait_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    wait_parser.add_argument(
+        "--query-name", default=None, help="Query streaming cần chờ (mặc định: kafka.query_name)."
+    )
+    wait_parser.add_argument("--dataset-id", required=True, help="dataset_id cần chờ.")
+    wait_parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=None,
+        help="Thư mục source/ đã publish (mặc định: <generator_output_dir>/source).",
+    )
+    wait_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_WAIT_TIMEOUT_SECONDS,
+        help="Thời gian chờ tối đa (mặc định 300).",
     )
     stream_parser.add_argument(
         "--profile",
@@ -443,6 +480,17 @@ def main(
             env_file=parsed.env_file,
             query_name=parsed.query_name,
             available_now=parsed.available_now,
+            out=stdout,
+        )
+
+    if parsed.command == "wait-ingestion":
+        return run_wait_ingestion(
+            dataset_id=parsed.dataset_id,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            source_dir=parsed.source_dir,
+            query_name=parsed.query_name,
+            timeout_seconds=parsed.timeout_seconds,
             out=stdout,
         )
 
