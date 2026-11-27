@@ -72,6 +72,17 @@ def derive_business_date(
     return dt_utc.astimezone(tz).date().isoformat()
 
 
+def _expected_business_date(event_time_utc: str, tz_name: str) -> str | None:
+    """`business_date` kỳ vọng, hoặc None khi đổi múi giờ vượt miền lịch (năm 9999 cuối năm).
+
+    None không bằng chuỗi ngày nào nên record nhận `BUSINESS_DATE_MISMATCH` thay vì làm ném.
+    """
+    try:
+        return derive_business_date(event_time_utc, tz_name=tz_name)
+    except OverflowError:
+        return None
+
+
 def _normalize_json_for_comparison(obj: Mapping[str, Any]) -> str:
     """Chuẩn hóa dict thành chuỗi JSON đã sắp xếp khóa để so sánh bất biến nội dung."""
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -144,7 +155,7 @@ def validate_transaction_record(
         and check_format(ev_time, "date-time")
         and check_format(biz_date, "date")
     ):
-        expected_biz_date = derive_business_date(ev_time, tz_name=business_timezone)
+        expected_biz_date = _expected_business_date(ev_time, business_timezone)
         if biz_date != expected_biz_date:
             issues.append(
                 ValidationIssue(
@@ -238,7 +249,7 @@ def validate_ledger_entry_record(
         and check_format(ev_time, "date-time")
         and check_format(biz_date, "date")
     ):
-        expected_biz_date = derive_business_date(ev_time, tz_name=business_timezone)
+        expected_biz_date = _expected_business_date(ev_time, business_timezone)
         if biz_date != expected_biz_date:
             issues.append(
                 ValidationIssue(
@@ -317,7 +328,7 @@ def validate_statement_record(
         and check_format(ev_time, "date-time")
         and check_format(biz_date, "date")
     ):
-        expected_biz_date = derive_business_date(ev_time, tz_name=business_timezone)
+        expected_biz_date = _expected_business_date(ev_time, business_timezone)
         if biz_date != expected_biz_date:
             issues.append(
                 ValidationIssue(
