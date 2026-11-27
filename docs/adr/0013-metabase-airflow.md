@@ -1,12 +1,29 @@
 # ADR-0013: Phiên bản và cách tích hợp Metabase (T43) và Airflow (T60)
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: agent (soạn theo yêu cầu của chủ dự án để mở khóa T43 và T60), 2026-11-27
-- Người duyệt: chưa có. Chủ repo (QUY) quyết định Accept, sửa hoặc từ chối. Các câu hỏi ở mục "Câu hỏi mở" cần trả lời trước khi Accept.
+- Người duyệt: chủ repo (QUY), ủy quyền cho giám sát.
+- Đã duyệt (Accepted): chủ repo (ủy quyền giám sát), 2026-11-27
 - Ngày: 2026-11-27
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 2 ("Quy tắc chọn bộ phiên bản", "Cách Airflow gọi Spark"), mục 9, mục 10, mục 14.1
 
-ADR này chỉ có hiệu lực làm căn cứ code khi chuyển sang Accepted. Chưa có tệp nào ngoài ADR này bị sửa: Compose, Dockerfile, `pyproject.toml`, `uv.lock`, `.env.example` chỉ được mô tả ở đây.
+Từ 2026-11-27 ADR này là căn cứ code cho T43 và T60. Bản Proposed ban đầu chưa sửa Compose, Dockerfile, `pyproject.toml`, `uv.lock`, `.env.example`; các tệp đó chỉ được sửa trong T43, T60 và T41 đúng theo quyết định ở đây.
+
+## Quyết định đã chốt
+
+Chủ repo (ủy quyền giám sát) trả lời chín câu hỏi mở ngày 2026-11-27 như sau. Các câu trả lời này thắng mọi chỗ trong ADR còn ghi "đề xuất".
+
+1. **Phiên bản.** Metabase `v0.64.9` (LTS); Airflow `3.4.0`. Đã có đủ nguồn kiểm chứng ở mục 1 của "Quyết định". Image Airflow tự dựng `FROM n06-spark:3.5.8-py311` nên vấn đề nền Debian 13 của image chính thức không áp dụng.
+2. **RAM.** Không bật `core` + `bi` + `orchestration` + task Spark cùng lúc. Demo DAG: dừng `metabase`; `driver_memory` của profile `demo` đặt đủ nhỏ để vừa RAM (T60 đo và ghi số thật). Benchmark: chỉ `core`.
+3. **Xác thực.** Airflow dùng SimpleAuthManager, người dùng lấy từ `.env`, ghi vào mục hạn chế của báo cáo. Metabase: tạo admin tay lần đầu, ghi trong hướng dẫn T43.
+4. **Volume.** Không thêm volume giả cho Metabase; trạng thái nằm ở `n06_postgres_data`.
+5. **Lockfile Airflow.** Commit `constraints-3.4.0-3.11.txt` vào repo, gỡ dòng `confluent-kafka` (dự án ghim `2.16.2`). Ghim base `python:3.11.11-slim-bookworm` bằng digest.
+6. **Role chỉ đọc cho mart.** `n06_mart_ro` tạo bằng migration idempotent của database mart (thuộc T41). Không dùng script init vì script đó chỉ chạy trên volume mới.
+7. **SQL dashboard.** P0 dùng SQL không tham số; T62 dùng biến của Metabase.
+8. **Tên profile.** `bi` và `orchestration`.
+9. **PostgreSQL.** Giữ `postgres:16.6-bookworm`.
+
+Lịch sử: 2026-11-27 viết ở trạng thái Proposed (PR #27); cùng ngày chủ repo (ủy quyền giám sát) chốt chín câu hỏi mở và chuyển sang Accepted.
 
 ## Bối cảnh
 
@@ -204,6 +221,8 @@ Tái lập sau `down -v`: dashboard nằm trong database `n06_metabase` nên m�
 - **Không làm trong ADR này:** sửa Compose, Dockerfile, `pyproject.toml`, `uv.lock`, `.env.example`, init Postgres, cấu hình.
 
 ## Câu hỏi mở
+
+Cả chín câu đã được trả lời, xem mục "Quyết định đã chốt" ở đầu ADR; nội dung dưới đây giữ làm lịch sử.
 
 Spec im lặng hoặc ADR cần chủ repo quyết; người viết đề xuất, không tự chọn.
 

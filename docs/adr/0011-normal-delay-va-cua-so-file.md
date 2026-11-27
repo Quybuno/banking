@@ -1,8 +1,9 @@
 # ADR-0011: Ràng buộc normal delay phải tính cả cửa sổ file sao kê (T13 follow-up)
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: agent (task T13 follow-up), chờ người duyệt chuyển sang Accepted
-- Người duyệt:
+- Người duyệt: chủ repo
+- Đã duyệt (Accepted): chủ repo (giám sát được chủ repo giao toàn quyền), 2026-11-27
 - Ngày: 2026-11-23
 - Mục đặc tả liên quan (docs/spec.md): Phần II mục 5.1 (dòng 761), mục 5.3 (dòng 787), mục 1.10
 

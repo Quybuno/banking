@@ -1,9 +1,10 @@
 # ADR-0004b: Schema Silver, `key_conflicts` và `quarantine` (phần Silver của ADR-0004)
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: agent (soạn theo chỉ thị ưu tiên thấp của chủ repo để chuẩn bị mở khóa T25/T30/T31), 2026-11-27
 - Người duyệt: B (Quang — người sở hữu `quality`, `spark_jobs` Silver) và A (Mạnh — người duyệt theo `docs/TASKS.md` mục 3)
 - Ngày: 2026-11-27
+- Đã duyệt (Accepted): chủ repo (giám sát được chủ repo giao toàn quyền), 2026-11-27
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 6 (Silver, Kiểm tra chất lượng), mục 7.1, mục 8.1 (batch); Phần II mục 1, 3, 8. Ngoài đặc tả: ADR-0002 (Accepted), ADR-0003 (Accepted), ADR-0004 (Accepted, phần Raw/Bronze).
 
 > **Lưu ý:** Tài liệu này ở trạng thái **Proposed**, chưa được dùng làm căn cứ code cho tới khi được chủ repo/người duyệt chuyển sang **Accepted**. Phần Raw và Bronze đã chốt nằm tại `docs/adr/0004-schema-raw-bronze.md` (Accepted).
@@ -146,7 +147,14 @@ Các cột theo `contracts/N06_INPUT_CONTRACT_V1/schemas/account.schema.json`: `
 - **Gộp `quarantine` vào `layer = 'silver'`:** trái với ADR-0002 mục 3 (đã chốt `paths.quarantine_prefix` và `layer = 'quarantine'`). Không chọn.
 - **Đặt cột `source_pointers` thành bảng con riêng ngay ở Silver:** tăng số entity và giao dịch `current_snapshot` ở P0; lưu `array<string>` (đã sắp xác định để giữ semantic hash ổn định) đủ gọn cho P0 và vẫn giữ đủ dấu vết phát lại.
 
-## Câu hỏi mở cần người duyệt chốt trước khi Accepted
+## Quyết định đã chốt (2026-11-27)
+
+- **Q1.** `parse_error` không đọc được `business_date`: `quarantine.records` phân vùng theo `ingestion_date` của batch Raw chứa record đó; cột `business_date` để `NULL`.
+- **Q2.** `accounts.jsonl` nằm ở `<statements_prefix>/<dataset_id>/accounts.jsonl`, do `n06 ingest-statements` tải lên (hiện thực trong T25).
+
+Lịch sử: soạn Proposed (PR #24, merge vào main 2026-11-27 khi còn Proposed); Accepted 2026-11-27 với hai câu trả lời trên.
+
+## Câu hỏi mở (đã trả lời ở mục trên, giữ làm lịch sử)
 
 1. **Cách gán `business_date` cho `parse_error` không đọc được `business_date`:** dùng `ingestion_date` của batch Raw để phân vùng `quarantine.records`, hay tách riêng một phân vùng cố định / bảng không phân vùng?
 2. **Vị trí nạp `accounts.jsonl` trên MinIO** (được để mở từ ADR-0002 mục 9 và ADR-0004 mục Việc mở): đọc từ `<statements_prefix>/<dataset_id>/accounts.jsonl` hay một lệnh nạp accounts riêng trước T25?

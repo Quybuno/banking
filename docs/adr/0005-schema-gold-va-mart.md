@@ -1,9 +1,10 @@
 # ADR-0005: Schema Gold và PostgreSQL Mart (3 fact + 4 dim, grain, khóa, publish nguyên tử)
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: agent (soạn theo chỉ thị ưu tiên thấp của chủ repo), 2026-11-27
 - Người duyệt: C (Quý — người viết theo `docs/TASKS.md` mục 3) và B (Quang — người duyệt theo bảng đó)
 - Ngày: 2026-11-27
+- Đã duyệt (Accepted): chủ repo (giám sát được chủ repo giao toàn quyền), 2026-11-27
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 7.2, 7.3, 8.1, 8.2, 9; Phần II mục 6. Ngoài đặc tả: ADR-0002 (Accepted), ADR-0003 (Accepted), ADR-0004b (Proposed).
 
 > **Lưu ý:** Tài liệu này ở trạng thái **Proposed**, chưa được dùng làm căn cứ code cho tới khi được chủ repo/người duyệt chuyển sang **Accepted**.
@@ -114,7 +115,15 @@ Theo ADR-0002 điểm 5, trên MinIO mọi entity Gold (kể cả dimension) đ�
 - **Chỉ dùng `UPSERT` cho bảng fact trên Mart:** không xóa được dòng cũ không còn trong output mới (trái trực tiếp Phần I mục 8.2 và điều kiện hoàn thành T41). Không chọn.
 - **Tách `fact_reconciliation_sources` thành bảng con ngay từ P0:** đầy đủ chuẩn hóa 3NF hơn, nhưng làm phức tạp publish transaction và câu truy vấn Metabase ở P0; cột `source_pointers TEXT[]` đủ phục vụ drill-down P0 và có thể tách bảng con ở P2 nếu số pointer lớn.
 
-## Câu hỏi mở cần người duyệt chốt trước khi Accepted
+## Quyết định đã chốt (2026-11-27)
+
+- **Q1** không còn là câu mở: `docs/spec.md` dòng 264 đã chốt *"Số dư cuối ngày = số dư đầu ngày + tổng CREDIT − tổng DEBIT theo tài khoản"* (dòng 262: DEBIT bên gửi, CREDIT bên nhận). `fact_daily_balances` dùng đúng công thức này.
+- **Q2.** Không đặt FK cứng từ `fact_reconciliation` sang `dim_account` (để không chặn `MISSING_INTERNAL`).
+- Role chỉ đọc `n06_mart_ro` tạo bằng migration idempotent của database mart trong T41 (ADR-0013 Q6).
+
+Lịch sử: soạn Proposed (PR #24, merge vào main 2026-11-27 khi còn Proposed); Accepted 2026-11-27 với các câu trả lời trên.
+
+## Câu hỏi mở (đã trả lời ở mục trên, giữ làm lịch sử)
 
 1. **Chiều dấu của `debit_minor` / `credit_minor` trong `fact_daily_balances`:** chốt quy ước `closing = opening + credit - debit` (tài khoản nhận là `CREDIT`, tài khoản gửi là `DEBIT` — khớp trực tiếp fixture T40: A gửi 6.400 → 100.000 - 6.400 = 93.600; B nhận 6.400 → 50.000 + 6.400 = 56.400).
 2. **`fact_reconciliation` khi một khóa bị sửa từ `business_date` cũ hoặc có nhiều ngày:** phạm vi `DELETE` theo `(dataset_id, business_date BETWEEN from_date AND to_date)` có cần thêm khóa ngoại kiểm tra với `dim_account` hay để mềm để không chặn `MISSING_INTERNAL` (khi giao dịch nội bộ không tồn tại)? Đề xuất: không đặt FK cứng từ `fact_reconciliation` sang `dim_account`.
