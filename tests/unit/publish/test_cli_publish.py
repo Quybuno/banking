@@ -84,6 +84,29 @@ def test_success_prints_json_stats(tmp_path: Path, make_source: Callable[..., Pa
     assert {t for t, _, _ in producer.calls} == {"unit.topic"}
 
 
+@pytest.mark.parametrize(("flag", "expected"), [(0, 0), (1000, 1000), (None, 5)])
+def test_rate_flag_overrides_configuration_even_when_zero(
+    tmp_path: Path,
+    make_source: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    flag: int | None,
+    expected: int,
+) -> None:
+    """`--rate 0` phải tắt giới hạn tốc độ dù cấu hình đặt khác 0; không truyền cờ thì theo cấu
+    hình."""
+    monkeypatch.setenv("N06__PRODUCER__RATE", "5")
+    code, text = _run(
+        tmp_path,
+        make_source(_shards()),
+        FakeBroker(partitions=1),
+        FakeProducer(),
+        rate=flag,
+        as_json=True,
+    )
+    assert code == int(ExitCode.OK), text
+    assert json.loads(text)["target_rate"] == expected
+
+
 def test_defaults_come_from_configuration(tmp_path: Path, make_source: Callable[..., Path]) -> None:
     producer = FakeProducer()
     code, _ = _run(tmp_path, make_source(_shards()), FakeBroker(partitions=1), producer)

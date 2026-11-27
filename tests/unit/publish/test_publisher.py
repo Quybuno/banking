@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -206,6 +207,46 @@ def test_rate_limit_is_applied_with_injected_clock(source) -> None:  # type: ign
     assert sum(sleeps) == pytest.approx(6 / 7)
     assert stats.target_rate == 7
     assert stats.achieved_rate == pytest.approx(7 / (6 / 7), rel=0.01)
+
+
+class _TimedProducer(FakeProducer):
+    """Đồng hồ giả: thời gian chỉ trôi khi publisher chờ qua `producer.poll` (đường chờ thật,
+    không tiêm `sleep`). Ghi lại thời điểm gửi từng message."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = 0.0
+        self.sent_at: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def produce(self, topic: str, *, value: bytes, key: bytes, on_delivery: Any) -> None:
+        self.sent_at.append(self.now)
+        super().produce(topic, value=value, key=key, on_delivery=on_delivery)
+
+    def poll(self, timeout: float) -> int:
+        if timeout > 0:
+            self.now += max(timeout, 1e-9)  # bước tối thiểu để đồng hồ giả luôn tiến
+        return super().poll(timeout)
+
+
+def test_no_message_is_sent_before_its_slot(source) -> None:  # type: ignore[no-untyped-def]
+    producer = _TimedProducer()
+    stats, _, _ = _run(source, settings=_settings(rate=7), producer=producer, clock=producer.clock)
+    # 7 message ở 7/s: message thứ k (từ 0) không được gửi trước k/7 giây.
+    assert len(producer.sent_at) == 7
+    for k, sent_at in enumerate(producer.sent_at):
+        assert sent_at >= k / 7 - 1e-6, (k, producer.sent_at)
+    assert stats.elapsed_seconds >= 6 / 7 - 1e-6
+
+
+def test_zero_rate_never_waits(source) -> None:  # type: ignore[no-untyped-def]
+    producer = _TimedProducer()
+    stats, _, _ = _run(source, settings=_settings(rate=0), producer=producer, clock=producer.clock)
+    assert producer.sent_at == [0.0] * 7
+    assert producer.now == 0.0 and all(timeout == 0 for timeout in producer.polls)
+    assert stats.target_rate == 0 and stats.messages_delivered == 7
 
 
 def test_producer_config_is_idempotent_and_rejects_other_acks() -> None:
