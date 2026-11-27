@@ -35,6 +35,7 @@ from n06.cli.object_store import (
     STATUS_ERROR,
     STATUS_EXISTS,
     STATUS_MISSING,
+    BucketNameError,
     BucketResult,
     ObjectStoreConfigError,
     ObjectStoreTarget,
@@ -306,8 +307,29 @@ def _describe_config_error(exc: Exception) -> str:
     vào địa chỉ, vào trường khác hoặc vào tệp TOML.
     """
     if isinstance(exc, ConfigValidationError):
-        return f"Lỗi cấu hình tại trường '{exc.field_path}': {exc.reason}"
+        return exc.public_message
     return str(exc)
+
+
+def _docker_error_detail(stderr: str, fallback: str) -> str:
+    """Nội dung lỗi của `docker`, trừ khi `DOCKER_HOST` đang được đặt.
+
+    Khi `DOCKER_HOST` bị từ chối, `docker` trích lại giá trị đó, kể cả một phần mật khẩu.
+    """
+    if os.environ.get("DOCKER_HOST"):
+        return (
+            f"{fallback} Nội dung lỗi không in vì biến DOCKER_HOST đang được đặt; chạy "
+            "`docker info` để xem."
+        )
+    return stderr.strip() or fallback
+
+
+def _sanitize_check_id(check_id: str, secret_values: set[str]) -> str:
+    """Chỉ phần tên bucket trong `check_id` đến từ cấu hình; phần còn lại là hằng của mã."""
+    prefix, _, name = check_id.partition(".")
+    if prefix != "bucket":
+        return check_id
+    return f"{prefix}.{_sanitize(name, secret_values)}"
 
 
 def check_configuration(
@@ -403,7 +425,9 @@ def check_docker_engine() -> tuple[CheckItem, str | None]:
                 passed=False,
                 exit_code=int(ExitCode.DOCKER_ERROR),
                 summary="Plugin `docker compose` không khả dụng",
-                detail=compose_res.stderr.strip() or "Không chạy được `docker compose version`.",
+                detail=_docker_error_detail(
+                    compose_res.stderr, "Không chạy được `docker compose version`."
+                ),
             ),
             None,
         )
@@ -422,7 +446,7 @@ def check_docker_engine() -> tuple[CheckItem, str | None]:
                 passed=False,
                 exit_code=int(ExitCode.DOCKER_ERROR),
                 summary="Docker daemon chưa chạy hoặc không có quyền truy cập",
-                detail=info_res.stderr.strip() or "Lệnh `docker info` thất bại.",
+                detail=_docker_error_detail(info_res.stderr, "Lệnh `docker info` thất bại."),
             ),
             None,
         )
@@ -731,6 +755,10 @@ def _resolve_host_endpoints(
         raise ValueError(
             "object_store.endpoint (profile test) không hợp lệ: không đọc được host hoặc cổng"
         ) from None
+    if parsed_minio.hostname and not _HOST_PATTERN.fullmatch(parsed_minio.hostname):
+        raise ValueError(
+            "object_store.endpoint (profile test) không phải tên máy hoặc địa chỉ IP hợp lệ"
+        )
     minio_host = parsed_minio.hostname or kafka_host_raw
     minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port), "object_store.endpoint")
     minio_scheme = parsed_minio.scheme or "http"
@@ -911,6 +939,21 @@ def check_object_store_buckets(
                 f"object store không trả lời trong hạn tổng {deadline_sec:g} s",
             )
         )
+    except BucketNameError:
+        # Tên bị từ chối: không in lại, kể cả trong `check_id`.
+        return [
+            CheckItem(
+                check_id="bucket.invalid_name",
+                category="bucket",
+                passed=False,
+                exit_code=int(ExitCode.CONFIG_ERROR),
+                summary="Cấu hình object_store.bucket không hợp lệ",
+                detail=(
+                    "object_store.bucket không đúng quy tắc đặt tên bucket S3: 3-63 ký tự gồm "
+                    "chữ thường, số và dấu gạch ngang, không dùng tiền tố hay hậu tố dành riêng."
+                ),
+            )
+        ]
     except ObjectStoreConfigError as exc:
         return [
             CheckItem(
@@ -1132,7 +1175,7 @@ def build_doctor_report(
     for item in checks:
         sanitized_checks.append(
             CheckItem(
-                check_id=_sanitize(item.check_id, secret_values),
+                check_id=_sanitize_check_id(item.check_id, secret_values),
                 category=item.category,
                 passed=item.passed,
                 exit_code=item.exit_code,
@@ -1145,7 +1188,8 @@ def build_doctor_report(
     # Xác định mã thoát ưu tiên của lần chạy
     # `capacity.limits` hiện sớm nhưng xếp hạng cuối: lỗi của nó đến từ guard dung lượng, không được
     # che mã lỗi hạ tầng thật (13, 14) khi đọc ổ chập chờn.
-    failed = [item for item in sanitized_checks if not item.passed]
+    # Xếp hạng trên bản chưa che: việc che secret không được đổi hạng mục nào thắng.
+    failed = [item for item in checks if not item.passed]
     ranked = [i for i in failed if i.check_id != "capacity.limits"] + [
         i for i in failed if i.check_id == "capacity.limits"
     ]

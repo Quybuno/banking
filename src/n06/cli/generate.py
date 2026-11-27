@@ -80,7 +80,7 @@ def run_generate(
     try:
         cfg = _load_app_config(profile, env_file, merged_env)
     except ConfigValidationError as exc:
-        return fail(ExitCode.CONFIG_ERROR, str(exc))
+        return fail(ExitCode.CONFIG_ERROR, exc.public_message)
 
     try:
         generator_cfg = json.loads(generator_config.read_text(encoding="utf-8"))
@@ -97,8 +97,8 @@ def run_generate(
     if type(requested) is not int or requested < 1:
         return fail(
             ExitCode.CONFIG_ERROR,
-            "transaction_count của generator phải là số nguyên >= 1 "
-            f"(nhận {requested!r}); đặt bằng --transactions hoặc trong tệp cấu hình.",
+            "transaction_count của generator phải là số nguyên >= 1; đặt bằng --transactions "
+            "hoặc trong tệp cấu hình.",
         )
 
     target_dir = out_dir if out_dir is not None else Path(cfg.paths.generator_output_dir)

@@ -67,11 +67,10 @@
 
 - Probe không ném lỗi mạng: dịch vụ từ chối kết nối, quá thời gian, ngắt kết nối, trả lời sai hay tên host không mã hóa được đều là FAIL mã `14` kèm tên dịch vụ. Lỗi lập trình (ngoại lệ khác) vẫn nổi lên.
 - Lỗi **suy địa chỉ từ cấu hình** là mã `10` cho cả bốn dịch vụ, thông báo nêu tên biến hoặc trường sai: `N06_*_HOST_PORT` không phải số nguyên từ 1 đến 65535; `object_store.endpoint` hỏng hoặc cổng ngoài miền; host không phải tên máy hay địa chỉ IP; địa chỉ chứa `@`. Biến cổng rỗng dùng giá trị mặc định khi kiểm service; riêng kiểm bucket vẫn coi `N06_MINIO_API_HOST_PORT` rỗng là lỗi mã `10`. Các quy tắc địa chỉ chỉ áp lên profile `test` và chỉ khi `doctor` tới bước kiểm service (không chạy với `--skip-services` hay khi Docker lỗi).
-- Secret trong output (text và `--json`):
-  - Giá trị của các biến `*PASSWORD*`, `*SECRET*`, `*ACCESS_KEY*`, `*TOKEN*` (từ 4 ký tự) bị che ở `check_id`, tóm tắt và chi tiết, không phân biệt hoa thường.
-  - Phần `user:mat-khau@` của URL dạng `scheme://` bị che, kể cả trong lỗi do Docker trả về.
-  - Lỗi kiểm cấu hình không chép giá trị sai; tệp không đọc được hay giá trị không phân tích được chỉ nêu tên loại lỗi.
-  - **Giới hạn:** tên profile, tên bucket, tên host và đường dẫn trong cấu hình vẫn được in để chẩn đoán. Mật khẩu đặt nhầm vào các chỗ đó, đúng cú pháp và không trùng biến secret nào, sẽ bị in.
+- Secret trong output (text và `--json`). **Quy tắc: không in giá trị của trường cấu hình bị từ chối**, chỉ nêu tên trường hoặc biến và lý do. Áp dụng cho `doctor`, `generate`, `publish`.
+  - `doctor`: giá trị của các biến `*PASSWORD*`, `*SECRET*`, `*ACCESS_KEY*`, `*TOKEN*` (từ 4 ký tự) bị che ở tên bucket trong `check_id`, tóm tắt và chi tiết, không phân biệt hoa thường. Phần `user:mat-khau@` của URL dạng `scheme://` bị che khi mật khẩu không chứa `/`, khoảng trắng hay dấu nháy.
+  - Khi `DOCKER_HOST` được đặt, `doctor` không in nội dung lỗi của `docker`.
+  - **Giới hạn:** giá trị được chấp nhận (tên profile hợp lệ, tên bucket hợp lệ, tên host, đường dẫn đọc được) vẫn được in để chẩn đoán; mật khẩu đặt nhầm vào đó, đúng cú pháp và không trùng biến secret nào, sẽ bị in. `init-local` vẫn nêu tên bucket không hợp lệ. Tham số dòng lệnh sai được in lại. `doctor` văng traceback khi tệp `.env` không phải UTF-8 hoặc không đọc được.
 - MinIO và Spark: HTTP GET, mã 2xx; **không dùng `http_proxy` của môi trường** và không đi theo chuyển hướng. Kafka: bắt tay `ApiVersions` phiên bản 0. PostgreSQL: gửi `SSLRequest`, chờ đúng một byte `S` hoặc `N`. Chỉ mở được cổng TCP **không** đủ để coi dịch vụ sống.
 - Bucket: `HEAD` có ký.
 - Thời gian: mỗi thao tác socket chờ 2-5 giây, mỗi probe có hạn tổng 8 giây (cố định trong mã), nên dịch vụ nhỏ giọt từng byte không treo được `doctor`.

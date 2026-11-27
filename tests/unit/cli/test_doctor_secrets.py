@@ -19,6 +19,7 @@ import pytest
 
 from n06.cli.doctor import CheckItem, SystemResourceSnapshot, run_doctor
 from n06.cli.init_local import parse_dotenv_file, run_init_local
+from n06.cli.object_store import STATUS_MISSING, BucketResult
 from n06.config import DEFAULT_CONFIG_DIR
 
 MARKER = "SentinelPw9137"
@@ -186,6 +187,16 @@ RUNNING = {
             "kafka.bootstrap_servers",
             id="kafka-key-value-string",
         ),
+        pytest.param(
+            {"N06__OBJECT_STORE__ENDPOINT": f"http://db;password={MARKER}:1"},
+            "object_store.endpoint",
+            id="endpoint-host-with-semicolon",
+        ),
+        pytest.param(
+            {"N06__OBJECT_STORE__ENDPOINT": f"http://host=db password={MARKER}:1"},
+            "object_store.endpoint",
+            id="endpoint-key-value-string",
+        ),
     ],
 )
 def test_address_carrying_credentials_is_rejected_before_it_is_printed(
@@ -236,16 +247,18 @@ def _assert_known_secret_absent(outputs: list[tuple[int, str]]) -> None:
 
 
 def test_secret_used_as_bucket_name_is_redacted_in_check_id_too(tmp_path: Path) -> None:
+    secret = "knownsecret4471xyz"  # đúng quy tắc tên bucket nên tên được chấp nhận và được in
     minio_ok = CheckItem("service.minio", "service", True, 0, "giả", "giả")
-    outputs = _doctor_outputs(
-        tmp_path,
-        {
-            "N06_OBJECT_STORE_SECRET_KEY": KNOWN_SECRET,
-            "N06__OBJECT_STORE__BUCKET": KNOWN_SECRET,
-        },
-        services=[minio_ok],
-    )
-    _assert_known_secret_absent(outputs)
+    missing = BucketResult(secret, STATUS_MISSING, "bucket chưa tồn tại")
+    with patch("n06.cli.doctor.head_bucket", return_value=missing):
+        outputs = _doctor_outputs(
+            tmp_path,
+            {"N06_OBJECT_STORE_SECRET_KEY": secret, "N06__OBJECT_STORE__BUCKET": secret},
+            services=[minio_ok],
+        )
+    for _, text in outputs:
+        assert secret not in text.lower(), text
+        assert "bucket.***REDACTED***" in text, text
 
 
 def test_secret_lowercased_by_url_parsing_is_still_redacted(tmp_path: Path) -> None:
@@ -265,7 +278,7 @@ def test_secret_lowercased_by_url_parsing_is_still_redacted(tmp_path: Path) -> N
 
 def test_every_printed_field_of_a_check_is_redacted(tmp_path: Path) -> None:
     leaked = CheckItem(
-        f"service.{KNOWN_SECRET}",
+        f"bucket.{KNOWN_SECRET}",
         "service",
         False,
         14,

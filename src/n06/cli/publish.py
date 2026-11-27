@@ -31,6 +31,7 @@ from n06.producer.kafka_client import (
     ProducerLike,
     build_producer_config,
     make_producer,
+    rejected_producer_message,
 )
 from n06.producer.publisher import PublishSettings, PublishStats, publish_events
 from n06.producer.source import (
@@ -116,7 +117,7 @@ def run_publish(
     try:
         cfg = _load_app_config(profile, env_file, overrides)
     except ConfigValidationError as exc:
-        return fail(ExitCode.CONFIG_ERROR, str(exc))
+        return fail(ExitCode.CONFIG_ERROR, exc.public_message)
 
     resolved_source = (
         source_dir
@@ -152,7 +153,7 @@ def run_publish(
         try:
             producer = producer_factory(producer_config)
         except KafkaException as exc:
-            raise PublishConfigError(f"Cấu hình producer bị từ chối: {exc}") from exc
+            raise PublishConfigError(rejected_producer_message(exc)) from exc
         broker = (
             broker_factory(cfg.kafka.bootstrap_servers)
             if broker_factory is not None
