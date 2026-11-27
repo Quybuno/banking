@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -71,11 +72,11 @@ def build_producer_config(
     """Cấu hình producer idempotent; `acks` khác `all` hoặc `retries < 1` bị từ chối."""
     if acks != "all":
         raise PublishConfigError(
-            f"producer.acks={acks!r} không tương thích với producer idempotent; yêu cầu 'all'."
+            "producer.acks không tương thích với producer idempotent; yêu cầu 'all'."
         )
     if retries < 1:
         raise PublishConfigError(
-            f"producer.retries={retries} không tương thích với producer idempotent; yêu cầu "
+            "producer.retries không tương thích với producer idempotent; yêu cầu "
             "retries >= 1 (librdkafka từ chối khởi tạo)."
         )
     return {
@@ -89,12 +90,28 @@ def build_producer_config(
     }
 
 
+_PROPERTY_PATTERN = re.compile(r'configuration property "([a-z0-9._]+)"', re.IGNORECASE)
+
+
+def rejected_producer_message(exc: BaseException) -> str:
+    """Thông báo khi librdkafka từ chối cấu hình: chỉ nêu tên thuộc tính.
+
+    Nội dung lỗi gốc có thể trích lại giá trị bị từ chối nên không in.
+    """
+    names = _PROPERTY_PATTERN.findall(str(exc))
+    where = f" ở thuộc tính {names[-1]}" if names else ""
+    return (
+        f"Cấu hình producer bị từ chối{where} ({type(exc).__name__}); kiểm mục producer.* và "
+        "kafka.* trong cấu hình."
+    )
+
+
 def make_producer(config: dict[str, Any]) -> Producer:
     """Tạo producer thật; cấu hình bị librdkafka từ chối là lỗi cấu hình (mã 10)."""
     try:
         return Producer(config)
     except (KafkaException, ValueError, TypeError) as exc:
-        raise PublishConfigError(f"Cấu hình producer bị từ chối: {exc}") from exc
+        raise PublishConfigError(rejected_producer_message(exc)) from exc
 
 
 def _default_consumer_factory(bootstrap_servers: str) -> Callable[[], Consumer]:
@@ -162,6 +179,10 @@ class ConfluentBroker:
             if code in _TRANSIENT_ERRORS and self._clock() <= deadline:
                 self._sleep(RETRY_SLEEP_SECONDS)
                 continue
+            if code == KafkaError.TOPIC_EXCEPTION:
+                raise BrokerUnavailableError(
+                    "Broker từ chối tên topic ở kafka.events_topic (TOPIC_EXCEPTION)."
+                )
             raise BrokerUnavailableError(
                 f"Không lấy được metadata của topic {topic} (lỗi {found.error})."
             )
@@ -178,9 +199,13 @@ class ConfluentBroker:
                 return
             if code in _CONFIG_ERRORS:
                 raise PublishConfigError(
-                    f"Cụm broker từ chối tạo topic {topic} với {partitions} partition và "
-                    f"replication_factor={replication_factor} (kafka.num_partitions, "
-                    f"kafka.replication_factor): {exc}"
+                    "Cụm broker từ chối tạo topic; kiểm kafka.events_topic, "
+                    "kafka.num_partitions, kafka.replication_factor "
+                    f"({exc.args[0].name()})."
+                ) from exc
+            if code == KafkaError.TOPIC_EXCEPTION:
+                raise BrokerUnavailableError(
+                    "Broker từ chối tên topic ở kafka.events_topic (TOPIC_EXCEPTION)."
                 ) from exc
             raise BrokerUnavailableError(f"Không tạo được topic {topic}: {exc}") from exc
         except TimeoutError as exc:

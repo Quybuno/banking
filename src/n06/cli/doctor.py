@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -34,11 +35,13 @@ from n06.cli.object_store import (
     STATUS_ERROR,
     STATUS_EXISTS,
     STATUS_MISSING,
+    BucketNameError,
     BucketResult,
     ObjectStoreConfigError,
     ObjectStoreTarget,
     head_bucket,
     target_from_config,
+    validate_bucket_name,
 )
 from n06.config import (
     DEFAULT_CONFIG_DIR,
@@ -278,12 +281,56 @@ def _collect_secret_values(env_map: Mapping[str, str]) -> set[str]:
 
 
 def redact_secrets(text: str, secret_values: set[str]) -> str:
-    """Thay thế mọi chuỗi giá trị secret xuất hiện trong `text` bằng `***REDACTED***`."""
+    """Thay thế mọi chuỗi giá trị secret xuất hiện trong `text` bằng `***REDACTED***`.
+
+    Không phân biệt hoa thường: tên host lấy qua `urlparse` bị hạ chữ thường.
+    """
     redacted = text
     for secret in sorted(secret_values, key=len, reverse=True):
-        if secret and secret in redacted:
-            redacted = redacted.replace(secret, "***REDACTED***")
+        if secret:
+            redacted = re.sub(re.escape(secret), "***REDACTED***", redacted, flags=re.IGNORECASE)
     return redacted
+
+
+# Phần `user:mat-khau@` trong một URL bất kỳ, kể cả URL do công cụ ngoài (docker) chép lại.
+_URL_USERINFO = re.compile(r"(://)[^/\s'\"]*@")
+
+
+def _sanitize(text: str, secret_values: set[str]) -> str:
+    """Che secret đã biết và mật khẩu nằm trong URL trước khi in."""
+    return _URL_USERINFO.sub(r"\1***@", redact_secrets(text, secret_values))
+
+
+def _describe_config_error(exc: Exception) -> str:
+    """Thông báo lỗi cấu hình không kèm giá trị sai: giá trị đó có thể là mật khẩu.
+
+    Bộ lọc `redact_secrets` chỉ biết giá trị của các biến secret, không biết mật khẩu bị đặt nhầm
+    vào địa chỉ, vào trường khác hoặc vào tệp TOML.
+    """
+    if isinstance(exc, ConfigValidationError):
+        return exc.public_message
+    return str(exc)
+
+
+def _docker_error_detail(stderr: str, fallback: str) -> str:
+    """Nội dung lỗi của `docker`, trừ khi `DOCKER_HOST` đang được đặt.
+
+    Khi `DOCKER_HOST` bị từ chối, `docker` trích lại giá trị đó, kể cả một phần mật khẩu.
+    """
+    if os.environ.get("DOCKER_HOST"):
+        return (
+            f"{fallback} Nội dung lỗi không in vì biến DOCKER_HOST đang được đặt; chạy "
+            "`docker info` để xem."
+        )
+    return stderr.strip() or fallback
+
+
+def _sanitize_check_id(check_id: str, secret_values: set[str]) -> str:
+    """Chỉ phần tên bucket trong `check_id` đến từ cấu hình; phần còn lại là hằng của mã."""
+    prefix, _, name = check_id.partition(".")
+    if prefix != "bucket":
+        return check_id
+    return f"{prefix}.{_sanitize(name, secret_values)}"
 
 
 def check_configuration(
@@ -298,7 +345,7 @@ def check_configuration(
     try:
         cfg = load_config(profile=profile, config_dir=resolved_dir, env=merged_env)
     except (ConfigValidationError, FileNotFoundError) as exc:
-        safe_msg = redact_secrets(str(exc), secret_values)
+        safe_msg = redact_secrets(_describe_config_error(exc), secret_values)
         return (
             CheckItem(
                 check_id="config.schema",
@@ -310,6 +357,21 @@ def check_configuration(
                     f"{safe_msg} (Gợi ý: chạy `n06 init-local` để khởi tạo `.env` hợp lệ "
                     "hoặc kiểm tra file TOML trong `config/`)."
                 ),
+            ),
+            None,
+        )
+    except (OSError, ValueError) as exc:
+        # Tên tệp quá dài, không có quyền đọc, số quá dài để phân tích: nội dung lỗi trích lại
+        # giá trị cấu hình nên chỉ in tên loại lỗi.
+        message = f"Không đọc hoặc phân tích được cấu hình ({type(exc).__name__})"
+        return (
+            CheckItem(
+                check_id="config.schema",
+                category="config",
+                passed=False,
+                exit_code=int(ExitCode.CONFIG_ERROR),
+                summary=message,
+                detail=f"{message}; kiểm biến N06_* và file TOML trong `config/`.",
             ),
             None,
         )
@@ -364,7 +426,9 @@ def check_docker_engine() -> tuple[CheckItem, str | None]:
                 passed=False,
                 exit_code=int(ExitCode.DOCKER_ERROR),
                 summary="Plugin `docker compose` không khả dụng",
-                detail=compose_res.stderr.strip() or "Không chạy được `docker compose version`.",
+                detail=_docker_error_detail(
+                    compose_res.stderr, "Không chạy được `docker compose version`."
+                ),
             ),
             None,
         )
@@ -383,7 +447,7 @@ def check_docker_engine() -> tuple[CheckItem, str | None]:
                 passed=False,
                 exit_code=int(ExitCode.DOCKER_ERROR),
                 summary="Docker daemon chưa chạy hoặc không có quyền truy cập",
-                detail=info_res.stderr.strip() or "Lệnh `docker info` thất bại.",
+                detail=_docker_error_detail(info_res.stderr, "Lệnh `docker info` thất bại."),
             ),
             None,
         )
@@ -626,6 +690,10 @@ def _probe_http(
     return outcome
 
 
+# Tên máy (gồm tên service Compose có `_`) hoặc địa chỉ IPv6 không ngoặc vuông.
+_HOST_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,253}|[0-9A-Fa-f]*:[0-9A-Fa-f:.]+")
+
+
 def _resolve_host_endpoints(
     merged_env: Mapping[str, str],
     config_dir: Path | None = None,
@@ -637,36 +705,79 @@ def _resolve_host_endpoints(
     resolved_dir = config_dir if config_dir is not None else DEFAULT_CONFIG_DIR
     test_cfg = load_config(profile="test", config_dir=resolved_dir, env=merged_env)
 
-    def host_port(variable: str, default: str) -> int:
-        # Biến rỗng nghĩa là dùng mặc định, như Compose `${VAR:-mặc định}`. Lỗi nêu tên biến.
-        raw = merged_env.get(variable, "").strip() or default
+    # Mọi lỗi ở đây chỉ nêu tên trường hoặc biến, không in giá trị (có thể chứa mật khẩu).
+    for field_path, address in (
+        ("kafka.bootstrap_servers", test_cfg.kafka.bootstrap_servers),
+        ("object_store.endpoint", test_cfg.object_store.endpoint),
+        ("postgres.mart.host", test_cfg.postgres.mart.host),
+    ):
+        if "@" in address:
+            raise ValueError(
+                f"{field_path} (profile test) không được chứa '@': credential chỉ lấy từ biến "
+                "môi trường, không đặt trong địa chỉ"
+            )
+    # Tên đích được in ra, nên host phải đúng là tên máy hoặc địa chỉ IP: chuỗi kết nối kiểu
+    # `host=... password=...` bị từ chối trước khi in.
+    for field_path, host in (
+        ("kafka.bootstrap_servers", test_cfg.kafka.bootstrap_servers.partition(":")[0]),
+        ("postgres.mart.host", test_cfg.postgres.mart.host),
+    ):
+        if not _HOST_PATTERN.fullmatch(host):
+            raise ValueError(
+                f"{field_path} (profile test) không phải tên máy hoặc địa chỉ IP hợp lệ"
+            )
+
+    def host_port(variable: str, default: str, default_field: str) -> int:
+        # Biến rỗng nghĩa là dùng mặc định, như Compose `${VAR:-mặc định}`.
+        from_variable = merged_env.get(variable, "").strip()
         try:
-            return int(raw)
+            port = int(from_variable or default)
         except ValueError:
-            raise ValueError(f"{variable} phải là số nguyên, nhận {raw!r}") from None
+            port = 0
+        if not 1 <= port <= 65535:
+            source = variable
+            if not from_variable:
+                source = (
+                    f"{variable} để trống nên dùng cổng của {default_field} (profile test); cổng đó"
+                )
+            raise ValueError(f"{source} phải là số nguyên từ 1 đến 65535")
+        return port
 
     # 1. Kafka bootstrap host & port
     kafka_host_raw, _, kafka_port_raw = test_cfg.kafka.bootstrap_servers.partition(":")
-    kafka_port = host_port("N06_KAFKA_HOST_PORT", kafka_port_raw)
+    kafka_port = host_port("N06_KAFKA_HOST_PORT", kafka_port_raw, "kafka.bootstrap_servers")
 
     # 2. MinIO HTTP endpoint
     try:
         parsed_minio = urlparse(test_cfg.object_store.endpoint)
         endpoint_port = parsed_minio.port or 0
-    except ValueError as exc:
-        raise ValueError(f"object_store.endpoint (profile test) không hợp lệ: {exc}") from None
+    except ValueError:
+        # Không chép nội dung lỗi của `urlparse`: nó trích lại một phần endpoint.
+        raise ValueError(
+            "object_store.endpoint (profile test) không hợp lệ: không đọc được host hoặc cổng"
+        ) from None
+    if parsed_minio.scheme not in ("http", "https"):
+        raise ValueError(
+            "object_store.endpoint (profile test) phải bắt đầu bằng http:// hoặc https://"
+        )
+    if parsed_minio.hostname and not _HOST_PATTERN.fullmatch(parsed_minio.hostname):
+        raise ValueError(
+            "object_store.endpoint (profile test) không phải tên máy hoặc địa chỉ IP hợp lệ"
+        )
     minio_host = parsed_minio.hostname or kafka_host_raw
-    minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port))
-    minio_scheme = parsed_minio.scheme or "http"
+    minio_port = host_port("N06_MINIO_API_HOST_PORT", str(endpoint_port), "object_store.endpoint")
+    minio_scheme = parsed_minio.scheme
     minio_health_url = f"{minio_scheme}://{minio_host}:{minio_port}/minio/health/live"
 
     # 3. PostgreSQL host & port
     pg_host = test_cfg.postgres.mart.host
-    pg_port = host_port("N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port))
+    pg_port = host_port(
+        "N06_POSTGRES_HOST_PORT", str(test_cfg.postgres.mart.port), "postgres.mart.port"
+    )
 
     # 4. Spark Web UI host & port
     spark_host = pg_host
-    spark_port = host_port("N06_SPARK_UI_HOST_PORT", "18080")
+    spark_port = host_port("N06_SPARK_UI_HOST_PORT", "18080", "cổng Spark UI mặc định")
     spark_ui_url = f"http://{spark_host}:{spark_port}"
 
     return {
@@ -696,7 +807,11 @@ def check_services(
                 passed=False,
                 exit_code=int(ExitCode.CONFIG_ERROR),
                 summary=f"Không suy được địa chỉ của service '{svc}' từ cấu hình",
-                detail=_describe_error(exc),
+                detail=(
+                    _describe_config_error(exc)
+                    if isinstance(exc, ConfigValidationError)
+                    else _describe_error(exc)
+                ),
             )
             for svc in CORE_SERVICES
         ]
@@ -818,6 +933,8 @@ def check_object_store_buckets(
     check_id = f"bucket.{bucket}"
     probe = prober if prober is not None else head_bucket
     try:
+        # Kiểm tên bucket trước: lỗi cấu hình khác không được in một tên chưa kiểm.
+        validate_bucket_name(bucket)
         target = target_from_config(cfg, merged_env, config_dir=config_dir)
         finished, probed = _call_with_deadline(lambda: probe(target, bucket), deadline_sec)
         result = (
@@ -829,6 +946,21 @@ def check_object_store_buckets(
                 f"object store không trả lời trong hạn tổng {deadline_sec:g} s",
             )
         )
+    except BucketNameError:
+        # Tên bị từ chối: không in lại, kể cả trong `check_id`.
+        return [
+            CheckItem(
+                check_id="bucket.invalid_name",
+                category="bucket",
+                passed=False,
+                exit_code=int(ExitCode.CONFIG_ERROR),
+                summary="Cấu hình object_store.bucket không hợp lệ",
+                detail=(
+                    "object_store.bucket không đúng quy tắc đặt tên bucket S3: 3-63 ký tự gồm "
+                    "chữ thường, số và dấu gạch ngang, không dùng tiền tố hay hậu tố dành riêng."
+                ),
+            )
+        ]
     except ObjectStoreConfigError as exc:
         return [
             CheckItem(
@@ -1050,12 +1182,12 @@ def build_doctor_report(
     for item in checks:
         sanitized_checks.append(
             CheckItem(
-                check_id=item.check_id,
+                check_id=_sanitize_check_id(item.check_id, secret_values),
                 category=item.category,
                 passed=item.passed,
                 exit_code=item.exit_code,
-                summary=redact_secrets(item.summary, secret_values),
-                detail=redact_secrets(item.detail, secret_values),
+                summary=_sanitize(item.summary, secret_values),
+                detail=_sanitize(item.detail, secret_values),
                 warning=item.warning,
             )
         )
@@ -1063,7 +1195,8 @@ def build_doctor_report(
     # Xác định mã thoát ưu tiên của lần chạy
     # `capacity.limits` hiện sớm nhưng xếp hạng cuối: lỗi của nó đến từ guard dung lượng, không được
     # che mã lỗi hạ tầng thật (13, 14) khi đọc ổ chập chờn.
-    failed = [item for item in sanitized_checks if not item.passed]
+    # Xếp hạng trên bản chưa che: việc che secret không được đổi hạng mục nào thắng.
+    failed = [item for item in checks if not item.passed]
     ranked = [i for i in failed if i.check_id != "capacity.limits"] + [
         i for i in failed if i.check_id == "capacity.limits"
     ]

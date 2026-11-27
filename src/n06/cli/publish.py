@@ -31,6 +31,7 @@ from n06.producer.kafka_client import (
     ProducerLike,
     build_producer_config,
     make_producer,
+    rejected_producer_message,
 )
 from n06.producer.publisher import PublishSettings, PublishStats, publish_events
 from n06.producer.source import (
@@ -116,7 +117,14 @@ def run_publish(
     try:
         cfg = _load_app_config(profile, env_file, overrides)
     except ConfigValidationError as exc:
-        return fail(ExitCode.CONFIG_ERROR, str(exc))
+        return fail(ExitCode.CONFIG_ERROR, exc.public_message)
+
+    # Từ chối trước khi tạo client: librdkafka tự ghi địa chỉ ra stderr.
+    if "@" in cfg.kafka.bootstrap_servers:
+        return fail(
+            ExitCode.CONFIG_ERROR,
+            "kafka.bootstrap_servers không được chứa '@': credential không đặt trong địa chỉ.",
+        )
 
     resolved_source = (
         source_dir
@@ -152,7 +160,7 @@ def run_publish(
         try:
             producer = producer_factory(producer_config)
         except KafkaException as exc:
-            raise PublishConfigError(f"Cấu hình producer bị từ chối: {exc}") from exc
+            raise PublishConfigError(rejected_producer_message(exc)) from exc
         broker = (
             broker_factory(cfg.kafka.bootstrap_servers)
             if broker_factory is not None
@@ -180,7 +188,11 @@ def run_publish(
     except KafkaException as exc:  # lưới an toàn: lỗi Kafka chưa được bọc ở lớp dưới
         return fail(ExitCode.KAFKA_DELIVERY_ERROR, f"Lỗi Kafka: {exc}")
     except OSError as exc:  # lưới an toàn: lỗi đọc file nguồn chưa được bọc
-        return fail(ExitCode.CONFIG_ERROR, f"Không đọc được dữ liệu nguồn: {exc}")
+        return fail(
+            ExitCode.CONFIG_ERROR,
+            f"Không đọc được dữ liệu nguồn ({type(exc).__name__}: {exc.strerror}); kiểm "
+            "--source-dir hoặc paths.generator_output_dir.",
+        )
 
     if as_json:
         stdout.write(json.dumps({"ok": True, **stats.to_dict()}, ensure_ascii=False) + "\n")

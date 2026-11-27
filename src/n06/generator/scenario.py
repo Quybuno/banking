@@ -32,6 +32,12 @@ from n06.generator.external_sort import event_time_ordinal_key, external_sort_js
 class ScenarioConfigError(ValueError):
     """Cấu hình generator không hợp lệ theo hợp đồng v1."""
 
+    def __init__(self, message: str, *, public_message: str | None = None) -> None:
+        super().__init__(message)
+        # Thông báo để in ra output. Nơi nào chép giá trị bị từ chối vào `message` thì phải đưa
+        # `public_message` không kèm giá trị.
+        self.public_message = public_message or message
+
 
 class ScenarioValidationError(RuntimeError):
     """Bản ghi sinh ra không đạt kiểm tra của validator T10."""
@@ -68,7 +74,10 @@ def select_account_pair(
 ) -> tuple[int, int]:
     """Chọn cặp chỉ số tài khoản `(from_idx, to_idx)` khác nhau theo mục 5.1 và 5.2."""
     if account_count < 2:
-        raise ScenarioConfigError(f"account_count phải >= 2, nhận {account_count}")
+        raise ScenarioConfigError(
+            f"account_count phải >= 2, nhận {account_count}",
+            public_message="account_count phải >= 2.",
+        )
 
     if account_selection == "UNIFORM_DISTINCT_PAIR":
         from_idx = draw(contract_version, seed, "account-from", ordinal, 0, account_count - 1)
@@ -76,7 +85,8 @@ def select_account_pair(
         if hot_account_count < 1 or hot_account_count >= account_count:
             raise ScenarioConfigError(
                 f"HOT_ACCOUNT_V1 yêu cầu 1 <= hot_account_count < {account_count}, "
-                f"nhận {hot_account_count}"
+                f"nhận {hot_account_count}",
+                public_message="HOT_ACCOUNT_V1 yêu cầu 1 <= hot_account_count < account_count.",
             )
         hot_roll = draw(contract_version, seed, "hot-from", ordinal, 0, 9999)
         if hot_roll < hot_account_basis_points:
@@ -86,7 +96,10 @@ def select_account_pair(
         else:
             from_idx = draw(contract_version, seed, "account-from", ordinal, 0, account_count - 1)
     else:
-        raise ScenarioConfigError(f"account_selection không được hỗ trợ: {account_selection!r}")
+        raise ScenarioConfigError(
+            f"account_selection không được hỗ trợ: {account_selection!r}",
+            public_message="account_selection không được hỗ trợ.",
+        )
 
     to_slot = draw(contract_version, seed, "account-to-slot", ordinal, 0, account_count - 2)
     to_idx = to_slot if to_slot < from_idx else to_slot + 1
@@ -258,7 +271,11 @@ def generate_base_scenario(
     cfg_res = validate_generator_config_data(config, registry=schema_registry)
     if not cfg_res.is_valid:
         messages = "; ".join(f"{i.code.value}: {i.message}" for i in cfg_res.issues)
-        raise ScenarioConfigError(f"Cấu hình generator không hợp lệ: {messages}")
+        where = "; ".join(f"{i.code.value}@{i.field_path}" for i in cfg_res.issues)
+        raise ScenarioConfigError(
+            f"Cấu hình generator không hợp lệ: {messages}",
+            public_message=f"Cấu hình generator không hợp lệ: {where}",
+        )
 
     contract_version = str(config["contract_version"])
     seed = int(config["seed"])

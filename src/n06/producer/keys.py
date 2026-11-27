@@ -45,7 +45,7 @@ class KeySelector:
     def __init__(self, strategy: str) -> None:
         if strategy not in SUPPORTED_STRATEGIES:
             raise PublishConfigError(
-                f"Chiến lược key {strategy!r} không được hỗ trợ; chọn một trong "
+                "Chiến lược key (producer.key_strategy) không được hỗ trợ; chọn một trong "
                 f"{SUPPORTED_STRATEGIES}."
             )
         self._strategy = strategy
