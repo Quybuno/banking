@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from tests.unit.storage.test_object_store_objects import fake_object_s3
 
 from n06.cli import main
 from n06.cli.statements import run_ingest_statements
@@ -23,6 +26,70 @@ from n06.ingestion.statements import (
     ingest_statements,
 )
 from n06.storage.object_store import ObjectIntegrityError, ObjectStoreTarget
+
+
+class _ObjectServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _ObjectHandler)
+        self.objects: dict[str, tuple[bytes, dict[str, str]]] = {}
+        self.requests: list[tuple[str, str, dict[str, str], bytes]] = []
+
+
+class _ObjectHandler(BaseHTTPRequestHandler):
+    def _handle(self) -> None:
+        server: _ObjectServer = self.server  # type: ignore[assignment]
+        headers = {k.lower(): v for k, v in self.headers.items()}
+        length = int(headers.get("content-length", "0"))
+        body = self.rfile.read(length) if length > 0 else b""
+        server.requests.append((self.command, self.path, headers, body))
+
+        if self.command == "PUT":
+            meta = {k: v for k, v in headers.items() if k.startswith("x-amz-meta-")}
+            server.objects[self.path] = (body, meta)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if self.command == "HEAD":
+            stored = server.objects.get(self.path)
+            if stored is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            data, meta = stored
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            for k, v in meta.items():
+                self.send_header(k, v)
+            self.end_headers()
+            return
+
+        self.send_response(405)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_PUT = do_HEAD = do_GET = _handle  # noqa: N815
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+@contextmanager
+def fake_object_s3() -> Iterator[_ObjectServer]:
+    server = _ObjectServer()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
 
 SECRETS = {
     "N06_OBJECT_STORE_ACCESS_KEY": "AKIATESTKEYEXAMPLE",
