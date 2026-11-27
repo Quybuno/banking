@@ -44,23 +44,33 @@ out = {"store": type(store).__name__, "applied": applied,
        "psql": subprocess.run(["psql", "--version"], capture_output=True, text=True).stdout.strip()}
 
 
-def batch(count):
+def batch(batch_id, count, status="COMMITTED", dataset_id=None):
     return IngestBatchRecord(
-        query_name="q-it", batch_id=7, dataset_id=None, ingestion_date=date(2026, 1, 2),
-        topic_offsets={nasty: {"0": [0, count]}}, record_count=count, raw_path=nasty,
-        bronze_path=nasty + "/bronze", status="COMMITTED")
+        query_name="q-it", batch_id=batch_id, dataset_id=dataset_id,
+        ingestion_date=date(2026, 1, 2), topic_offsets={nasty: {"0": [0, count]}},
+        record_count=count, raw_path=nasty, bronze_path=nasty + "/bronze", status=status)
 
 
-store.upsert_ingest_batch(batch(1))
-store.upsert_ingest_batch(batch(2))  # cùng khóa: cập nhật, không thêm dòng
+store.upsert_ingest_batch(batch(10, 1))
+store.upsert_ingest_batch(batch(7, 1))
+store.upsert_ingest_batch(batch(7, 2))  # cùng khóa: cập nhật, không thêm dòng
+store.upsert_ingest_batch(batch(2, 3, dataset_id=nasty))
+store.upsert_ingest_batch(batch(5, 9, status="FAILED"))  # status khác: phải bị lọc bỏ
 out["batches"] = [
     {**vars(b), "ingestion_date": b.ingestion_date.isoformat()}
     for b in store.list_committed_ingest_batches(query_name="q-it")
 ]
 out["other_query"] = len(store.list_committed_ingest_batches(query_name=nasty))
 
+run_id_1 = nasty + "#1"
+run_id_2 = nasty + "#2"
+dataset_key = nasty + "#ds"
+layer_key = nasty + "#layer"
+entity_key = nasty + "#entity"
+manifest_key = nasty + "#manifest"
+
 run = RunRecord(
-    run_id="run-it-1", dataset_id="ds-it", job_name=nasty, profile="test",
+    run_id=run_id_1, dataset_id=dataset_key, job_name=nasty, profile="test",
     business_date_from=None, business_date_to=date(2026, 1, 3), status="RUNNING", row_count=0,
     input_versions=[nasty, None, 3], config_hash=nasty, schema_version="1", rule_version="1",
     code_version="dev")
@@ -70,26 +80,29 @@ out["run"] = {k: (v.isoformat() if isinstance(v, date) else v) for k, v in vars(
 # Lỗi SQL giữa transaction: `output_path` NULL vi phạm NOT NULL ở lệnh INSERT, SAU lệnh UPDATE runs.
 try:
     store.commit_run_atomic(
-        run_id="run-it-1", dataset_id="ds-it", layer="silver", entity="transactions",
-        business_date=date(2026, 1, 3), output_path=None, manifest_path=None, row_count=5,
+        run_id=run_id_1, dataset_id=dataset_key, layer=layer_key, entity=entity_key,
+        business_date=date(2026, 1, 3), output_path=None, manifest_path=manifest_key, row_count=5,
         semantic_hash="h1", target_status="SUCCEEDED")
     out["error"] = None
 except CommitError as exc:
     out["error"] = str(exc)
-after = store.get_run("run-it-1")
+after = store.get_run(run_id_1)
 out["after_failure"] = [after.status, after.row_count, after.semantic_hash]
 
 store.commit_run_atomic(
-    run_id="run-it-1", dataset_id="ds-it", layer="silver", entity="transactions",
-    business_date=date(2026, 1, 3), output_path=nasty, manifest_path=None, row_count=5,
+    run_id=run_id_1, dataset_id=dataset_key, layer=layer_key, entity=entity_key,
+    business_date=date(2026, 1, 3), output_path=nasty, manifest_path=manifest_key, row_count=5,
     semantic_hash=nasty, target_status="SUCCEEDED")
 snap = store.resolve_current_snapshot(
-    dataset_id="ds-it", layer="silver", entity="transactions", business_date=date(2026, 1, 3))
-out["snapshot"] = [snap.output_path, snap.manifest_path, snap.semantic_hash]
+    dataset_id=dataset_key, layer=layer_key, entity=entity_key, business_date=date(2026, 1, 3))
+out["snapshot"] = [
+    snap.run_id, snap.dataset_id, snap.layer, snap.entity,
+    snap.output_path, snap.manifest_path, snap.semantic_hash,
+]
 
-store.start_run(RunRecord(**{**vars(run), "run_id": "run-it-2"}))
-store.fail_run(run_id="run-it-2", error_summary=nasty)
-failed = store.get_run("run-it-2")
+store.start_run(RunRecord(**{**vars(run), "run_id": run_id_2}))
+store.fail_run(run_id=run_id_2, error_summary=nasty)
+failed = store.get_run(run_id_2)
 out["failed"] = [failed.status, failed.error_summary]
 print("N06_RESULT=" + json.dumps(out))
 """
@@ -149,6 +162,17 @@ def test_psql_control_store_in_spark_image(database: tuple[str, str]) -> None:
     assert out["batches"] == [
         {
             "query_name": "q-it",
+            "batch_id": 2,
+            "dataset_id": NASTY,
+            "ingestion_date": "2026-01-02",
+            "topic_offsets": {NASTY: {"0": [0, 3]}},
+            "record_count": 3,
+            "raw_path": NASTY,
+            "bronze_path": NASTY + "/bronze",
+            "status": "COMMITTED",
+        },
+        {
+            "query_name": "q-it",
             "batch_id": 7,
             "dataset_id": None,
             "ingestion_date": "2026-01-02",
@@ -157,9 +181,22 @@ def test_psql_control_store_in_spark_image(database: tuple[str, str]) -> None:
             "raw_path": NASTY,
             "bronze_path": NASTY + "/bronze",
             "status": "COMMITTED",
-        }
+        },
+        {
+            "query_name": "q-it",
+            "batch_id": 10,
+            "dataset_id": None,
+            "ingestion_date": "2026-01-02",
+            "topic_offsets": {NASTY: {"0": [0, 1]}},
+            "record_count": 1,
+            "raw_path": NASTY,
+            "bronze_path": NASTY + "/bronze",
+            "status": "COMMITTED",
+        },
     ]
     assert out["other_query"] == 0
+    assert out["run"]["run_id"] == NASTY + "#1"
+    assert out["run"]["dataset_id"] == NASTY + "#ds"
     assert out["run"]["job_name"] == out["run"]["config_hash"] == NASTY
     assert out["run"]["input_versions"] == [NASTY, None, 3]
     assert out["run"]["business_date_from"] is None
@@ -167,5 +204,13 @@ def test_psql_control_store_in_spark_image(database: tuple[str, str]) -> None:
     # Lỗi xảy ra ở INSERT và cả UPDATE trước đó bị rollback thật.
     assert out["error"] is not None and "output_path" in out["error"]
     assert out["after_failure"] == ["RUNNING", 0, None]
-    assert out["snapshot"] == [NASTY, None, NASTY]
+    assert out["snapshot"] == [
+        NASTY + "#1",
+        NASTY + "#ds",
+        NASTY + "#layer",
+        NASTY + "#entity",
+        NASTY,
+        NASTY + "#manifest",
+        NASTY,
+    ]
     assert out["failed"] == ["FAILED", NASTY]
