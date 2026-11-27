@@ -6,7 +6,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 
 | Milestone | Mức | Trạng thái | Bằng chứng cổng |
 |---|---|---|---|
-| M0 Môi trường và hợp đồng | P0 | DONE | `verify_contract.py` (14/14 PASS), `n06 doctor` (10/10 PASS), `bash scripts/smoke.sh` (2/2 PASS), `pytest tests/unit` (18/18 PASS) |
+| M0 Môi trường và hợp đồng | P0 | DONE | Cổng chạy trên `main` `603787f` (giám sát, 2026-11-27): `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff check`/`ruff format --check` PASS, `pytest tests/unit` (747 passed), `pytest tests/integration` (24 passed, 0 skip, hạ tầng thật), `bash scripts/smoke.sh` (2/2 PASS). Chưa kiểm: README ghi giới hạn máy thực tế |
 | M1 Domain và generator | P0 | TODO | |
 | M2 Lát cắt end-to-end | P0 | TODO | |
 | M3 Chất lượng và đối soát | P0 | TODO | |
@@ -27,30 +27,37 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T04 | A | DONE | `8fbc36a` | `ADR-0001` (Accepted), `docs/compatibility-matrix.md`, image `n06-spark:3.5.8-py311` | Chốt bộ phiên bản Spark 3.5.8, Hadoop 3.3.4, AWS SDK 1.12.262, Kafka 0-10 3.5.8, JDK 17, Python 3.11 |
 | T05 | A | DONE | `task/T05-smoke-s3a-kafka` | `bash scripts/smoke.sh` (2/2 PASS x 2 lần liên tiếp), `verify_contract.py` (14/14 PASS) | Smoke test Spark <-> MinIO (S3A Parquet) và Spark <-> Kafka batch read |
 | T10 | A | DONE | `task/T10-domain-models-validator` | `pytest tests/unit/domain/test_domain_validation.py` (6/6 PASS), `verify_contract.py` (14/14 PASS) | Domain models, validator Draft 2020-12 có format checks, validator nghiệp vụ, 17 mã lỗi theo thứ tự ưu tiên |
+| T10-hardening | A | DONE | #21 (`59d1d97`) | Cổng chạy trên `main` `603787f` (giám sát, 2026-11-27): `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff check`/`ruff format --check` PASS, `pytest tests/unit` (747 passed), `pytest tests/integration` (24 passed, 0 skip, hạ tầng thật), `bash scripts/smoke.sh` (2/2 PASS) | Bộ kiểm T10 không ném ngoại lệ trên record xấu (số nguyên rất dài, mảng lồng sâu, value null, UTF-8 hỏng) |
 | T11 | A | DONE | `task/T11-determinism-primitives` | `pytest tests/unit/generator/test_determinism.py` (34/34 PASS), `verify_contract.py` (14/14 PASS) | `canonical_json`, `draw()`, UUIDv5, `external_reference` khớp 29/29 golden vectors |
 | T12 | A | DONE | `task/T12-scenario-generator` | `pytest tests/unit` (73/73 PASS), `pytest tests/integration/test_generator_scenario.py` (1/1 PASS), `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff` (T12 files PASS) | Generator kịch bản gốc: `UNIFORM_DISTINCT_PAIR`, `HOT_ACCOUNT_V1`, external sort `(event_time, ordinal)`, bất biến chunk size |
-| T13 | A | IN_REVIEW | `task/T13-fault-injection`, `task/T13-followup` | `pytest tests/unit` (235/235 PASS), `pytest tests/integration/test_generator_faults.py` (1/1 PASS), `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff` PASS | Tiêm lỗi floor chính xác, sao kê chia file theo cửa sổ, manifest, control_report, ground_truth tách riêng; ADR-0009 (Accepted), ADR-0011 (Proposed: normal delay cộng cửa sổ file phải trước cutoff). Tồn đọng: bộ nhớ bộ chia file sao kê tỷ lệ với số dòng một cửa sổ, chưa bị chặn bởi `generation_chunk_rows` |
+| T13 | A | IN_REVIEW | `task/T13-fault-injection`, `task/T13-followup` | `pytest tests/unit` (235/235 PASS), `pytest tests/integration/test_generator_faults.py` (1/1 PASS), `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff` PASS | Tiêm lỗi floor chính xác, sao kê chia file theo cửa sổ, manifest, control_report, ground_truth tách riêng; ADR-0009 (Accepted), ADR-0011 (Proposed: normal delay cộng cửa sổ file phải trước cutoff). Tồn đọng: bộ nhớ bộ chia file sao kê tỷ lệ với số dòng một cửa sổ, chưa bị chặn bởi `generation_chunk_rows`. ADR-0011 Accepted 2026-11-27 (PR #28). Đang đóng trên `task/T13-close` (review lại một vòng, đo 100.000 giao dịch, cổng M1) |
 | T14 | B | DONE | `task/T14-oracle-validate` | `pytest tests/unit/oracle/test_oracle.py` (5/5 PASS: 3 snapshot, T007/T008, `discrepancy_age_seconds`, `cutoff_cases`), `pytest tests/unit -q` (69/69 PASS), `check_rules.py` OK, `verify_contract.py` (14/14 PASS) | Test harness oracle trong `tests/harness/oracle.py` và khung CLI `n06 validate --against-ground-truth` (không tham chiếu `tests/` trong `src/`) |
 | T20 | A | DONE | `task/T20-publish`, #7 (`a4d6bbd`) | Cổng chạy lại trên `main` `a4d6bbd`: `ruff` PASS, `check_rules.py` OK, `verify_contract.py` (14/14 PASS), `pytest tests/unit` (559/559 PASS), `pytest tests/integration` (22/22 PASS trên hạ tầng thật, gồm 8 test publish trên Kafka thật), `scripts/smoke.sh` (2/2 PASS); spec-reviewer độc lập 2 vòng (vòng đầu 0 mục phải sửa, 7 mục nên sửa đã xử lý ở PR #7; vòng hai 0 mục phải sửa) | `n06 publish`: producer idempotent (`confluent-kafka==2.16.2`, ADR-0010), broker cấp Producer ID được kiểm trên Kafka thật; key `transaction_id`/`account_from`; tốc độ cấu hình được; từ chối topic không rỗng; mã thoát 10/14/15; thời gian chờ và giới hạn message ở `config/` (`producer.*`). Chưa kiểm: retry bằng chèn lỗi mạng, flush timeout và mã 15 trên Kafka thật, thông lượng E2. Tồn đọng ghi trong `src/n06/producer/README.md` |
 | T21 | B | DONE | `ce08109` | `pytest tests/integration/test_control_migrations.py` (1/1 PASS trên Postgres thật, 4.74s), `pytest tests/unit` (PASS), `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff` (T21 files PASS) | ADR-0003, `sql/migrations/control/0001_init_control_schema.{up,down}.sql`, `src/n06/control/` |
-| T22 | A | BLOCKED | | | Chờ ADR-0004 (Raw, Bronze) và ADR-0012 (driver Postgres) chuyển Accepted: PR #9. ADR-0004 còn câu hỏi Q1-Q8, riêng Q1 (`ingest_batches.dataset_id`) chặn T22 |
-| T23 | A | BLOCKED | | | Chờ ADR-0004 và ADR-0012 chuyển Accepted: PR #9 (quyết định 2: cách ghi object lên MinIO) |
+| T22 | A | IN_PROGRESS | #20 (T22a, merge `ad71b65`), #22 (T22b, merge `b700f39`), #29 (T22c, chờ merge) | T22a, T22b đã ở `main`; tích hợp trên nhánh: T22a 24/24, T22b 25/25 gồm `test_stream_recovery.py` (kill trước/sau upsert rồi chạy lại, mỗi tọa độ Kafka đúng một lần), T22c `test_wait_ingestion.py` 5/5 (báo cáo agent). Giám sát đã đọc phần lõi (mục 6.4) | T22c (`n06 wait-ingestion`) sót khỏi `main` vì #23 merge vào nhánh T22b sau khi #22/#20 đã merge; PR #29 đưa vào. Chưa chạy: tắt giữa lúc ghi Parquet hoặc giữa commit checkpoint S3A; `processingTime` dài hạn; `PsycopgControlStore` trên Postgres thật |
+| T23 | A | DONE | #25 (`603787f`) | Cổng chạy trên `main` `603787f` (giám sát, 2026-11-27): `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff check`/`ruff format --check` PASS, `pytest tests/unit` (747 passed), `pytest tests/integration` (24 passed, 0 skip, hạ tầng thật), `bash scripts/smoke.sh` (2/2 PASS) | `n06 ingest-statements`: chỉ tải lô có `file_available_at <= as_of_time`, thứ tự file → manifest → biên nhận `_ingest/`; ghi bất biến bằng HEAD trước PUT với `sha256`; SigV4 dời sang `src/n06/storage/object_store.py`. Chưa kiểm: endpoint https, file ~21,5 MB (mức 5M) |
 | T24 | B | DONE | `task/T24-batch-commit` | `pytest tests/integration/test_commit_postgres.py` (1/1 PASS trên Postgres thật, 4.02s), `pytest tests/unit` (72/72 PASS), `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff` (T24 files PASS) | `src/n06/storage/{commit.py,control_store.py}`, `tests/{unit/storage,integration}/` |
-| T25 | B | TODO | | | T25 phải dùng `require_unused_run_prefix` (`src/n06/storage/commit.py`) với bản liệt kê object S3 thật trước khi ghi một run, và `build_run_output_path` theo ADR-0002; bản S3 thật do T25 cung cấp |
+| T25 | B | IN_PROGRESS | | | T25 phải dùng `require_unused_run_prefix` (`src/n06/storage/commit.py`) với bản liệt kê object S3 thật trước khi ghi một run, và `build_run_output_path` theo ADR-0002; bản S3 thật do T25 cung cấp; Schema Silver: ADR-0004b (Accepted); đang làm trên `task/T25-process-day` |
 | T26 | C | TODO | | | |
 | T30 | B | TODO | | | |
 | T31 | B | TODO | | | |
 | T32 | B | TODO | | | |
-| T33 | B | TODO | | | |
+| T33 | B | IN_PROGRESS | | | Quy tắc đối soát: ADR-0006 (Accepted); chuẩn bị trên fixture ở `task/T33-reconciliation` (ADR-0008), merge sau T31 |
 | T34 | B | TODO | | | |
 | T40 | B | TODO | | | |
-| T41 | C | TODO | | | |
+| T41 | C | TODO | | | Schema Gold/mart: ADR-0005 (Accepted); role chỉ đọc `n06_mart_ro` bằng migration (ADR-0013) |
 | T42 | C | TODO | | | |
-| T43 | C | TODO | | | |
+| T43 | C | TODO | | | Metabase v0.64.9 LTS, profile `bi` (ADR-0013) |
 | T50 | B | TODO | | | |
-| T51 | C | TODO | | | |
+| T51 | C | TODO | | | Cách đo: ADR-0007 (Accepted) |
 | T52 | C + A | TODO | | | |
 | T53 | cả nhóm | TODO | | | |
+| T60 | C | TODO | | | P1, thuộc bản nộp; Airflow 3.4.0, profile `orchestration`, BashOperator gọi `n06` (ADR-0013) |
+| T61 | B | TODO | | | P1, thuộc bản nộp; Late correction, `first_seen_at`, `resolved_at` (ADR-0006) |
+| T62 | C | TODO | | | P1, thuộc bản nộp; Drill-down và runbook |
+| T63 | A | TODO | | | P1, thuộc bản nộp; E6 (ADR-0007) |
+| T64 | B | TODO | | | P1, thuộc bản nộp; E7 (ADR-0007) |
+| T65 | C | TODO | | | P1, thuộc bản nộp; E8, DuckDB 1.5.6 (ADR-0007) |
 
 ## Nhật ký phiên
 
@@ -73,3 +80,4 @@ Mỗi phiên agent thêm một dòng: ngày, task, việc đã làm, quyết đ�
 - 2026-11-25 | T22, T23 | Soạn ADR-0004 (chỉ Raw, Bronze) và ADR-0012 (psycopg, ghi MinIO), trạng thái Proposed, PR #9 chưa merge | Chưa sửa `pyproject.toml`, `uv.lock`, Dockerfile Spark | BLOCKED chờ người duyệt. Đính chính: `psycopg` không có trong `uv.lock`; control store chưa có upsert `ingest_batches`; không có bằng chứng đường `psycopg` đã chạy với Postgres thật.
 - 2026-11-25 | flaky `tests/integration/test_doctor_compose.py` | Chạy riêng file 10 lần liên tiếp trên mã `main` `6c3ac71`: **0/10 lần thất bại** (exit 0 cả 10; pytest 13,2-15,8 s) | Ghi là **flaky, chưa rõ nguyên nhân**, không sửa mã | Lần thất bại duy nhất xảy ra khi chạy cả bộ tích hợp trên nhánh CFG-scale-guard, trước khi `capacity.limits` được xếp hạng cuối; assert ở dòng 93 (`code_stopped == 14`, chạy sau `compose stop minio`), output không được lưu. Sau đó cả bộ chạy đạt 7 lần liên tiếp. Quan sát thêm, chưa chứng minh liên quan: đồng hồ WSL nhảy (một lần đo wall 4 s trong khi pytest báo 13,9 s).
 - 2026-11-25 | cổng đỏ, `n06 doctor` | Chạy cổng cho nhánh ghi T22/T23 BLOCKED: tích hợp 21/22, `test_init_local_creates_bucket_idempotently_and_doctor_reports_it` thất bại vì `TimeoutError` lọt ra khỏi `n06 doctor` | **Dừng, không merge, không sửa mã** (chờ duyệt PR sửa riêng) | Nguyên nhân đã tái hiện: `_probe_http` (`src/n06/cli/doctor.py`) chỉ bắt `urllib.error.URLError`; dịch vụ nhận kết nối nhưng trả lời quá 2,5 s làm `TimeoutError` thoát ra. Có từ T03 (`55cc7c7`). Lúc chạy máy thiếu RAM (còn trống 410 MB, swap 1,3 GB), chưa chứng minh đó là lý do dịch vụ chậm. Khác lần flaky của `test_doctor_compose.py` (lần đó là `AssertionError` sai mã thoát).
+- 2026-11-27 | giám sát | Cập nhật theo trạng thái thật: M0 bằng chứng trên `603787f`; T22a/T22b đã merge, T22c qua PR #29; T23 DONE; thêm T10-hardening DONE và T60–T65 (P1); T25, T33 đang làm | Phạm vi bản nộp P0 + P1 đầy đủ; hạn Thứ Ba 2026-12-01; 7 ADR Accepted qua PR #28 | Cổng trên `main` sau khi T22a/T22b merge đang chạy.
