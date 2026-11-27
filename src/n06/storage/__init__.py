@@ -22,6 +22,19 @@ from n06.storage.control_store import (
     connect_control_store,
     make_compose_psql_runner,
 )
+from n06.storage.object_store import (
+    ObjectHead,
+    ObjectIntegrityError,
+    ObjectStoreConfigError,
+    ObjectStoreError,
+    ObjectStoreTarget,
+    head_object,
+    put_object_bytes,
+    put_object_file,
+    put_object_immutable_bytes,
+    put_object_immutable_file,
+    target_from_config,
+)
 
 __all__ = [
     "BatchCommitCoordinator",
@@ -29,6 +42,11 @@ __all__ = [
     "CommitError",
     "ControlStore",
     "IngestBatchRecord",
+    "ObjectHead",
+    "ObjectIntegrityError",
+    "ObjectStoreConfigError",
+    "ObjectStoreError",
+    "ObjectStoreTarget",
     "PsqlCliControlStore",
     "PsycopgControlStore",
     "RunNotFoundError",
@@ -40,6 +58,12 @@ __all__ = [
     "compute_semantic_hash",
     "connect_control_store",
     "generate_run_id",
+    "head_object",
     "make_compose_psql_runner",
+    "put_object_bytes",
+    "put_object_file",
+    "put_object_immutable_bytes",
+    "put_object_immutable_file",
     "require_unused_run_prefix",
+    "target_from_config",
 ]
