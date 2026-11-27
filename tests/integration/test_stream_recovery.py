@@ -120,7 +120,8 @@ class Stack:
         return self.job("n06.ingestion.stream_job", ["--available-now", *args])
 
     def spark(self, request: dict[str, Any], tmp: Path) -> Any:
-        script = tmp / "inspect.py"
+        # Tên không được trùng module chuẩn: thư mục của kịch bản đứng đầu `sys.path`.
+        script = tmp / "n06_it_read_batches.py"
         script.write_text(_INSPECT, encoding="utf-8")
         tmp.chmod(0o755)
         command = [
@@ -130,17 +131,22 @@ class Stack:
         for folder in ("src", "config", "contracts", "sql"):
             command += ["-v", f"{REPO_ROOT / folder}:/opt/n06/{folder}:ro"]
         command += ["-v", f"{tmp}:/opt/n06/it:ro", "-e", "PYTHONPATH=/opt/n06/src"]
-        for key in sorted(self.env):
+        env = {**self.env, "N06_IT_REQUEST": json.dumps(request)}
+        for key in sorted(env):
             if key.startswith("N06"):
                 command += ["-e", key]
-        command += ["spark", "/opt/spark/bin/spark-submit", "--master", "local[2]",
-                    "--conf", "spark.ui.enabled=false", "/opt/n06/it/inspect.py"]  # fmt: skip
-        env = {**self.env, "N06_IT_REQUEST": json.dumps(request)}
+        command += ["spark", "/opt/spark/bin/spark-submit", "--master", "local[2]"]
+        command += ["--conf", "spark.ui.enabled=false", f"/opt/n06/it/{script.name}"]
         proc = subprocess.run(
             command, cwd=REPO_ROOT, env=env, capture_output=True, text=True,
             timeout=300, check=False,
         )  # fmt: skip
-        assert proc.returncode == 0, proc.stderr[-4000:]
+        # Bỏ dòng log và stack Java để thấy lỗi thật của kịch bản khi nó thất bại.
+        problems = [
+            x for x in (proc.stdout + proc.stderr).splitlines()
+            if " INFO " not in x and " WARN " not in x and not x.startswith("\tat ")
+        ]  # fmt: skip
+        assert proc.returncode == 0, "\n".join(problems[:80])
         line = next(x for x in proc.stdout.splitlines() if x.startswith("N06_IT_RESULT="))
         return json.loads(line.removeprefix("N06_IT_RESULT="))
 
