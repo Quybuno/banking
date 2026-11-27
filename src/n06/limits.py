@@ -224,6 +224,16 @@ def resolve_disk_probe(
         try:
             return DiskProbe(free_bytes=int(free_of(path)), path=str(path), method=method)
         except OSError as exc:
+            if method == METHOD_CONFIG:
+                # Đường dẫn do cấu hình đặt bị từ chối: không in lại, kể cả trong lỗi của hệ điều
+                # hành.
+                return DiskProbe(
+                    None,
+                    None,
+                    method,
+                    "không đọc được chỗ trống ở đường dẫn limits.disk_probe_path "
+                    f"({type(exc).__name__})",
+                )
             return DiskProbe(None, str(path), method, f"không đọc được chỗ trống ({exc})")
 
     if limits.disk_probe_path:

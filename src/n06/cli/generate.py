@@ -80,7 +80,7 @@ def run_generate(
     try:
         cfg = _load_app_config(profile, env_file, merged_env)
     except ConfigValidationError as exc:
-        return fail(ExitCode.CONFIG_ERROR, str(exc))
+        return fail(ExitCode.CONFIG_ERROR, exc.public_message)
 
     try:
         generator_cfg = json.loads(generator_config.read_text(encoding="utf-8"))
@@ -97,15 +97,23 @@ def run_generate(
     if type(requested) is not int or requested < 1:
         return fail(
             ExitCode.CONFIG_ERROR,
-            "transaction_count của generator phải là số nguyên >= 1 "
-            f"(nhận {requested!r}); đặt bằng --transactions hoặc trong tệp cấu hình.",
+            "transaction_count của generator phải là số nguyên >= 1; đặt bằng --transactions "
+            "hoặc trong tệp cấu hình.",
         )
 
     target_dir = out_dir if out_dir is not None else Path(cfg.paths.generator_output_dir)
+    try:
+        existing_parent = _nearest_existing_parent(target_dir)
+    except OSError as exc:
+        return fail(
+            ExitCode.CONFIG_ERROR,
+            "Thư mục đầu ra (--out hoặc paths.generator_output_dir) không dùng được "
+            f"({type(exc).__name__}).",
+        )
     verdict = ensure_capacity(
         requested,
         cfg.limits,
-        _nearest_existing_parent(target_dir),
+        existing_parent,
         probe=disk_probe,
         target_path=target_dir,
     )
@@ -124,9 +132,13 @@ def run_generate(
     try:
         summary = build(generator_cfg, target_dir)
     except OSError as exc:
-        return fail(ExitCode.RESOURCE_ERROR, f"Lỗi ghi đĩa khi sinh dữ liệu: {exc}")
+        # `strerror` không chứa đường dẫn; `str(exc)` thì có.
+        return fail(
+            ExitCode.RESOURCE_ERROR,
+            f"Lỗi ghi đĩa khi sinh dữ liệu ({type(exc).__name__}: {exc.strerror})",
+        )
     except (FaultConfigError, ScenarioConfigError) as exc:
-        return fail(ExitCode.CONFIG_ERROR, str(exc))
+        return fail(ExitCode.CONFIG_ERROR, exc.public_message)
 
     result = {
         "ok": True,

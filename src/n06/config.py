@@ -148,6 +148,14 @@ class ConfigValidationError(ValueError):
             f"Lỗi cấu hình tại trường '{field_path}' (giá trị={invalid_value!r}): {reason}"
         )
 
+    @property
+    def public_message(self) -> str:
+        """Thông báo để in ra output: không kèm giá trị bị từ chối (có thể là mật khẩu đặt nhầm).
+
+        `str()` của ngoại lệ vẫn kèm giá trị, chỉ dùng trong mã và test.
+        """
+        return f"Lỗi cấu hình tại trường '{self.field_path}': {self.reason}"
+
 
 @dataclass(frozen=True)
 class ServicesConfig:
@@ -395,14 +403,23 @@ def _normalize_cli_overrides(cli_overrides: Mapping[str, Any]) -> dict[str, Any]
 
 
 def _load_toml_file(path: Path, field_context: str) -> dict[str, Any]:
-    if not path.is_file():
+    # `reason` được in ra output nên không chép đường dẫn: nó dựng từ giá trị cấu hình.
+    try:
+        found = path.is_file()
+        content = path.read_bytes() if found else b""
+    except OSError as exc:
         raise ConfigValidationError(
             field_context,
             str(path),
-            f"Không tìm thấy file cấu hình '{path}'.",
+            f"Không đọc được file cấu hình ({type(exc).__name__}).",
+        ) from exc
+    if not found:
+        raise ConfigValidationError(
+            field_context,
+            str(path),
+            "Không tìm thấy file cấu hình tương ứng trong thư mục config.",
         )
     try:
-        content = path.read_bytes()
         return tomllib.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigValidationError(
@@ -478,7 +495,7 @@ def _parse_iso_date(field_path: str, value: str) -> date:
         raise ConfigValidationError(
             field_path,
             value,
-            f"Ngày không hợp lệ: {exc}",
+            "Ngày không tồn tại trên lịch.",
         ) from exc
 
 
@@ -683,7 +700,7 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         raise ConfigValidationError(
             "dataset.from_date",
             from_date_str,
-            f"from_date ({from_date_str}) không được lớn hơn to_date ({to_date_str}).",
+            "from_date không được lớn hơn to_date.",
         )
 
     transaction_count = _require_min_int(
