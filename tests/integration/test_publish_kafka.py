@@ -238,6 +238,8 @@ def test_rate_is_controlled_and_measured(bootstrap: str, source_dir: Path, topic
     minimum = (total - 1) / rate * 0.98
     assert limited["elapsed_seconds"] >= minimum
     assert wall >= minimum
+    assert limited["elapsed_seconds"] <= wall
+    assert limited["achieved_rate"] == pytest.approx(total / limited["elapsed_seconds"])
     assert limited["latency_ms_p50"] <= limited["latency_ms_p95"] <= limited["latency_ms_p99"]
 
     code, free = _publish(source_dir, topic + ".free", "--rate", "0")
@@ -246,6 +248,7 @@ def test_rate_is_controlled_and_measured(bootstrap: str, source_dir: Path, topic
         # đường chạy thật giao đủ message.
         assert code == 0 and free["target_rate"] == 0, free
         assert free["messages_delivered"] == total
+        assert free["achieved_rate"] == pytest.approx(total / free["elapsed_seconds"])
     finally:
         admin = AdminClient({"bootstrap.servers": bootstrap})  # giữ tham chiếu tới khi xong
         futures = admin.delete_topics([topic + ".free"])

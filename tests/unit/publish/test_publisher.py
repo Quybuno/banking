@@ -226,6 +226,8 @@ class _TimedProducer(FakeProducer):
         super().produce(topic, value=value, key=key, on_delivery=on_delivery)
 
     def poll(self, timeout: float) -> int:
+        # Vòng chờ không tiến đồng hồ phải làm test fail, không được treo.
+        assert len(self.polls) < 10_000, "vòng chờ không kết thúc"
         if timeout > 0:
             self.now += max(timeout, 1e-9)  # bước tối thiểu để đồng hồ giả luôn tiến
         return super().poll(timeout)
@@ -235,10 +237,9 @@ def test_no_message_is_sent_before_its_slot(source) -> None:  # type: ignore[no-
     producer = _TimedProducer()
     stats, _, _ = _run(source, settings=_settings(rate=7), producer=producer, clock=producer.clock)
     # 7 message ở 7/s: message thứ k (từ 0) không được gửi trước k/7 giây.
-    assert len(producer.sent_at) == 7
-    for k, sent_at in enumerate(producer.sent_at):
-        assert sent_at >= k / 7 - 1e-6, (k, producer.sent_at)
-    assert stats.elapsed_seconds >= 6 / 7 - 1e-6
+    # Kiểm cả hai phía: không sớm hơn lịch và (trên đồng hồ giả) không muộn hơn lịch.
+    assert producer.sent_at == pytest.approx([k / 7 for k in range(7)], abs=1e-6)
+    assert stats.elapsed_seconds == pytest.approx(6 / 7, abs=1e-6)
 
 
 def test_zero_rate_never_waits(source) -> None:  # type: ignore[no-untyped-def]
@@ -247,6 +248,7 @@ def test_zero_rate_never_waits(source) -> None:  # type: ignore[no-untyped-def]
     assert producer.sent_at == [0.0] * 7
     assert producer.now == 0.0 and all(timeout == 0 for timeout in producer.polls)
     assert stats.target_rate == 0 and stats.messages_delivered == 7
+    assert stats.achieved_rate == pytest.approx(7 / stats.elapsed_seconds)
 
 
 def test_producer_config_is_idempotent_and_rejects_other_acks() -> None:
