@@ -3,6 +3,9 @@
 # Tuân thủ docs/spec.md Phần I mục 2, docs/adr/0001-bo-phien-ban.md và docs/compatibility-matrix.md.
 # Không dùng tag `latest`; không tải dependency từ Internet lúc chạy job.
 
+# ADR-0012: client PostgreSQL cùng bản với server của Compose (ghim cùng digest).
+FROM postgres:16.6-bookworm@sha256:557fea37a744d5f4c8faab304b0a90858b53ab119735a88c131fd19dab802f36 AS pg
+
 FROM python:3.11.11-slim-bookworm
 
 ARG SPARK_VERSION=3.5.8
@@ -67,6 +70,11 @@ RUN set -eux; \
         -o "/opt/spark/jars/commons-pool2-${COMMONS_POOL2_VERSION}.jar"; \
     sha1sum -c /tmp/jars.sha1; \
     rm -f /tmp/jars.sha1
+
+# 4. `psql` 16.6 và `libpq` để driver Spark ghi bảng control (ADR-0012 quyết định 1)
+COPY --from=pg /usr/lib/postgresql/16/bin/psql /usr/local/bin/psql
+COPY --from=pg /usr/lib/x86_64-linux-gnu/libpq.so.5 /usr/lib/x86_64-linux-gnu/libpq.so.5
+RUN psql --version
 
 RUN groupadd --gid 1000 spark && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash spark \
     && chown -R spark:spark /opt/spark

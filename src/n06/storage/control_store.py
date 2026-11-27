@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -71,7 +71,7 @@ class IngestBatchRecord:
 
     query_name: str
     batch_id: int
-    dataset_id: str
+    dataset_id: str | None  # streaming ghi NULL (ADR-0004 Q1)
     ingestion_date: date
     topic_offsets: dict[str, Any]
     record_count: int
@@ -119,13 +119,11 @@ class ControlStore(Protocol):
     ) -> SnapshotRecord | None:
         """Trả về snapshot hiện hành đã commit (bỏ qua run đang chạy hoặc thất bại)."""
 
-    def list_committed_ingest_batches(
-        self,
-        *,
-        dataset_id: str,
-        query_name: str | None = None,
-    ) -> list[IngestBatchRecord]:
-        """Liệt kê các `ingest_batches` đã commit cho `dataset_id`."""
+    def upsert_ingest_batch(self, batch: IngestBatchRecord) -> None:
+        """Ghi một batch streaming đã hoàn tất; chạy lại cùng khóa không tạo dòng mới."""
+
+    def list_committed_ingest_batches(self, *, query_name: str) -> list[IngestBatchRecord]:
+        """Liệt kê các `ingest_batches` đã commit của một query, theo `batch_id`."""
 
 
 def _scope_key(dataset_id: str, layer: str, entity: str, business_date: date) -> str:
@@ -138,16 +136,21 @@ def _to_date(value: date | str | None) -> date | None:
     return date.fromisoformat(value)
 
 
-def _escape_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _sql_text_or_null(value: str | None) -> str:
-    return "NULL" if value is None else _escape_literal(value)
-
-
-def _sql_date_or_null(value: date | None) -> str:
-    return "NULL" if value is None else f"DATE {_escape_literal(value.isoformat())}"
+def _ingest_record(row: Mapping[str, Any]) -> IngestBatchRecord:
+    offsets = row["topic_offsets"]
+    ingestion_date = _to_date(row["ingestion_date"])
+    assert ingestion_date is not None
+    return IngestBatchRecord(
+        query_name=row["query_name"],
+        batch_id=int(row["batch_id"]),
+        dataset_id=row["dataset_id"],
+        ingestion_date=ingestion_date,
+        topic_offsets=json.loads(offsets) if isinstance(offsets, str) else dict(offsets),
+        record_count=int(row["record_count"]),
+        raw_path=row["raw_path"],
+        bronze_path=row["bronze_path"],
+        status=row["status"],
+    )
 
 
 class PsycopgControlStore:
@@ -478,59 +481,269 @@ class PsycopgControlStore:
         finally:
             conn.close()
 
-    def list_committed_ingest_batches(
-        self,
-        *,
-        dataset_id: str,
-        query_name: str | None = None,
-    ) -> list[IngestBatchRecord]:
+    def upsert_ingest_batch(self, batch: IngestBatchRecord) -> None:
         conn = self._conn_factory()
         try:
             with conn.cursor() as cur:
-                if query_name is None:
-                    cur.execute(
-                        """
-                        SELECT query_name, batch_id, dataset_id, ingestion_date,
-                               topic_offsets, record_count, raw_path, bronze_path, status
-                        FROM ingest_batches
-                        WHERE dataset_id = %s AND status = 'COMMITTED'
-                        ORDER BY query_name ASC, batch_id ASC;
-                        """,
-                        (dataset_id,),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT query_name, batch_id, dataset_id, ingestion_date,
-                               topic_offsets, record_count, raw_path, bronze_path, status
-                        FROM ingest_batches
-                        WHERE dataset_id = %s AND query_name = %s AND status = 'COMMITTED'
-                        ORDER BY query_name ASC, batch_id ASC;
-                        """,
-                        (dataset_id, query_name),
-                    )
-                rows = cur.fetchall()
-            results: list[IngestBatchRecord] = []
-            for row in rows:
-                offsets = json.loads(row[4]) if isinstance(row[4], str) else dict(row[4])
-                ing_date = _to_date(row[3])
-                assert ing_date is not None
-                results.append(
-                    IngestBatchRecord(
-                        query_name=row[0],
-                        batch_id=int(row[1]),
-                        dataset_id=row[2],
-                        ingestion_date=ing_date,
-                        topic_offsets=offsets,
-                        record_count=int(row[5]),
-                        raw_path=row[6],
-                        bronze_path=row[7],
-                        status=row[8],
-                    )
+                cur.execute(
+                    """
+                    INSERT INTO ingest_batches (
+                        query_name, batch_id, dataset_id, ingestion_date,
+                        topic_offsets, record_count, raw_path, bronze_path, status
+                    ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                    ON CONFLICT (query_name, batch_id) DO UPDATE
+                        SET dataset_id = EXCLUDED.dataset_id,
+                            ingestion_date = EXCLUDED.ingestion_date,
+                            topic_offsets = EXCLUDED.topic_offsets,
+                            record_count = EXCLUDED.record_count,
+                            raw_path = EXCLUDED.raw_path,
+                            bronze_path = EXCLUDED.bronze_path,
+                            status = EXCLUDED.status,
+                            updated_at = NOW();
+                    """,
+                    (
+                        batch.query_name,
+                        batch.batch_id,
+                        batch.dataset_id,
+                        batch.ingestion_date,
+                        json.dumps(batch.topic_offsets),
+                        batch.record_count,
+                        batch.raw_path,
+                        batch.bronze_path,
+                        batch.status,
+                    ),
                 )
-            return results
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise CommitError(
+                f"upsert_ingest_batch thất bại cho '{batch.query_name}'/{batch.batch_id}: {exc}"
+            ) from exc
         finally:
             conn.close()
+
+    def list_committed_ingest_batches(self, *, query_name: str) -> list[IngestBatchRecord]:
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT query_name, batch_id, dataset_id, ingestion_date,
+                           topic_offsets, record_count, raw_path, bronze_path, status
+                    FROM ingest_batches
+                    WHERE query_name = %s AND status = 'COMMITTED'
+                    ORDER BY batch_id ASC;
+                    """,
+                    (query_name,),
+                )
+                rows = cur.fetchall()
+            keys = (
+                "query_name", "batch_id", "dataset_id", "ingestion_date",
+                "topic_offsets", "record_count", "raw_path", "bronze_path", "status",
+            )  # fmt: skip
+            return [_ingest_record(dict(zip(keys, row, strict=True))) for row in rows]
+        finally:
+            conn.close()
+
+
+# Mọi giá trị đi vào SQL bằng MỘT biến JSON của psql, không ghép vào chuỗi câu lệnh (ADR-0012
+# quyết định 1). Biến được đặt bằng `\set` ở đầu kịch bản gửi qua **stdin**, nên giá trị không nằm
+# trong argv (xem được bằng `ps`, giới hạn độ dài một đối số). Câu lệnh dùng `:'params'`, psql tự
+# trích dẫn. psql không thay biến bên trong khối `DO $$ ... $$`, nên khối đó đọc từ bảng tạm.
+_PARAMS_TABLE = "CREATE TEMP TABLE n06_params ON COMMIT DROP AS SELECT :'params'::jsonb AS j;"
+_PARAMS = "(:'params'::jsonb)"
+_COMMITTED_SQL = "('SUCCEEDED', 'GOLD_COMMITTED', 'MART_PUBLISHED')"
+
+_START_RUN_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+DO $$
+DECLARE
+    v jsonb;
+    v_status TEXT;
+BEGIN
+    SELECT j INTO v FROM n06_params;
+    SELECT status INTO v_status FROM runs WHERE run_id = v->>'run_id' FOR UPDATE;
+    IF FOUND THEN
+        IF v_status <> 'RUNNING' THEN
+            RAISE EXCEPTION 'run_id % already exists with status %', v->>'run_id', v_status;
+        END IF;
+    ELSE
+        INSERT INTO runs (
+            run_id, dataset_id, job_name, profile, business_date_from, business_date_to,
+            status, row_count, input_versions, config_hash, schema_version, rule_version,
+            code_version
+        ) VALUES (
+            v->>'run_id', v->>'dataset_id', v->>'job_name', v->>'profile',
+            (v->>'business_date_from')::date, (v->>'business_date_to')::date,
+            'RUNNING', 0, v->'input_versions', v->>'config_hash', v->>'schema_version',
+            v->>'rule_version', v->>'code_version'
+        );
+    END IF;
+END $$;
+COMMIT;
+"""
+
+_COMMIT_RUN_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+SELECT pg_advisory_xact_lock(hashtextextended(j->>'scope', 0)) FROM n06_params;
+DO $$
+DECLARE
+    v jsonb;
+    v_status TEXT;
+    v_hash TEXT;
+BEGIN
+    SELECT j INTO v FROM n06_params;
+    SELECT status, semantic_hash INTO v_status, v_hash
+    FROM runs WHERE run_id = v->>'run_id' FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run_id % not found', v->>'run_id';
+    END IF;
+
+    IF v_status IN {_COMMITTED_SQL} THEN
+        IF v_hash IS DISTINCT FROM v->>'semantic_hash' THEN
+            RAISE EXCEPTION 'run_id % already committed with different semantic_hash',
+                v->>'run_id';
+        END IF;
+    ELSIF v_status = 'RUNNING' THEN
+        UPDATE runs
+        SET status = v->>'target_status',
+            row_count = (v->>'row_count')::bigint,
+            semantic_hash = v->>'semantic_hash',
+            finished_at = NOW()
+        WHERE run_id = v->>'run_id';
+    ELSE
+        RAISE EXCEPTION 'cannot commit run_id % from status %', v->>'run_id', v_status;
+    END IF;
+END $$;
+
+INSERT INTO current_snapshot (
+    dataset_id, layer, entity, business_date,
+    run_id, output_path, manifest_path, semantic_hash
+)
+SELECT j->>'dataset_id', j->>'layer', j->>'entity', (j->>'business_date')::date,
+       j->>'run_id', j->>'output_path', j->>'manifest_path', j->>'semantic_hash'
+FROM n06_params
+WHERE true
+ON CONFLICT (dataset_id, layer, entity, business_date) DO UPDATE
+    SET run_id = EXCLUDED.run_id,
+        output_path = EXCLUDED.output_path,
+        manifest_path = EXCLUDED.manifest_path,
+        semantic_hash = EXCLUDED.semantic_hash,
+        updated_at = NOW();
+COMMIT;
+"""
+
+_FAIL_RUN_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+DO $$
+DECLARE
+    v jsonb;
+    v_status TEXT;
+BEGIN
+    SELECT j INTO v FROM n06_params;
+    SELECT status INTO v_status FROM runs WHERE run_id = v->>'run_id' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run_id % not found', v->>'run_id';
+    END IF;
+    IF v_status IN {_COMMITTED_SQL} THEN
+        RAISE EXCEPTION 'cannot fail committed run_id %', v->>'run_id';
+    END IF;
+    UPDATE runs
+    SET status = 'FAILED', error_summary = v->>'error_summary', finished_at = NOW()
+    WHERE run_id = v->>'run_id';
+END $$;
+COMMIT;
+"""
+
+_GET_RUN_SQL = f"""
+SELECT COALESCE(
+    (SELECT row_to_json(t)::text FROM (
+        SELECT run_id, dataset_id, job_name, profile,
+               business_date_from::text, business_date_to::text, status,
+               row_count, input_versions, config_hash,
+               schema_version, rule_version, code_version,
+               semantic_hash, error_summary
+        FROM runs
+        WHERE run_id = {_PARAMS}->>'run_id'
+    ) t),
+    ''
+);
+"""
+
+_RESOLVE_SNAPSHOT_SQL = f"""
+SELECT COALESCE(
+    (SELECT row_to_json(t)::text FROM (
+        SELECT cs.dataset_id, cs.layer, cs.entity, cs.business_date::text,
+               cs.run_id, cs.output_path, cs.manifest_path, cs.semantic_hash
+        FROM current_snapshot cs
+        JOIN runs r ON r.run_id = cs.run_id
+        WHERE cs.dataset_id = {_PARAMS}->>'dataset_id'
+          AND cs.layer = {_PARAMS}->>'layer'
+          AND cs.entity = {_PARAMS}->>'entity'
+          AND cs.business_date = ({_PARAMS}->>'business_date')::date
+          AND r.status IN {_COMMITTED_SQL}
+    ) t),
+    ''
+);
+"""
+
+_UPSERT_INGEST_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+INSERT INTO ingest_batches (
+    query_name, batch_id, dataset_id, ingestion_date,
+    topic_offsets, record_count, raw_path, bronze_path, status
+)
+SELECT j->>'query_name', (j->>'batch_id')::bigint, j->>'dataset_id',
+       (j->>'ingestion_date')::date, j->'topic_offsets', (j->>'record_count')::bigint,
+       j->>'raw_path', j->>'bronze_path', j->>'status'
+FROM n06_params
+WHERE true
+ON CONFLICT (query_name, batch_id) DO UPDATE
+    SET dataset_id = EXCLUDED.dataset_id,
+        ingestion_date = EXCLUDED.ingestion_date,
+        topic_offsets = EXCLUDED.topic_offsets,
+        record_count = EXCLUDED.record_count,
+        raw_path = EXCLUDED.raw_path,
+        bronze_path = EXCLUDED.bronze_path,
+        status = EXCLUDED.status,
+        updated_at = NOW();
+COMMIT;
+"""
+
+_LIST_INGEST_SQL = f"""
+SELECT COALESCE(
+    (SELECT json_agg(t ORDER BY batch_id ASC)::text FROM (
+        SELECT query_name, batch_id, dataset_id, ingestion_date::text,
+               topic_offsets, record_count, raw_path, bronze_path, status
+        FROM ingest_batches
+        WHERE query_name = {_PARAMS}->>'query_name' AND status = 'COMMITTED'
+    ) t),
+    '[]'
+);
+"""
+
+# Runner: `(kịch bản, tuples_only) -> stdout`; kịch bản đã gồm biến tham số.
+PsqlRunner = Callable[[str, bool], str]
+
+
+def _with_params(sql: str, params: Mapping[str, Any]) -> str:
+    """Đặt biến `params` bằng `\\set` trên một dòng.
+
+    Trong tham số nháy đơn của meta-command, psql hiểu dấu `\\` kiểu C và `''` là một dấu nháy,
+    nên mỗi `\\` và `'` được nhân đôi. JSON không chứa ký tự xuống dòng thô.
+    """
+    text = json.dumps(params, ensure_ascii=False)
+    escaped = text.replace("\\", "\\\\").replace("'", "''")
+    return f"\\set params '{escaped}'\n{sql}"
+
+
+def _iso(value: date | None) -> str | None:
+    return None if value is None else value.isoformat()
 
 
 class PsqlCliControlStore:
@@ -540,18 +753,30 @@ class PsqlCliControlStore:
         self,
         db_config: PostgresDbConfig,
         *,
-        psql_runner: Callable[[str, bool], str] | None = None,
+        psql_runner: PsqlRunner | None = None,
         psql_bin: str = "psql",
     ) -> None:
         self._db_config = db_config
         self._psql_runner = psql_runner
         self._psql_bin = psql_bin
 
-    def _run_sql(self, sql: str, *, tuples_only: bool = False) -> str:
+    def _run_sql(
+        self,
+        sql: str,
+        *,
+        tuples_only: bool = False,
+        params: Mapping[str, Any] | None = None,
+    ) -> str:
+        if params is not None:
+            sql = _with_params(sql, params)
         if self._psql_runner is not None:
             return self._psql_runner(sql, tuples_only)
 
-        env = {**os.environ, "PGPASSWORD": self._db_config.password}
+        env = {
+            **os.environ,
+            "PGPASSWORD": self._db_config.password,
+            "PGCLIENTENCODING": "UTF8",
+        }
         cmd = [
             self._psql_bin,
             "-X",
@@ -573,6 +798,7 @@ class PsqlCliControlStore:
                 cmd,
                 input=sql,
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
                 env=env,
                 check=True,
@@ -583,46 +809,22 @@ class PsqlCliControlStore:
         return proc.stdout
 
     def start_run(self, run: RunRecord) -> RunRecord:
-        inputs_json = json.dumps(run.input_versions, ensure_ascii=False)
-        sql = f"""
-        BEGIN;
-        DO $$
-        DECLARE
-            v_status TEXT;
-        BEGIN
-            SELECT status INTO v_status
-            FROM runs WHERE run_id = {_escape_literal(run.run_id)} FOR UPDATE;
-            IF FOUND THEN
-                IF v_status <> 'RUNNING' THEN
-                    RAISE EXCEPTION 'run_id % already exists with status %',
-                        {_escape_literal(run.run_id)}, v_status;
-                END IF;
-            ELSE
-                INSERT INTO runs (
-                    run_id, dataset_id, job_name, profile,
-                    business_date_from, business_date_to, status,
-                    row_count, input_versions, config_hash,
-                    schema_version, rule_version, code_version
-                ) VALUES (
-                    {_escape_literal(run.run_id)},
-                    {_escape_literal(run.dataset_id)},
-                    {_escape_literal(run.job_name)},
-                    {_escape_literal(run.profile)},
-                    {_sql_date_or_null(run.business_date_from)},
-                    {_sql_date_or_null(run.business_date_to)},
-                    'RUNNING',
-                    0,
-                    {_escape_literal(inputs_json)}::jsonb,
-                    {_escape_literal(run.config_hash)},
-                    {_escape_literal(run.schema_version)},
-                    {_escape_literal(run.rule_version)},
-                    {_escape_literal(run.code_version)}
-                );
-            END IF;
-        END $$;
-        COMMIT;
-        """
-        self._run_sql(sql)
+        self._run_sql(
+            _START_RUN_SQL,
+            params={
+                "run_id": run.run_id,
+                "dataset_id": run.dataset_id,
+                "job_name": run.job_name,
+                "profile": run.profile,
+                "business_date_from": _iso(run.business_date_from),
+                "business_date_to": _iso(run.business_date_to),
+                "input_versions": run.input_versions,
+                "config_hash": run.config_hash,
+                "schema_version": run.schema_version,
+                "rule_version": run.rule_version,
+                "code_version": run.code_version,
+            },
+        )
         loaded = self.get_run(run.run_id)
         if loaded is None:
             raise CommitError(f"Không đọc lại được run '{run.run_id}' sau start_run.")
@@ -648,62 +850,22 @@ class PsqlCliControlStore:
             # qua subprocess một lần; gọi hook ngay trước khi commit khối SQL nguyên tử.
             after_run_update_hook()
 
-        scope = _scope_key(dataset_id, layer, entity, business_date)
-        sql = f"""
-        BEGIN;
-        SELECT pg_advisory_xact_lock(hashtextextended({_escape_literal(scope)}, 0));
-        DO $$
-        DECLARE
-            v_status TEXT;
-            v_hash TEXT;
-        BEGIN
-            SELECT status, semantic_hash INTO v_status, v_hash
-            FROM runs WHERE run_id = {_escape_literal(run_id)} FOR UPDATE;
-
-            IF NOT FOUND THEN
-                RAISE EXCEPTION 'run_id % not found', {_escape_literal(run_id)};
-            END IF;
-
-            IF v_status IN ('SUCCEEDED', 'GOLD_COMMITTED', 'MART_PUBLISHED') THEN
-                IF v_hash IS DISTINCT FROM {_escape_literal(semantic_hash)} THEN
-                    RAISE EXCEPTION 'run_id % already committed with different semantic_hash',
-                        {_escape_literal(run_id)};
-                END IF;
-            ELSIF v_status = 'RUNNING' THEN
-                UPDATE runs
-                SET status = {_escape_literal(target_status)},
-                    row_count = {row_count},
-                    semantic_hash = {_escape_literal(semantic_hash)},
-                    finished_at = NOW()
-                WHERE run_id = {_escape_literal(run_id)};
-            ELSE
-                RAISE EXCEPTION 'cannot commit run_id % from status %',
-                    {_escape_literal(run_id)}, v_status;
-            END IF;
-        END $$;
-
-        INSERT INTO current_snapshot (
-            dataset_id, layer, entity, business_date,
-            run_id, output_path, manifest_path, semantic_hash
-        ) VALUES (
-            {_escape_literal(dataset_id)},
-            {_escape_literal(layer)},
-            {_escape_literal(entity)},
-            DATE {_escape_literal(business_date.isoformat())},
-            {_escape_literal(run_id)},
-            {_escape_literal(output_path)},
-            {_sql_text_or_null(manifest_path)},
-            {_escape_literal(semantic_hash)}
+        self._run_sql(
+            _COMMIT_RUN_SQL,
+            params={
+                "scope": _scope_key(dataset_id, layer, entity, business_date),
+                "run_id": run_id,
+                "dataset_id": dataset_id,
+                "layer": layer,
+                "entity": entity,
+                "business_date": business_date.isoformat(),
+                "output_path": output_path,
+                "manifest_path": manifest_path,
+                "row_count": row_count,
+                "semantic_hash": semantic_hash,
+                "target_status": target_status,
+            },
         )
-        ON CONFLICT (dataset_id, layer, entity, business_date) DO UPDATE
-            SET run_id = EXCLUDED.run_id,
-                output_path = EXCLUDED.output_path,
-                manifest_path = EXCLUDED.manifest_path,
-                semantic_hash = EXCLUDED.semantic_hash,
-                updated_at = NOW();
-        COMMIT;
-        """
-        self._run_sql(sql)
         return SnapshotRecord(
             dataset_id=dataset_id,
             layer=layer,
@@ -716,46 +878,10 @@ class PsqlCliControlStore:
         )
 
     def fail_run(self, *, run_id: str, error_summary: str) -> None:
-        sql = f"""
-        BEGIN;
-        DO $$
-        DECLARE
-            v_status TEXT;
-        BEGIN
-            SELECT status INTO v_status
-            FROM runs WHERE run_id = {_escape_literal(run_id)} FOR UPDATE;
-            IF NOT FOUND THEN
-                RAISE EXCEPTION 'run_id % not found', {_escape_literal(run_id)};
-            END IF;
-            IF v_status IN ('SUCCEEDED', 'GOLD_COMMITTED', 'MART_PUBLISHED') THEN
-                RAISE EXCEPTION 'cannot fail committed run_id %', {_escape_literal(run_id)};
-            END IF;
-            UPDATE runs
-            SET status = 'FAILED',
-                error_summary = {_escape_literal(error_summary)},
-                finished_at = NOW()
-            WHERE run_id = {_escape_literal(run_id)};
-        END $$;
-        COMMIT;
-        """
-        self._run_sql(sql)
+        self._run_sql(_FAIL_RUN_SQL, params={"run_id": run_id, "error_summary": error_summary})
 
     def get_run(self, run_id: str) -> RunRecord | None:
-        sql = f"""
-        SELECT COALESCE(
-            (SELECT row_to_json(t)::text FROM (
-                SELECT run_id, dataset_id, job_name, profile,
-                       business_date_from::text, business_date_to::text, status,
-                       row_count, input_versions, config_hash,
-                       schema_version, rule_version, code_version,
-                       semantic_hash, error_summary
-                FROM runs
-                WHERE run_id = {_escape_literal(run_id)}
-            ) t),
-            ''
-        );
-        """
-        raw = self._run_sql(sql, tuples_only=True).strip()
+        raw = self._run_sql(_GET_RUN_SQL, tuples_only=True, params={"run_id": run_id}).strip()
         if not raw:
             return None
         data = json.loads(raw)
@@ -785,23 +911,16 @@ class PsqlCliControlStore:
         entity: str,
         business_date: date,
     ) -> SnapshotRecord | None:
-        sql = f"""
-        SELECT COALESCE(
-            (SELECT row_to_json(t)::text FROM (
-                SELECT cs.dataset_id, cs.layer, cs.entity, cs.business_date::text,
-                       cs.run_id, cs.output_path, cs.manifest_path, cs.semantic_hash
-                FROM current_snapshot cs
-                JOIN runs r ON r.run_id = cs.run_id
-                WHERE cs.dataset_id = {_escape_literal(dataset_id)}
-                  AND cs.layer = {_escape_literal(layer)}
-                  AND cs.entity = {_escape_literal(entity)}
-                  AND cs.business_date = DATE {_escape_literal(business_date.isoformat())}
-                  AND r.status IN ('SUCCEEDED', 'GOLD_COMMITTED', 'MART_PUBLISHED')
-            ) t),
-            ''
-        );
-        """
-        raw = self._run_sql(sql, tuples_only=True).strip()
+        raw = self._run_sql(
+            _RESOLVE_SNAPSHOT_SQL,
+            tuples_only=True,
+            params={
+                "dataset_id": dataset_id,
+                "layer": layer,
+                "entity": entity,
+                "business_date": business_date.isoformat(),
+            },
+        ).strip()
         if not raw:
             return None
         data = json.loads(raw)
@@ -818,48 +937,27 @@ class PsqlCliControlStore:
             semantic_hash=data["semantic_hash"],
         )
 
-    def list_committed_ingest_batches(
-        self,
-        *,
-        dataset_id: str,
-        query_name: str | None = None,
-    ) -> list[IngestBatchRecord]:
-        extra_filter = (
-            f"AND query_name = {_escape_literal(query_name)}" if query_name is not None else ""
+    def upsert_ingest_batch(self, batch: IngestBatchRecord) -> None:
+        self._run_sql(
+            _UPSERT_INGEST_SQL,
+            params={
+                "query_name": batch.query_name,
+                "batch_id": batch.batch_id,
+                "dataset_id": batch.dataset_id,
+                "ingestion_date": batch.ingestion_date.isoformat(),
+                "topic_offsets": batch.topic_offsets,
+                "record_count": batch.record_count,
+                "raw_path": batch.raw_path,
+                "bronze_path": batch.bronze_path,
+                "status": batch.status,
+            },
         )
-        sql = f"""
-        SELECT COALESCE(
-            (SELECT json_agg(t ORDER BY query_name ASC, batch_id ASC)::text FROM (
-                SELECT query_name, batch_id, dataset_id, ingestion_date::text,
-                       topic_offsets, record_count, raw_path, bronze_path, status
-                FROM ingest_batches
-                WHERE dataset_id = {_escape_literal(dataset_id)}
-                  AND status = 'COMMITTED'
-                  {extra_filter}
-            ) t),
-            '[]'
-        );
-        """
-        raw = self._run_sql(sql, tuples_only=True).strip() or "[]"
-        rows = json.loads(raw)
-        results: list[IngestBatchRecord] = []
-        for row in rows:
-            ing_date = _to_date(row["ingestion_date"])
-            assert ing_date is not None
-            results.append(
-                IngestBatchRecord(
-                    query_name=row["query_name"],
-                    batch_id=int(row["batch_id"]),
-                    dataset_id=row["dataset_id"],
-                    ingestion_date=ing_date,
-                    topic_offsets=dict(row["topic_offsets"]),
-                    record_count=int(row["record_count"]),
-                    raw_path=row["raw_path"],
-                    bronze_path=row["bronze_path"],
-                    status=row["status"],
-                )
-            )
-        return results
+
+    def list_committed_ingest_batches(self, *, query_name: str) -> list[IngestBatchRecord]:
+        raw = self._run_sql(
+            _LIST_INGEST_SQL, tuples_only=True, params={"query_name": query_name}
+        ).strip()
+        return [_ingest_record(row) for row in json.loads(raw or "[]")]
 
 
 def connect_control_store(db_config: PostgresDbConfig) -> ControlStore:
@@ -896,7 +994,7 @@ def make_compose_psql_runner(
     docker_bin: str,
     compose_file: Path,
     repo_root: Path,
-) -> Callable[[str, bool], str]:
+) -> PsqlRunner:
     """Tạo runner gọi `psql` bên trong container `postgres` của Docker Compose."""
 
     def _runner(sql: str, tuples_only: bool) -> str:
@@ -909,6 +1007,8 @@ def make_compose_psql_runner(
             "-T",
             "-e",
             f"PGPASSWORD={db_config.password}",
+            "-e",
+            "PGCLIENTENCODING=UTF8",
             "postgres",
             "psql",
             "-X",
@@ -927,6 +1027,7 @@ def make_compose_psql_runner(
                 cwd=repo_root,
                 input=sql,
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
                 check=True,
             )

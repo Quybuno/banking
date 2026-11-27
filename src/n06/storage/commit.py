@@ -223,14 +223,9 @@ class BatchCommitCoordinator:
             business_date=_normalize_date(business_date),
         )
 
-    def list_committed_ingest_batches(
-        self,
-        *,
-        dataset_id: str,
-        query_name: str | None = None,
-    ) -> list[IngestBatchRecord]:
-        """Reader: chỉ đọc các `batch_id` đã ghi nhận trong `ingest_batches`."""
-        return self._store.list_committed_ingest_batches(
-            dataset_id=dataset_id,
-            query_name=query_name,
-        )
+    def list_committed_ingest_batches(self, *, query_name: str) -> list[IngestBatchRecord]:
+        """Reader: chỉ đọc các `batch_id` đã ghi nhận trong `ingest_batches`.
+
+        Lọc theo query vì streaming ghi `dataset_id` NULL (ADR-0004 Q1).
+        """
+        return self._store.list_committed_ingest_batches(query_name=query_name)

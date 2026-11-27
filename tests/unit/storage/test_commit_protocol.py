@@ -156,19 +156,22 @@ class _InMemoryControlStore:
             return None
         return snap
 
-    def list_committed_ingest_batches(
-        self,
-        *,
-        dataset_id: str,
-        query_name: str | None = None,
-    ) -> list[IngestBatchRecord]:
-        return [
-            b
-            for b in self.ingest_batches
-            if b.dataset_id == dataset_id
-            and b.status == "COMMITTED"
-            and (query_name is None or b.query_name == query_name)
-        ]
+    def upsert_ingest_batch(self, batch: IngestBatchRecord) -> None:
+        with self._lock:
+            key = (batch.query_name, batch.batch_id)
+            self.ingest_batches = [
+                b for b in self.ingest_batches if (b.query_name, b.batch_id) != key
+            ] + [batch]
+
+    def list_committed_ingest_batches(self, *, query_name: str) -> list[IngestBatchRecord]:
+        return sorted(
+            (
+                b
+                for b in self.ingest_batches
+                if b.query_name == query_name and b.status == "COMMITTED"
+            ),
+            key=lambda b: b.batch_id,
+        )
 
 
 def test_build_run_output_path_follows_adr_0002() -> None:

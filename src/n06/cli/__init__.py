@@ -29,6 +29,7 @@ from n06.cli.doctor import (
     run_doctor,
 )
 from n06.cli.generate import run_generate
+from n06.cli.ingestion import run_stream
 from n06.cli.init_local import (
     InitLocalResult,
     generate_local_env,
@@ -100,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor,validate,publish,generate,ingest-statements}",
+        metavar="{init-local,doctor,validate,publish,generate,stream,ingest-statements}",
     )
 
     # Lệnh 1: n06 init-local
@@ -240,6 +241,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Lệnh 4: n06 publish
+    stream_parser = subparsers.add_parser(
+        "stream",
+        help="Chạy query streaming ghi Raw và Bronze từ Kafka (trong image Spark).",
+        description=(
+            "Một query foreachBatch đọc topic events, ghi Raw rồi Bronze theo batch_id và upsert "
+            "ingest_batches. Tiến trình dài hạn; dừng bằng Ctrl+C."
+        ),
+    )
+    stream_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    stream_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    stream_parser.add_argument(
+        "--query-name", default=None, help="Ghi đè kafka.query_name (tên query streaming)."
+    )
+    stream_parser.add_argument(
+        "--available-now",
+        action="store_true",
+        help="Xử lý hết dữ liệu hiện có (vẫn chia batch theo cấu hình) rồi dừng.",
+    )
+
     publish_parser = subparsers.add_parser(
         "publish",
         help="Gửi events từ nguồn do generator sinh lên Kafka bằng producer idempotent.",
@@ -451,6 +478,15 @@ def main(
             actual_file=parsed.actual_file,
             harness_module=parsed.harness_module,
             as_json=parsed.as_json,
+            out=stdout,
+        )
+
+    if parsed.command == "stream":
+        return run_stream(
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            query_name=parsed.query_name,
+            available_now=parsed.available_now,
             out=stdout,
         )
 
