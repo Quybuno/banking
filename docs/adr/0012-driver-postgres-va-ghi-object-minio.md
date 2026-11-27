@@ -1,8 +1,9 @@
 # ADR-0012: Driver PostgreSQL trong image Spark (T22) và cách ghi object lên MinIO (T23)
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: agent (soạn theo yêu cầu của chủ dự án để mở khóa T22 và T23), 2026-11-25
 - Người duyệt: A (T22, T23; image Spark theo `infra/README.md`), C (Compose, cấu hình, `src/n06/cli/`), B (`src/n06/storage/`: control store, object store)
+- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27
 - Ngày: 2026-11-25
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 3, 6, 8.1; Phần II mục 4, 7
 
