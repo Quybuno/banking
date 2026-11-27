@@ -1,16 +1,21 @@
 """Integration tests cho migration Control DB (TASK T21).
 
 Yêu cầu PostgreSQL control DB đang chạy (profile `test` / `docker compose --profile core up -d`)
-và có `psycopg`/`psycopg2`, `psql` trên host, hoặc `docker compose exec` vào container `postgres`.
+và `docker compose exec` vào container `postgres`.
+
+Test chạy trên **database riêng** do chính nó tạo và xóa: nó gọi `migrate_down`, và từ migration
+`0002` bước down thất bại khi bảng control còn dòng `dataset_id` NULL do streaming ghi (ADR-0004
+mục 8), nên không được đụng database control dùng chung.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-import socket
 import subprocess
 import uuid
+from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,7 +26,6 @@ from n06.control import (
     DEFAULT_CONTROL_MIGRATIONS_DIR,
     MigrationError,
     SqlExecutor,
-    connect_control_db,
     get_applied_versions,
     migrate_down,
     migrate_up,
@@ -88,7 +92,7 @@ class _DockerComposePsqlExecutor:
         return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _control_executor_or_skip() -> SqlExecutor:
+def _control_db_config() -> PostgresDbConfig:
     dotenv_vars = parse_dotenv_file(ENV_FILE) if ENV_FILE.is_file() else {}
     env = {
         **dotenv_vars,
@@ -131,38 +135,74 @@ def _control_executor_or_skip() -> SqlExecutor:
     )
     cfg = load_config(profile=env["N06_PROFILE"], env=env).postgres.control
 
+    return cfg
+
+
+@pytest.fixture
+def executor() -> Iterator[SqlExecutor]:
+    """Executor trên một database tạm, thuộc user control, tạo bằng superuser của container."""
+    docker_bin = shutil.which("docker")
+    if docker_bin is None:
+        pytest.skip("Cần docker để tạo database tạm cho test migration")
+    cfg = _control_db_config()
+    name = f"n06_it_mig_{uuid.uuid4().hex[:12]}"
+
+    def admin(sql: str) -> None:
+        # Mật khẩu và tên superuser lấy từ môi trường của container, không đi qua argv của host.
+        subprocess.run(
+            [docker_bin, "compose", "-f", str(COMPOSE_FILE), "exec", "-T", "postgres", "sh", "-c",
+             'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -f -'],
+            cwd=REPO_ROOT, input=sql, text=True, capture_output=True, check=True,
+        )  # fmt: skip
+
+    admin(f'CREATE DATABASE {name} OWNER "{cfg.user}";')
     try:
-        with socket.create_connection((cfg.host, cfg.port), timeout=1.5):
-            pass
-    except OSError as exc:
-        pytest.skip(f"PostgreSQL control DB chưa sẵn sàng tại {cfg.host}:{cfg.port}: {exc}")
-
-    try:
-        return connect_control_db(cfg)
-    except MigrationError as exc:
-        docker_bin = shutil.which("docker")
-        if docker_bin is not None:
-            return _DockerComposePsqlExecutor(docker_bin, cfg)
-        pytest.skip(f"Không có driver/CLI để kết nối control DB: {exc}")
+        yield _DockerComposePsqlExecutor(docker_bin, replace(cfg, database=name))
+    finally:
+        admin(f"DROP DATABASE IF EXISTS {name} WITH (FORCE);")
 
 
-def test_control_migrations_up_down_up_and_unique_constraints() -> None:
-    executor = _control_executor_or_skip()
+def test_dataset_id_is_optional_after_0002_and_down_refuses_to_lose_rows(
+    executor: SqlExecutor,
+) -> None:
+    assert migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == ["0001", "0002"]
+    insert = """
+    INSERT INTO ingest_batches (
+        query_name, batch_id, dataset_id, ingestion_date,
+        topic_offsets, record_count, raw_path, bronze_path
+    ) VALUES ('q-null', 0, NULL, DATE '2026-01-01', '{}'::jsonb, 0, 'raw', 'bronze');
+    """
+    executor.execute_in_transaction([insert])
+
+    with pytest.raises(MigrationError, match="dataset_id"):
+        migrate_down(executor, DEFAULT_CONTROL_MIGRATIONS_DIR, steps=1)
+    # Thất bại thì không mất dữ liệu và version vẫn được ghi nhận.
+    assert get_applied_versions(executor) == ["0001", "0002"]
+    count = executor.query_versions("SELECT COUNT(*)::text FROM ingest_batches;")
+    assert count == ["1"]
+
+    executor.execute_in_transaction(["DELETE FROM ingest_batches;"])
+    assert migrate_down(executor, DEFAULT_CONTROL_MIGRATIONS_DIR, steps=1) == ["0002"]
+    with pytest.raises(MigrationError, match="dataset_id"):
+        executor.execute_in_transaction([insert])
+
+
+def test_control_migrations_up_down_up_and_unique_constraints(executor: SqlExecutor) -> None:
     dataset_id = f"t21-it-{uuid.uuid4().hex[:8]}"
     run_id = f"run-{uuid.uuid4().hex[:12]}"
 
     # 1. Đưa về trạng thái sạch rồi chạy up -> down -> up
     migrate_down(executor, DEFAULT_CONTROL_MIGRATIONS_DIR)
-    assert migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == ["0001"]
-    assert get_applied_versions(executor) == ["0001"]
+    assert migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == ["0001", "0002"]
+    assert get_applied_versions(executor) == ["0001", "0002"]
 
     # Chạy lại up lần nữa không lỗi và không áp dụng lại
     assert migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == []
 
     # Kiểm tra down rồi up lại
-    assert migrate_down(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == ["0001"]
+    assert migrate_down(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == ["0002", "0001"]
     assert get_applied_versions(executor) == []
-    assert migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == ["0001"]
+    assert migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR) == ["0001", "0002"]
 
     try:
         # 2. Kiểm tra unique constraint (query_name, batch_id) trên ingest_batches

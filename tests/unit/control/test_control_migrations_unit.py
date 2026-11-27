@@ -116,17 +116,17 @@ def test_migrate_up_down_up_cycle_with_fake_executor() -> None:
     executor = _FakeExecutor()
 
     applied_first = migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR)
-    assert applied_first == ["0001"]
+    assert applied_first == ["0001", "0002"]
 
     # Chạy lại lần hai phải idempotent
     applied_second = migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR)
     assert applied_second == []
 
     rolled_back = migrate_down(executor, DEFAULT_CONTROL_MIGRATIONS_DIR)
-    assert rolled_back == ["0001"]
+    assert rolled_back == ["0002", "0001"]
     assert executor.has_table is False
 
     # Chạy lại up sau down phải thành công
     reapplied = migrate_up(executor, DEFAULT_CONTROL_MIGRATIONS_DIR)
-    assert reapplied == ["0001"]
+    assert reapplied == ["0001", "0002"]
     assert executor.has_table is True
