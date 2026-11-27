@@ -226,7 +226,10 @@ def test_rerun_is_refused_unless_flag_and_count_is_exact(
 
 def test_rate_is_controlled_and_measured(bootstrap: str, source_dir: Path, topic: str) -> None:
     total = len(_event_lines(source_dir))
-    rate = 3000
+    # Mức giới hạn phải thấp xa khả năng của máy thì cận dưới thời gian mới bắt được limiter hỏng:
+    # ở 3000/s, máy chậm (đã đo 1664-2423 message/s) tự vượt cận dù không giới hạn gì. Ở 500/s
+    # lượt này phải kéo dài ít nhất khoảng 8,5 giây.
+    rate = 500
     started = time.monotonic()
     code, limited = _publish(source_dir, topic, "--rate", str(rate))
     wall = time.monotonic() - started
@@ -234,7 +237,7 @@ def test_rate_is_controlled_and_measured(bootstrap: str, source_dir: Path, topic
     assert limited["messages_delivered"] == total
     # Message thứ k không được gửi trước k/rate giây: thời gian tối thiểu (total-1)/rate. Chỉ có
     # cận dưới về thời gian (đúng trên mọi máy), đo bằng cả số publisher báo và đồng hồ của test.
-    # Không khẳng định gì về tốc độ đạt được của máy.
+    # Không khẳng định gì về tốc độ đạt được của máy và không so hai lượt chạy với nhau.
     minimum = (total - 1) / rate * 0.98
     assert limited["elapsed_seconds"] >= minimum
     assert wall >= minimum
