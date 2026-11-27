@@ -168,22 +168,41 @@ def test_os_error_during_send_flushes_and_reports_delivered_count(
 # --- Độ trễ không cộng khoảng chờ giới hạn tốc độ ----------------------------------------------
 
 
-class _AckAfterMillisecond:
-    """Producer giả: broker ack sau 1 ms (đo bằng đồng hồ thật), callback chạy ở lần poll tiếp."""
+class _FakeTime:
+    """Đồng hồ giả: thời gian chỉ trôi khi có ai đó chờ (`sleep`, hoặc `poll` có thời hạn)."""
 
     def __init__(self) -> None:
+        self.now = 0.0
+
+    def clock(self) -> float:
+        return self.now
+
+    def clock_ns(self) -> int:
+        return round(self.now * 1_000_000_000)
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(seconds, 1e-9)
+
+
+class _AckAfterMillisecond:
+    """Producer giả: broker ack sau 1 ms của đồng hồ giả, callback chỉ chạy ở lần poll sau đó."""
+
+    def __init__(self, fake: _FakeTime) -> None:
+        self._fake = fake
         self._pending: list[tuple[Any, float]] = []
-        self.polls = 0
+        self._polls = 0
 
     def produce(self, topic: str, *, value: bytes, key: bytes, on_delivery: Any) -> None:
-        self._pending.append((on_delivery, time.perf_counter() + 0.001))
+        self._pending.append((on_delivery, self._fake.now + 0.001))
 
     def poll(self, timeout: float) -> int:
-        self.polls += 1
-        time.sleep(min(timeout, 0.001))
-        now = time.perf_counter()
-        ready = [item for item in self._pending if item[1] <= now]
-        self._pending = [item for item in self._pending if item[1] > now]
+        # Vòng chờ không tiến đồng hồ phải làm test fail, không được treo.
+        self._polls += 1
+        assert self._polls < 10_000, "vòng chờ không kết thúc"
+        if timeout > 0:
+            self._fake.sleep(timeout)
+        ready = [item for item in self._pending if item[1] <= self._fake.now]
+        self._pending = [item for item in self._pending if item[1] > self._fake.now]
         for callback, _ in ready:
             callback(None, object())
         return len(ready)
@@ -195,10 +214,14 @@ class _AckAfterMillisecond:
 
 
 def test_delivery_latency_is_not_inflated_by_the_rate_limit_wait(
-    make_source: Callable[..., Path],
+    make_source: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # rate 20/s: khoảng cách 50 ms giữa hai message. Broker ack sau ~1 ms nên p50 phải rất nhỏ
-    # (bản cũ chờ bằng sleep nên callback chỉ chạy ở poll kế tiếp và p50 xấp xỉ 50 ms).
+    # rate 20/s: message thứ k gửi lúc k * 50 ms. Khi chờ nhịp, publisher poll từng lát 5 ms nên
+    # callback của ack (sau 1 ms) chạy ở cuối lát đầu tiên: độ trễ 5 ms. Message cuối được giao
+    # trong flush sau 1 ms. Bản cũ chờ bằng sleep nên độ trễ xấp xỉ 50 ms.
+    fake = _FakeTime()
+    monkeypatch.setattr(time, "sleep", fake.sleep)
+    monkeypatch.setattr(time, "perf_counter_ns", fake.clock_ns)
     source = discover_event_files(
         make_source([[line_of(tx_event(f"t{i}", "a", "b")) for i in range(6)]])
     )
@@ -206,12 +229,16 @@ def test_delivery_latency_is_not_inflated_by_the_rate_limit_wait(
         source,
         settings=_settings(rate=20),
         broker=FakeBroker(partitions=1),
-        producer=_AckAfterMillisecond(),  # type: ignore[arg-type]
+        producer=_AckAfterMillisecond(fake),  # type: ignore[arg-type]
+        clock=fake.clock,
     )
     assert stats.messages_delivered == 6
-    assert stats.latency_ms_p50 < 25.0, stats.latency_ms_p50
-    assert stats.latency_ms_p99 < 40.0, stats.latency_ms_p99
-    assert 15.0 < stats.achieved_rate < 25.0  # tốc độ vẫn bám 20/s
+    # Sáu độ trễ: 1 ms (message cuối) và năm lần 5 ms.
+    assert stats.latency_ms_p50 == pytest.approx(5.0, abs=0.01)
+    assert stats.latency_ms_p99 == pytest.approx(5.0, abs=0.01)
+    # Message cuối gửi lúc 5 * 50 ms = 250 ms, giao lúc 251 ms.
+    assert stats.elapsed_seconds == pytest.approx(0.251, abs=1e-6)
+    assert stats.achieved_rate == pytest.approx(6 / 0.251, rel=1e-4)
 
 
 # --- Dựng consumer thất bại là mã 14 -----------------------------------------------------------
