@@ -423,33 +423,43 @@ def get_default_schema_registry() -> ContractSchemaRegistry:
     return _DEFAULT_REGISTRY
 
 
+def _unreadable(reason: str) -> ValidationResult:
+    return ValidationResult.from_issues(
+        [ValidationIssue(code=ErrorCode.INVALID_JSON, field_path="$", message=reason)]
+    )
+
+
+# Lỗi mà dữ liệu xấu có thể gây ra khi phân tích hoặc kiểm: số nguyên quá dài (`ValueError`, cả
+# khi in `repr`), lồng quá sâu (`RecursionError`), số ngoài miền (`OverflowError`).
+_BAD_DATA_ERRORS = (ValueError, RecursionError, OverflowError)
+
+
 def parse_and_validate_json_schema(
-    raw_or_dict: str | bytes | Mapping[str, Any],
+    raw_or_dict: str | bytes | bytearray | memoryview | Mapping[str, Any],
     entity_or_schema: str,
     *,
     registry: ContractSchemaRegistry | None = None,
 ) -> ValidationResult:
-    """Parse chuỗi JSON (hoặc nhận dict) và validate theo JSON Schema Draft 2020-12."""
+    """Parse chuỗi JSON (hoặc nhận dict) và validate theo JSON Schema Draft 2020-12.
+
+    Không ném ngoại lệ vì dữ liệu: byte không phải UTF-8, JSON không phân tích được hay không
+    kiểm được đều là kết quả `INVALID_JSON`.
+    """
     reg = registry if registry is not None else get_default_schema_registry()
 
-    if isinstance(raw_or_dict, str | bytes):
-        text = (
-            raw_or_dict.decode("utf-8", errors="replace")
-            if isinstance(raw_or_dict, bytes)
-            else raw_or_dict
-        )
+    if isinstance(raw_or_dict, str | bytes | bytearray | memoryview):
+        try:
+            text = (
+                raw_or_dict if isinstance(raw_or_dict, str) else bytes(raw_or_dict).decode("utf-8")
+            )
+        except UnicodeDecodeError as exc:
+            return _unreadable(f"Dữ liệu không phải UTF-8: {exc.reason} tại byte {exc.start}.")
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
-            return ValidationResult.from_issues(
-                [
-                    ValidationIssue(
-                        code=ErrorCode.INVALID_JSON,
-                        field_path="$",
-                        message=f"Không parse được JSON: {exc}",
-                    )
-                ]
-            )
+            return _unreadable(f"Không parse được JSON: {exc}")
+        except _BAD_DATA_ERRORS as exc:
+            return _unreadable(f"Không parse được JSON ({type(exc).__name__}).")
         if not isinstance(parsed, dict):
             return ValidationResult.from_issues(
                 [
@@ -477,5 +487,8 @@ def parse_and_validate_json_schema(
             ]
         )
 
-    issues = reg.validate_instance(record_dict, entity_or_schema, path="$")
+    try:
+        issues = reg.validate_instance(record_dict, entity_or_schema, path="$")
+    except _BAD_DATA_ERRORS as exc:
+        return _unreadable(f"Không kiểm được record ({type(exc).__name__}).")
     return ValidationResult.from_issues(issues, record=record_dict)
