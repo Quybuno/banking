@@ -10,7 +10,7 @@
 - Mọi lệnh hỗ trợ `--help`, có structured output (`--json`) và trả về đúng mã thoát (`ExitCode`).
 - Tuyệt đối không in giá trị secret/password ra output hoặc log.
 - Không hardcode endpoint, hostname hay port trong mã nguồn; toàn bộ địa chỉ dịch vụ lấy từ hệ thống cấu hình T01 (`n06.config.load_config`) và biến môi trường `.env`.
-- `object_store.py` chỉ chứa mã quản trị bucket của CLI (ký AWS SigV4 bằng thư viện chuẩn, `HEAD`/`PUT` bucket, `ensure_bucket`), không thêm dependency. Đây không phải thư viện S3 dùng chung: mã đọc/ghi dữ liệu (T22, T23, T25) không được import module này.
+- `object_store.py` tái xuất các hàm quản trị bucket từ `n06.storage.object_store` (theo ADR-0012 quyết định 2, bộ ký AWS SigV4 và client S3 dùng chung đã dời sang `src/n06/storage/object_store.py` để phục vụ cả CLI và T23).
 - Logic đánh giá tài nguyên máy chủ (`evaluate_system_resources`) được tách riêng thành hàm thuần túy nhận `SystemResourceSnapshot` để kiểm thử độc lập với máy chạy test.
 
 ## Bảng mã thoát (`ExitCode`)
