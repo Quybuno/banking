@@ -3,13 +3,14 @@
 - Trạng thái: Accepted
 - Người viết: agent (soạn theo yêu cầu của chủ dự án để mở khóa T22), 2026-11-25
 - Người duyệt: B (người viết theo `docs/TASKS.md` mục 3) và A (người duyệt theo bảng đó)
-- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27
-- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27
+- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27 (PR #15, #16)
 - Ngày: 2026-11-25
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 4.1, 6, 8.1 (streaming), 10, 12, 14.2; Phần II mục 3, 4, 8
 
 **Phạm vi: chỉ Raw và Bronze của luồng sự kiện Kafka.** Bronze của accounts và statement là việc mở (mục "Việc mở"). Silver ngoài phạm vi. Schema Gold thuộc ADR-005 theo `docs/TASKS.md`, không thuộc ADR này.
-ADR này chưa được dùng làm căn cứ code cho tới khi chuyển Accepted và các câu ở "Tờ quyết định" được chủ repo trả lời.
+Từ 2026-11-27 ADR này là căn cứ code. Chủ repo đã trả lời Q1 đến Q8 (mục "Quyết định đã chốt").
+
+*Lịch sử:* soạn ở trạng thái Proposed (PR #9, 2026-11-25); chuyển Accepted 2026-11-27 (PR #15, #16); cùng ngày ghi câu trả lời Q1-Q8 theo chỉ thị của chủ repo (dùng đúng đề xuất; Q1: `dataset_id` không bắt buộc, qua migration mới `0002`).
 
 ## Bối cảnh
 
@@ -145,7 +146,7 @@ Theo ADR-0002: `<raw_prefix>/<query_name>/ingestion_date=<d>/batch_id=<id>/` và
 
 Một batch hoàn tất tương ứng đúng một dòng khóa `(query_name, batch_id)`, upsert **sau** khi mọi output đã ghi (S385).
 
-**Đề xuất (Q1): `dataset_id` không bắt buộc trong `ingest_batches`.** S385 liệt kê nội dung của dòng (khóa, khoảng offset, số bản ghi) và không có `dataset_id`; S298 đặt `dataset_id` ở từng record Raw (*"nếu parse được"*). Một microbatch có thể chứa nhiều dataset hoặc record không đọc được. Vì vậy:
+**Quyết định (Q1): `dataset_id` không bắt buộc trong `ingest_batches`.** S385 liệt kê nội dung của dòng (khóa, khoảng offset, số bản ghi) và không có `dataset_id`; S298 đặt `dataset_id` ở từng record Raw (*"nếu parse được"*). Một microbatch có thể chứa nhiều dataset hoặc record không đọc được. Vì vậy:
 
 - Migration **mới** `0002` (không sửa `0001`): `ALTER TABLE ingest_batches ALTER COLUMN dataset_id DROP NOT NULL`. Bước `down` đặt lại `NOT NULL` và **thất bại rõ ràng nếu còn dòng NULL** (không xóa dữ liệu).
 - Streaming ghi `dataset_id = NULL`; `dataset_id` nằm ở từng dòng Raw và Bronze.
@@ -160,7 +161,7 @@ Một batch hoàn tất tương ứng đúng một dòng khóa `(query_name, bat
 | `raw_path`, `bronze_path` | URI `s3a://` theo ADR-0002 |
 | `status` | `COMMITTED` (mặc định của cột, ADR-0003 mục 2 và `0001_init_control_schema.up.sql`) |
 
-Đề xuất này **sửa ADR-0003 mục 2** (cột `dataset_id`). Hệ quả phải làm cùng migration 0002 (thuộc task hiện thực sau khi Accepted, cần B duyệt vì đụng mã của T24):
+Quyết định này **sửa ADR-0003 mục 2** (cột `dataset_id`). Hệ quả phải làm cùng migration 0002 (thuộc task hiện thực sau khi Accepted, cần B duyệt vì đụng mã của T24):
 
 - `IngestBatchRecord.dataset_id` đổi sang `str | None`.
 - `list_committed_ingest_batches(dataset_id=...)` đang lọc `WHERE dataset_id = %s` nên sẽ **không trả dòng nào**; phải liệt kê theo `query_name`. Đổi cả giao diện `ControlStore` (`control_store.py`), hai hiện thực, `src/n06/storage/commit.py` và store giả trong `tests/unit/storage/test_commit_protocol.py`.
@@ -193,7 +194,7 @@ Raw được dùng vì giữ **mọi** record và byte `value` nguyên dạng (S
 - Fixture nghiệm thu dùng bố cục khác (`source_manifest.json`, `fixtures/acceptance/events.jsonl`) mà producer hiện cũng chưa đọc được; cách nạp fixture là việc mở.
 - Lệnh chạy như job Spark trong image job (S201) và phải thấy được thư mục nguồn; service `spark` của Compose hiện gắn volume riêng tại `/workspace/data`, không thấy dữ liệu trên host. **Chưa hiện thực, chưa đo** chi phí.
 
-## Giả định (mỗi mục cần người duyệt đồng ý hoặc sửa)
+## Giả định (được chấp nhận cùng ADR ngày 2026-11-27)
 
 - **G1.** Bước parse của Bronze là **chỉ kiểm JSON Schema của contract**, tức hàm `parse_and_validate_json_schema(raw, "event_envelope")` của `src/n06/domain/schema_validator.py`; kiểm tra ngữ nghĩa (Phần II mục 3) thuộc Silver, **không** dùng `validate_event_envelope` hay `validate_transaction_record` để định tuyến. Record vi phạm bất kỳ mã mức schema nào (`INVALID_JSON`, `UNSUPPORTED_SCHEMA_VERSION`, `MISSING_REQUIRED_FIELD`, `SCHEMA_TYPE`, `UNSUPPORTED_CURRENCY`, `AMOUNT_OUT_OF_RANGE`, `SCHEMA_VALUE`) vào `parse_error`. Đặc tả không nói rõ ranh giới giữa "parse lỗi" và "quality".
   **Một record xấu không được làm hỏng batch (S298, S304).** Đo ngày 2026-11-25, bộ kiểm hiện tại: số nguyên 5000 chữ số ném `ValueError`; mảng lồng 200.000 cấp ném `RecursionError`; `bytearray` của một dòng hợp lệ trả `SCHEMA_TYPE`; byte UTF-8 hỏng bị thay thế rồi cho mã khác (`errors="replace"`). Vì vậy T22 phải: xử lý `value` null (tombstone, Raw cho phép null) **trước** khi ép kiểu, ghi vào `parse_error` với mã `SCHEMA_TYPE` (`bytes(None)` ném `TypeError`); ép `value` còn lại về `bytes`; giải mã UTF-8 nghiêm ngặt, thất bại là `INVALID_JSON`; bắt `ValueError` và `RecursionError` quanh bộ kiểm và ghi `INVALID_JSON`. Đây là thiếu sót của bộ kiểm T10, nên sửa ở task riêng.
@@ -219,11 +220,11 @@ Raw được dùng vì giữ **mọi** record và byte `value` nguyên dạng (S
 - **G21.** Nguồn đã sinh xong: manifest events được ghi sau dữ liệu, và bước kiểm nguồn từ chối file events không có trong manifest.
 - **G22.** Bộ kiểm Python chạy trong `foreachBatch` (UDF), dù S224 ưu tiên Spark SQL functions, để dùng lại đúng bộ kiểm của contract.
 
-## Tờ quyết định (chủ repo trả lời một lượt)
+## Quyết định đã chốt (Q1 đến Q8)
 
-"Spec im lặng" nghĩa là chọn phương án nhỏ nhất và dễ đảo ngược.
+Chủ repo chốt ngày 2026-11-27: dùng đúng câu trả lời đề xuất. "Spec im lặng" nghĩa là đã chọn phương án nhỏ nhất và dễ đảo ngược.
 
-| # | Câu hỏi | Đề xuất | Nguồn |
+| # | Câu hỏi | Quyết định | Nguồn |
 |---|---|---|---|
 | Q1 | `ingest_batches.dataset_id` đang `NOT NULL`; một batch có thể chứa nhiều dataset hoặc record hỏng | Cho `NULL` bằng migration mới `0002` (sửa ADR-0003 mục 2); `dataset_id` ở từng dòng Raw/Bronze; `wait-ingestion` so byte nguồn với Raw (mục 9, giả định G17-G21) | S385 (không có `dataset_id`), S298, S432, S861 |
 | Q2 | Phát lại batch ghi đè "cùng nội dung" nhưng `ingested_at`, `ingestion_run_id` khác | "Cùng nội dung" là mọi cột trừ hai cột đó. Yêu cầu "không ghi đè lỗi cũ" áp cho quarantine của Silver; `parse_error` là output của batch nên bị ghi đè khi phát lại. Hệ quả: sau sự cố, độ trễ tính từ `ingested_at` (S621) phồng lên cho batch phát lại | S387; S379 (nói cho batch); S317 nằm dưới mục Silver (S309); S384. Spec im lặng cho streaming |

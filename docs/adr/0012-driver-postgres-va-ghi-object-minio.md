@@ -3,13 +3,13 @@
 - Trạng thái: Accepted
 - Người viết: agent (soạn theo yêu cầu của chủ dự án để mở khóa T22 và T23), 2026-11-25
 - Người duyệt: A (T22, T23; image Spark theo `infra/README.md`), C (Compose, cấu hình, `src/n06/cli/`), B (`src/n06/storage/`: control store, object store)
-- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27
-- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27
+- Đã duyệt (Accepted): QUY (chủ repo), 2026-11-27 (PR #15, #16)
 - Ngày: 2026-11-25
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 2, 3, 6, 8.1; Phần II mục 4, 7
 
-Chưa được sửa `pyproject.toml`, `uv.lock` hay `infra/spark/Dockerfile` trước khi ADR này chuyển Accepted.
-Hai quyết định dưới đây độc lập, có thể duyệt riêng.
+Từ 2026-11-27 ADR này là căn cứ code cho cả hai quyết định; chủ repo cho phép sửa `pyproject.toml`, `uv.lock`, `infra/spark/Dockerfile` đúng theo quyết định và không thêm gì ngoài đó.
+
+*Lịch sử:* soạn ở trạng thái Proposed (PR #9, 2026-11-25); chuyển Accepted 2026-11-27 (PR #15, #16). Câu hỏi "tham số phía server" ở Quyết định 1 không được trả lời riêng: người hiện thực hiểu việc chấp nhận ADR là chấp nhận "Chốt đề xuất" (đường `psql`, trích dẫn biến ở phía client).
 
 ## Bối cảnh
 
@@ -49,7 +49,7 @@ Tiêu chí của chủ dự án: **khớp với host nếu chạy được trong
 
 **Chưa chạy:** tổ hợp bản chép 16.6 cùng `PsqlCliControlStore`; đường **ghi** trong image qua nhánh `subprocess` cục bộ của `_run_sql`.
 
-**Chốt đề xuất:**
+**Quyết định** (nguyên là "Chốt đề xuất"):
 
 1. `infra/spark/Dockerfile` thêm tầng `FROM postgres:16.6-bookworm` và chép `psql` cùng `libpq.so.5`. Compose hiện dùng **tag** `postgres:16.6-bookworm` không kèm digest, nên đề xuất ghim cùng một digest ở cả Compose và Dockerfile (bản đang có trên máy: `sha256:557fea37a744d5f4c8faab304b0a90858b53ab119735a88c131fd19dab802f36`) để client và server chắc chắn cùng bản.
 2. Không thêm gói Python, không đổi `pyproject.toml`, `uv.lock`.
