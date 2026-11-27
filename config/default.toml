@@ -14,6 +14,9 @@ events_topic = "n06.banking.events.v1"
 num_partitions = 3
 replication_factor = 1
 consumer_group = "n06-streaming-raw-bronze"
+# Tên query `foreachBatch` của `n06 stream`: một đoạn đường dẫn Raw, Bronze, checkpoint và khóa của
+# `ingest_batches`. Mất checkpoint thì đổi tên này rồi nạp lại từ đầu (đặc tả I.8.1 bước 6).
+query_name = "raw-bronze"
 max_offsets_per_trigger = 50000
 trigger_interval_seconds = 5
 

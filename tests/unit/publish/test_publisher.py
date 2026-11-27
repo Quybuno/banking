@@ -242,7 +242,13 @@ def test_no_message_is_sent_before_its_slot(source) -> None:  # type: ignore[no-
     assert stats.elapsed_seconds == pytest.approx(6 / 7, abs=1e-6)
 
 
-def test_zero_rate_never_waits(source) -> None:  # type: ignore[no-untyped-def]
+def test_zero_rate_never_waits(  # type: ignore[no-untyped-def]
+    source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(seconds: float) -> None:
+        raise AssertionError(f"rate = 0 không được ngủ, bị gọi với {seconds}")
+
+    monkeypatch.setattr("time.sleep", forbidden)  # đường chờ qua poll kiểm bằng đồng hồ giả
     producer = _TimedProducer()
     stats, _, _ = _run(source, settings=_settings(rate=0), producer=producer, clock=producer.clock)
     assert producer.sent_at == [0.0] * 7

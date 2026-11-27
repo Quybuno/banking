@@ -14,6 +14,7 @@
 - `demo.toml`: Profile cho kịch bản chạy demo end-to-end (bật Airflow/Metabase, 10.000 giao dịch).
 - `benchmark.toml`: Profile cho đo hiệu năng (tắt Airflow/Metabase để giảm RAM, producer `rate = 0` không giới hạn, 1.000.000 giao dịch); dùng bucket riêng `n06-benchmark-lakehouse` (ADR-0002 mục 5) để dữ liệu đo không lẫn dữ liệu nghiệp vụ, endpoint giữ nguyên. Bucket này chưa có cơ chế tự tạo, xem tồn đọng ở `PROGRESS.md`.
 - `test.toml`: Profile cô lập endpoint/bucket/topic/prefix cho kiểm thử tự động.
+- `kafka.query_name` (mặc định `raw-bronze`): tên query của `n06 stream`, là một đoạn đường dẫn Raw, Bronze, checkpoint và khóa `ingest_batches`; mẫu `^[a-z][a-z0-9_-]{2,63}$`.
 - Mục `[limits]` (trong `default.toml`, mọi profile kế thừa): giới hạn theo dung lượng máy, xem `README.md` mục "Giới hạn quy mô theo dung lượng máy". Khóa không đặt (`max_transactions`, `pipeline_bytes_per_tx`, `disk_probe_path`) nhận giá trị `None`.
 
 ## Thứ tự ưu tiên 4 tầng (thấp → cao)
