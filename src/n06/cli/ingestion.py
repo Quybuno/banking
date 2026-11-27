@@ -1,6 +1,7 @@
-"""`n06 stream`: kiểm cấu hình ở host rồi chạy job trong một container của image Spark.
+"""`n06 stream` và `n06 wait-ingestion`: kiểm cấu hình ở host rồi chạy job trong image Spark.
 
-Mã thoát: 0 xong; 10 cấu hình sai; 13 không có Docker; 14 job thất bại hoặc hạ tầng chưa sẵn sàng.
+Mã thoát: 0 xong (hoặc đã đủ dữ liệu); 10 cấu hình hoặc nguồn sai; 13 không có Docker; 14 job
+thất bại, hạ tầng chưa sẵn sàng hoặc hết thời gian chờ.
 """
 
 from __future__ import annotations
@@ -16,9 +17,12 @@ from typing import TextIO
 from n06.cli.doctor import ExitCode
 from n06.cli.init_local import parse_dotenv_file
 from n06.config import REPO_ROOT, ConfigValidationError, load_config
-from n06.ingestion.launcher import host_only_addresses, job_command
+from n06.ingestion.launcher import CONTAINER_SOURCE_DIR, host_only_addresses, job_command
+from n06.producer.source import DEFAULT_SOURCE_DIRNAME
 
 STREAM_MODULE = "n06.ingestion.stream_job"
+WAIT_MODULE = "n06.ingestion.wait_job"
+DEFAULT_WAIT_TIMEOUT_SECONDS = 300.0
 _PASSED_THROUGH = {int(ExitCode.OK), int(ExitCode.CONFIG_ERROR), int(ExitCode.SERVICE_ERROR)}
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -31,6 +35,8 @@ def _run_job(
     profile: str | None,
     env_file: Path | None,
     env: Mapping[str, str] | None,
+    source_dir: Path | None = None,
+    use_configured_source: bool = False,
     runner: Runner,
     docker_bin: str | None,
     out: TextIO,
@@ -57,7 +63,17 @@ def _run_job(
             f"{', '.join(unusable)} trỏ về máy host; job chạy trong mạng Docker nên dùng profile "
             "default, demo hoặc benchmark, hoặc ghi đè bằng tên service.",
         )
+    if use_configured_source and source_dir is None:
+        source_dir = Path(cfg.paths.generator_output_dir) / DEFAULT_SOURCE_DIRNAME
     arguments = ["--profile", effective, *job_args]
+    if source_dir is not None:
+        if not source_dir.is_dir():
+            return fail(
+                ExitCode.CONFIG_ERROR,
+                "Không có thư mục nguồn (--source-dir hoặc paths.generator_output_dir/source).",
+            )
+        source_dir = source_dir.resolve()
+        arguments += ["--source-dir", CONTAINER_SOURCE_DIR]
     event_log_dir = None
     if cfg.spark.event_log_enabled and not Path(cfg.spark.event_log_dir).is_absolute():
         event_log_dir = REPO_ROOT / cfg.spark.event_log_dir
@@ -72,6 +88,7 @@ def _run_job(
         job_module=module,
         job_args=arguments,
         env_names=[key for key in merged if key.startswith("N06")],
+        source_dir=source_dir,
         event_log_dir=event_log_dir,
     )
     sys.stdout.flush()
@@ -97,4 +114,31 @@ def run_stream(
     return _run_job(
         "stream", STREAM_MODULE, job_args, profile=profile, env_file=env_file, env=env,
         runner=runner, docker_bin=docker_bin, out=out or sys.stdout,
+    )  # fmt: skip
+
+
+def run_wait_ingestion(
+    *,
+    dataset_id: str,
+    profile: str | None = None,
+    env_file: Path | None = None,
+    source_dir: Path | None = None,
+    query_name: str | None = None,
+    timeout_seconds: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
+    env: Mapping[str, str] | None = None,
+    runner: Runner = subprocess.run,
+    docker_bin: str | None = None,
+    out: TextIO | None = None,
+) -> int:
+    stream = out or sys.stdout
+    if not 0 < timeout_seconds < float("inf"):
+        stream.write("[wait-ingestion] Lỗi: --timeout-seconds phải > 0 và hữu hạn.\n")
+        return int(ExitCode.CONFIG_ERROR)
+    job_args = ["--dataset-id", dataset_id, "--timeout-seconds", str(timeout_seconds)]
+    if query_name is not None:
+        job_args += ["--query-name", query_name]
+    return _run_job(
+        "wait-ingestion", WAIT_MODULE, job_args, profile=profile, env_file=env_file,
+        source_dir=source_dir, use_configured_source=True, env=env, runner=runner,
+        docker_bin=docker_bin, out=stream,
     )  # fmt: skip
