@@ -1,9 +1,10 @@
 # ADR-0006: Quy tắc đối soát, cutoff, `anchor_event_time` và `discrepancy_age_seconds`
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: B (soạn bởi agent theo `docs/TASKS.md` mục 3, ADR-006), chờ người duyệt
 - Người duyệt: A, C
 - Ngày: 2026-11-27
+- Đã duyệt (Accepted): chủ repo (ủy quyền giám sát), 2026-11-27
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 7.1–7.3 (S329–S364); Phần II mục 1 (S675–S692, riêng 1.4, 1.5, 1.9, 1.10, 1.11), mục 6 (S810–S857), mục 7 (S859–S870), mục 8 (S898); kiểm thử S567–S571, S577.
 
 Ký hiệu `S<dòng>` là số dòng trong `docs/spec.md` bản 1.2 (đếm từ dòng 1 của tệp). Dùng ADR này cho T33 (đối soát), T34 (nghiệm thu ba snapshot) và T61 (`first_seen_at`, `resolved_at`). T14 (oracle, `tests/harness/oracle.py`) đã DONE và độc lập với pipeline; ADR này ghi chỗ pipeline phải khớp oracle.
@@ -37,7 +38,7 @@ Fixture: `REF-T009` có hai `statement_record_id` khác nhau cho cùng khóa nê
 
 ### D3. Bản ghi sao kê nhìn thấy được tại `as_of_time` (S787, S861–S868)
 
-Một dòng sao kê có mặt trong đầu vào của một lần đối soát khi và chỉ khi `file_available_at <= as_of_time`, với `file_available_at` lấy từ `statement_deliveries` trong source manifest. Không dùng `available_at` của từng dòng thay cho `file_available_at`. Pipeline không đọc `statements.jsonl` tham chiếu hay ground truth (S868, S870). Phía giao dịch: xem Q4.
+Một file sao kê (và mọi dòng trong file) có mặt trong đầu vào của một lần đối soát khi và chỉ khi biên nhận `_ingest/<delivery_order:09d>.json` do `n06 ingest-statements` (T23, `src/n06/ingestion/statements.py`) ghi trên MinIO tồn tại và có `file_available_at <= as_of_time`. Dùng `file_available_at` **trong biên nhận đó** (S868: *"Production-like job chỉ đọc file đã ingest theo source manifest"*), không dùng `available_at` của từng dòng thay cho `file_available_at`. Pipeline **không** đọc `statement_deliveries.jsonl`, `statements.jsonl` tham chiếu hay ground truth (S868, S870). Hàm đối soát nhận DataFrame sao kê đã gắn sẵn cột `file_available_at` lấy từ biên nhận và lọc `file_available_at <= as_of_time` ở đầu hàm (tham số `as_of_time`, không đọc đồng hồ). Phía giao dịch: xem Q4.
 
 ### D4. Cutoff và quá hạn (S358, S686)
 
@@ -117,35 +118,35 @@ Nguồn: `expected_results.json` (đáp án) đối với kết quả script áp
 
 - Histogram khớp S849–S851: early MATCHED 5, PENDING 4, bốn sai lệch khác; after_cutoff MATCHED 6, MISSING_EXTERNAL 2, MISSING_INTERNAL 1; late_corrected MATCHED 7, MISSING_EXTERNAL 1, MISSING_INTERNAL 1; mỗi snapshot 13 match keys (S853).
 - Tuổi tính bằng script (giây), ví dụ early: `REF-T003` 97.197, `REF-T006` 97.194, `REF-X012` 97.188 (anchor là `event_time` sao kê vì không có giao dịch); after_cutoff: `REF-T006` 147.594; late_corrected: `REF-T006` 172.794. Khóa MATCHED không có tuổi.
-- Fixture **không phân biệt được** một số lựa chọn ở mục "Câu hỏi mở" (ghi rõ ở từng câu).
+- Fixture **không phân biệt được** một số lựa chọn ở mục "Quyết định đã chốt cho các câu hỏi Q1–Q12" (ghi rõ ở từng câu).
 
-## Câu hỏi mở (cần người duyệt chốt; đề xuất không phải quyết định)
+## Quyết định đã chốt cho các câu hỏi Q1–Q12
 
-Oracle T14 hiện đã hiện thực một số lựa chọn dưới đây. Đề xuất ưu tiên khớp oracle để T34 so được từng khóa; nếu người duyệt chọn khác thì oracle (T14) phải sửa theo, không sửa trong ADR này.
+Chủ repo (ủy quyền giám sát) duyệt ngày 2026-11-27: Q1–Q4, Q6, Q7, Q9, Q11, Q12 **theo đúng đề xuất** ghi ở từng câu; Q5, Q8, Q10 chốt như ghi riêng ở câu đó. Các lựa chọn khớp oracle T14 nên oracle không phải sửa. Trích dẫn đặc tả giữ nguyên như lúc đặt câu hỏi.
 
-**Q1. Từ vựng `issue_codes` của đối soát.** S352: *"Lưu `issue_codes` cho mọi vấn đề phát hiện được"*; S567: *"kết quả chính và issue_codes đúng"*; TASKS T33 điều kiện 2: *"một khóa nhiều lỗi có đủ issue_codes"*. Đặc tả không liệt kê mã. Mười bảy mã ở Phần II mục 8 (S878–S896) là mã quarantine/quality, không phải mã đối soát. Oracle T14 dùng chính tên trạng thái làm mã (`evaluate_match_key`: `CURRENCY_MISMATCH`, `AMOUNT_MISMATCH`, `STATUS_MISMATCH`, `DUPLICATE_OR_CONFLICT`, `PENDING`, `MISSING_EXTERNAL`, `MISSING_INTERNAL`; `MATCHED` có tập rỗng). Đề xuất: giữ đúng tập này cho phần thuộc bảng D5, thêm mã dẫn xuất từ quality khi có (Q8), sắp theo thứ tự bảng D5.
+**Q1. Từ vựng `issue_codes` của đối soát.** S352: *"Lưu `issue_codes` cho mọi vấn đề phát hiện được"*; S567: *"kết quả chính và issue_codes đúng"*; TASKS T33 điều kiện 2: *"một khóa nhiều lỗi có đủ issue_codes"*. Đặc tả không liệt kê mã. Mười bảy mã ở Phần II mục 8 (S878–S896) là mã quarantine/quality, không phải mã đối soát. Oracle T14 dùng chính tên trạng thái làm mã (`evaluate_match_key`: `CURRENCY_MISMATCH`, `AMOUNT_MISMATCH`, `STATUS_MISMATCH`, `DUPLICATE_OR_CONFLICT`, `PENDING`, `MISSING_EXTERNAL`, `MISSING_INTERNAL`; `MATCHED` có tập rỗng). **Quyết định** (theo đề xuất): giữ đúng tập này cho phần thuộc bảng D5, thêm mã dẫn xuất từ quality khi có (Q8), sắp theo thứ tự bảng D5.
 
-**Q2. So `amount_minor` khi `currency` đã khác.** S345 chỉ nói "lệch amount_minor" với "đủ hai phía". Không quy đổi ngoại tệ (S681), nhưng so số nguyên trực tiếp vẫn xác định. Đề xuất (và oracle đang làm): vẫn so cả ba thuộc tính, `issue_codes` ghi mọi lệch, trạng thái chính theo ưu tiên thấp nhất. Fixture `REF-T004` (400 VND và 400 USD) chỉ lệch currency nên không phân biệt.
+**Q2. So `amount_minor` khi `currency` đã khác.** S345 chỉ nói "lệch amount_minor" với "đủ hai phía". Không quy đổi ngoại tệ (S681), nhưng so số nguyên trực tiếp vẫn xác định. **Quyết định** (theo đề xuất, khớp oracle): vẫn so cả ba thuộc tính, `issue_codes` ghi mọi lệch, trạng thái chính theo ưu tiên thấp nhất. Fixture `REF-T004` (400 VND và 400 USD) chỉ lệch currency nên không phân biệt.
 
-**Q3. `business_date` dùng tính cutoff khi hai phía khác ngày hoặc khi nhiều bản ghi.** S335: *"`available_at` không thay business_date gốc"*; S685: *"Ngày dùng chọn phạm vi, không nối thêm ngày vào key"*. Không nói ngày nào quyết định cutoff nếu giao dịch và sao kê cùng khóa mang `business_date` khác nhau. Oracle lấy ngày của giao dịch đầu tiên, nếu không có thì của sao kê đầu tiên. Đề xuất: ngày của giao dịch nội bộ nếu có; nếu nhiều giao dịch, ngày nhỏ nhất; nếu không có giao dịch, ngày nhỏ nhất của sao kê; khóa có hai ngày khác nhau ghi thêm một dòng thống kê chất lượng. Fixture không có ca này.
+**Q3. `business_date` dùng tính cutoff khi hai phía khác ngày hoặc khi nhiều bản ghi.** S335: *"`available_at` không thay business_date gốc"*; S685: *"Ngày dùng chọn phạm vi, không nối thêm ngày vào key"*. Không nói ngày nào quyết định cutoff nếu giao dịch và sao kê cùng khóa mang `business_date` khác nhau. Oracle lấy ngày của giao dịch đầu tiên, nếu không có thì của sao kê đầu tiên. **Quyết định** (theo đề xuất): ngày của giao dịch nội bộ nếu có; nếu nhiều giao dịch, ngày nhỏ nhất; nếu không có giao dịch, ngày nhỏ nhất của sao kê; khóa có hai ngày khác nhau ghi thêm một dòng thống kê chất lượng. Fixture không có ca này.
 
-**Q4. Phía giao dịch có bị lọc theo `as_of_time` không.** S787 chỉ định nghĩa nhìn thấy cho sao kê (*"coi một dòng sao kê là đã có khi `file_available_at <= as_of_time`"*). S861 cho publish `events.jsonl` một lần ngay từ đầu. Oracle không lọc giao dịch. Đề xuất: không lọc giao dịch theo `event_time` hay `as_of_time` (mọi giao dịch Silver đã commit đều có mặt). Hệ quả: tuổi có thể âm nếu `as_of_time` sớm hơn `event_time` của giao dịch (Q6). Fixture không phân biệt vì mọi `event_time` giao dịch nhỏ hơn `as_of_time` của snapshot sớm nhất.
+**Q4. Phía giao dịch có bị lọc theo `as_of_time` không.** S787 chỉ định nghĩa nhìn thấy cho sao kê (*"coi một dòng sao kê là đã có khi `file_available_at <= as_of_time`"*). S861 cho publish `events.jsonl` một lần ngay từ đầu. Oracle không lọc giao dịch. **Quyết định** (theo đề xuất): không lọc giao dịch theo `event_time` hay `as_of_time` (mọi giao dịch Silver đã commit đều có mặt). Hệ quả: tuổi có thể âm nếu `as_of_time` sớm hơn `event_time` của giao dịch (Q6). Fixture không phân biệt vì mọi `event_time` giao dịch nhỏ hơn `as_of_time` của snapshot sớm nhất.
 
-**Q5. Nguồn của `file_available_at` trong pipeline.** S787 gọi `file_available_at` nằm trong ground truth, còn S868 cấm pipeline đọc file tham chiếu; `statement_deliveries.jsonl` thì nằm trong source manifest. Đề xuất: pipeline đọc `file_available_at` từ `statement_deliveries` đã ingest (ghi vào metadata Bronze/ingest, ADR-0004/T23), không từ ground truth. Cần A/B xác nhận cột này có trong Bronze statements.
+**Q5. Nguồn của `file_available_at` trong pipeline.** S787 gọi `file_available_at` nằm trong ground truth, còn S868 cấm pipeline đọc file tham chiếu: *"Production-like job chỉ đọc file đã ingest theo source manifest, không đọc file tham chiếu statements.jsonl rồi lọc available_at"*. **Quyết định** (thay đề xuất ban đầu dùng `statement_deliveries`): pipeline **không** đọc `statement_deliveries.jsonl` hay ground truth. Một file sao kê có mặt tại `as_of_time` khi biên nhận `_ingest/<delivery_order:09d>.json` do `n06 ingest-statements` (T23) ghi trên MinIO có `file_available_at <= as_of_time`; `file_available_at` lấy từ biên nhận. Nội dung biên nhận có `delivery_order`, `file_available_at`, `file_path`, `manifest_path`, `sha256`, `physical_rows` (`build_receipt_payload`). Việc nạp biên nhận vào cột `file_available_at` của Silver sao kê thuộc T25/ADR-0004b; T33 chỉ nhận cột này.
 
-**Q6. Tuổi âm.** S362: *"(giây, số nguyên, không âm)"*. Với Q4 đề xuất, tuổi âm xảy ra khi `as_of_time < anchor_event_time`. Oracle dùng `max(0, ·)`. Đề xuất: kẹp về 0 như oracle và đếm số khóa bị kẹp như một chỉ số chất lượng; không báo lỗi. Với sao kê do generator sinh, tuổi không âm vì `file_available_at` không nhỏ hơn `available_at` (ADR-0011) và `available_at` không nhỏ hơn `event_time`; điều này chưa được kiểm cho dữ liệu ngoài generator.
+**Q6. Tuổi âm.** S362: *"(giây, số nguyên, không âm)"*. Với Q4 đề xuất, tuổi âm xảy ra khi `as_of_time < anchor_event_time`. Oracle dùng `max(0, ·)`. **Quyết định** (theo đề xuất): kẹp về 0 như oracle và đếm số khóa bị kẹp như một chỉ số chất lượng; không báo lỗi. Với sao kê do generator sinh, tuổi không âm vì `file_available_at` không nhỏ hơn `available_at` (ADR-0011) và `available_at` không nhỏ hơn `event_time`; điều này chưa được kiểm cho dữ liệu ngoài generator.
 
-**Q7. `anchor_event_time` khi nhiều bản ghi nội bộ.** S362: *"`event_time` của giao dịch nội bộ nếu có"*; khóa `DUPLICATE_OR_CONFLICT` có thể có hơn một giao dịch độc lập. Oracle lấy giá trị nhỏ nhất trong giao dịch. Đề xuất: nhỏ nhất của giao dịch; bản ghi bị quarantine không tham gia. Fixture `REF-T009` chỉ có một giao dịch.
+**Q7. `anchor_event_time` khi nhiều bản ghi nội bộ.** S362: *"`event_time` của giao dịch nội bộ nếu có"*; khóa `DUPLICATE_OR_CONFLICT` có thể có hơn một giao dịch độc lập. Oracle lấy giá trị nhỏ nhất trong giao dịch. **Quyết định** (theo đề xuất): nhỏ nhất của giao dịch; bản ghi bị quarantine không tham gia. Fixture `REF-T009` chỉ có một giao dịch.
 
-**Q8. Phân biệt "thiếu thật" và "thiếu do bị quarantine".** S352: *"kết quả đối soát phải phân biệt thiếu thật với thiếu do record bị quarantine qua quality metadata"*. Không nói cơ chế. Đề xuất: khi quality metadata cho biết có record quarantine khôi phục được key trùng match key, `recon_status` vẫn theo bảng D5 (không đổi thứ tự ưu tiên) và `issue_codes` có thêm một mã `COUNTERPART_QUARANTINED` kèm con trỏ nguồn trong child table; khóa không khôi phục được thì không tạo khóa (S334). Cần B và quality (T30–T32) thống nhất trường metadata.
+**Q8. Phân biệt "thiếu thật" và "thiếu do bị quarantine".** S352: *"kết quả đối soát phải phân biệt thiếu thật với thiếu do record bị quarantine qua quality metadata"*. Không nói cơ chế. **Quyết định**: khi quality metadata cho biết có record quarantine khôi phục được key trùng match key, `recon_status` vẫn theo bảng D5 (không đổi thứ tự ưu tiên) và `issue_codes` có thêm mã `COUNTERPART_QUARANTINED`, kèm con trỏ nguồn trong child table. `COUNTERPART_QUARANTINED` là **mã đối soát bổ sung của dự án, không thuộc danh sách 17 mã lỗi hợp đồng ở Phần II mục 8 (S878–S896)**. Khóa không khôi phục được thì không tạo khóa (S334). Trường metadata cụ thể do T30–T32 cung cấp; T33 nhận nó như một đầu vào tùy chọn (`quarantined_keys`), thiếu thì không thêm mã.
 
-**Q9. Định nghĩa `last_evaluated_at`, `first_seen_at`, `resolved_at`.** S361 chỉ nêu tên và *"không reset first_seen_at mỗi lần chạy lại"*; S362 nói "thời gian từ lúc pipeline phát hiện". Không nói đồng hồ nào, `PENDING` có tính "phát hiện" không, và khóa mở lại thì sao. Đề xuất: (a) cả ba dùng `as_of_time` của lần đánh giá, để giữ tái lập và đúng S358 (không dùng đồng hồ hệ thống); thời điểm chạy thật nếu cần ghi ở cột riêng ngoài đối soát; (b) `first_seen_at` = `as_of_time` của lần đánh giá đầu tiên mà khóa có `recon_status != MATCHED` (kể cả `PENDING`), không đổi sau đó; khóa `MATCHED` ngay lần đầu có `first_seen_at` NULL; (c) `resolved_at` = `as_of_time` của lần đầu khóa chuyển sang `MATCHED` sau khi đã có `first_seen_at`; nếu về sau khóa lại lệch thì `resolved_at` về NULL và `first_seen_at` giữ nguyên; (d) chạy lại cùng `as_of_time` không đổi cả hai. Chuỗi nghiệm thu: `REF-T007` có `first_seen_at` = early, `resolved_at` = after_cutoff; `REF-T008` có `first_seen_at` = early, `resolved_at` = late_corrected.
+**Q9. Định nghĩa `last_evaluated_at`, `first_seen_at`, `resolved_at`.** S361 chỉ nêu tên và *"không reset first_seen_at mỗi lần chạy lại"*; S362 nói "thời gian từ lúc pipeline phát hiện". Không nói đồng hồ nào, `PENDING` có tính "phát hiện" không, và khóa mở lại thì sao. **Quyết định** (theo đề xuất): (a) cả ba dùng `as_of_time` của lần đánh giá, để giữ tái lập và đúng S358 (không dùng đồng hồ hệ thống); thời điểm chạy thật nếu cần ghi ở cột riêng ngoài đối soát; (b) `first_seen_at` = `as_of_time` của lần đánh giá đầu tiên mà khóa có `recon_status != MATCHED` (kể cả `PENDING`), không đổi sau đó; khóa `MATCHED` ngay lần đầu có `first_seen_at` NULL; (c) `resolved_at` = `as_of_time` của lần đầu khóa chuyển sang `MATCHED` sau khi đã có `first_seen_at`; nếu về sau khóa lại lệch thì `resolved_at` về NULL và `first_seen_at` giữ nguyên; (d) chạy lại cùng `as_of_time` không đổi cả hai. Chuỗi nghiệm thu: `REF-T007` có `first_seen_at` = early, `resolved_at` = after_cutoff; `REF-T008` có `first_seen_at` = early, `resolved_at` = late_corrected.
 
-**Q10. Cấu hình tập status/channel cần đối soát.** S354: *"Tập status/channel cần đối chiếu phải cấu hình và tài liệu hóa"*. `config/default.toml` chưa có khóa này; không có khóa trong `docs/` hay `config/`. Đề xuất: thêm mục `[reconciliation]` với `statuses` (mặc định `["SUCCESS","FAILED"]`) và `channels` (mặc định hai kênh `SIM_CHANNEL_A`, `SIM_CHANNEL_B`, S680), áp dụng cho cả generator và pipeline; việc thêm khóa thuộc C (`config/`), ngoài ADR này.
+**Q10. Cấu hình tập status/channel cần đối soát.** S354: *"Tập status/channel cần đối chiếu phải cấu hình và tài liệu hóa"*. **Quyết định**: thêm mục `[reconciliation]` vào `config/default.toml` với `statuses` (mặc định `["SUCCESS","FAILED"]`) và `channels` (mặc định `["SIM_CHANNEL_A","SIM_CHANNEL_B"]`, S680); mục này và tài liệu trong `config/README.md` được hiện thực ở **T33** (không phải việc riêng của C).
 
-**Q11. Phạm vi ngày được đánh giá mỗi lần chạy.** S335: *"Cửa sổ đủ rộng và cơ chế chọn ngày phải cho phép statement đến sau vẫn đối chiếu giao dịch ngày cũ"*. Không nêu cơ chế chọn ngày. Đề xuất: P0 đánh giá mọi `business_date` có bản ghi trong đầu vào của dataset tại `as_of_time`; P1 chạy lại các `business_date` của sao kê mới ingest (suy từ `ingest_batches`) cộng mọi khóa còn `PENDING`.
+**Q11. Phạm vi ngày được đánh giá mỗi lần chạy.** S335: *"Cửa sổ đủ rộng và cơ chế chọn ngày phải cho phép statement đến sau vẫn đối chiếu giao dịch ngày cũ"*. Không nêu cơ chế chọn ngày. **Quyết định** (theo đề xuất): P0 đánh giá mọi `business_date` có bản ghi trong đầu vào của dataset tại `as_of_time`; P1 chạy lại các `business_date` của sao kê mới ingest (suy từ `ingest_batches`) cộng mọi khóa còn `PENDING`.
 
-**Q12. Chạy một snapshot cũ sau snapshot mới (P1).** S855 chỉ nói chạy lại **cùng** snapshot không đổi `first_seen_at`. Chạy `as_of_time` sớm hơn khi kết quả hiện tại đã ở `as_of_time` muộn hơn chưa được nói. Đề xuất: từ chối ghi đè kết quả hiện tại bằng `as_of_time` cũ hơn (mã thoát riêng) trừ khi có cờ tường minh; khi có cờ, `first_seen_at = min(hiện có, as_of_time mới)`. Fixture chỉ chạy tăng dần.
+**Q12. Chạy một snapshot cũ sau snapshot mới (P1).** S855 chỉ nói chạy lại **cùng** snapshot không đổi `first_seen_at`. Chạy `as_of_time` sớm hơn khi kết quả hiện tại đã ở `as_of_time` muộn hơn chưa được nói. **Quyết định** (theo đề xuất): từ chối ghi đè kết quả hiện tại bằng `as_of_time` cũ hơn (mã thoát riêng) trừ khi có cờ tường minh; khi có cờ, `first_seen_at = min(hiện có, as_of_time mới)`. Fixture chỉ chạy tăng dần.
 
 ## Phương án đã cân nhắc
 
@@ -157,10 +158,16 @@ Oracle T14 hiện đã hiện thực một số lựa chọn dưới đây. Đ�
 
 ## Hệ quả
 
-- **T33** hiện thực D1–D8 và các lựa chọn Q1–Q8, Q11 sau khi được chốt; kiểm bằng từng khóa của ba snapshot (D5 và bảng kiểm chứng) và `cutoff_cases.json`.
+- **T33** hiện thực D1–D8 và các quyết định Q1–Q8, Q10, Q11; kiểm bằng từng khóa của ba snapshot (D5 và bảng kiểm chứng) và `cutoff_cases.json`.
 - **T34** nghiệm thu ba snapshot tính lại độc lập từ đầu, mỗi snapshot chạy hai lần.
 - **T61** hiện thực D9 và Q9, Q12; thêm cột `first_seen_at`, `resolved_at` vào kết quả hiện tại (migration thuộc người sở hữu schema).
-- **T14 (oracle)**: nếu Q1–Q7 được chốt khác đề xuất thì sửa `tests/harness/oracle.py` và `tests/unit/oracle/` theo; không sửa expected.
+- **T14 (oracle)**: Q1–Q7 chốt theo đề xuất, khớp oracle hiện có; không phải sửa.
 - **T30–T32 (quality)**: cần xuất `key_conflicts` đủ match key (S898) và metadata quarantine theo Q8.
-- **Config** (C): khóa `[reconciliation]` theo Q10.
-- Sau khi Accepted, thêm dòng vào `PROGRESS.md`; ADR này không đổi bất kỳ tệp mã hay fixture nào.
+- **Config**: mục `[reconciliation]` theo Q10, hiện thực ở T33.
+- **T23/T25**: biên nhận `_ingest/` là nguồn `file_available_at` (Q5); T25 phải đưa cột này vào Silver sao kê.
+- ADR này không đổi tệp mã hay fixture nào.
+
+## Lịch sử
+
+- 2026-11-27: soạn, trạng thái Proposed (PR #26).
+- 2026-11-27: Accepted bởi chủ repo (ủy quyền giám sát); Q1–Q4, Q6, Q7, Q9, Q11, Q12 theo đề xuất; D3 và Q5 sửa theo biên nhận `_ingest/`; Q8 thêm `COUNTERPART_QUARANTINED`; Q10 giao T33.

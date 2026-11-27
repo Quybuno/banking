@@ -1,9 +1,10 @@
 # ADR-0007: Cách đo benchmark và định dạng file kết quả (E1–E8)
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: C (soạn bởi agent theo `docs/TASKS.md` mục 3, ADR-007), chờ người duyệt
 - Người duyệt: A, B
 - Ngày: 2026-11-27
+- Đã duyệt (Accepted): chủ repo (ủy quyền giám sát), 2026-11-27
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 14.1–14.3 (S589–S632), mục 2 (S183–S187), M5 và M6 (S516–S530), kiểm thử S574; Phần II mục 5.1 (HOT_ACCOUNT_V1), 1.16 (S692).
 
 Ký hiệu `S<dòng>` là số dòng trong `docs/spec.md` bản 1.2. ADR này dùng cho T51 (lệnh `n06 benchmark`), T52 (chạy E1–E5), T63 (E6), T64 (E7), T65 (E8) và T53 (báo cáo). Phạm vi dự án là P0 + P1 đầy đủ: E1–E5 (P0) và E6–E8 (P1) đều phải có số đo, không rút gọn.
@@ -222,27 +223,29 @@ Mức 100.000 (12 lần) và 5.000.000 (4 lần) tính riêng sau khi có `t_ch�
 
 **Dung lượng:** sinh dữ liệu chiếm 399,3 MB ở 100.000 (**đo**), khoảng 4,0 GB ở 1.000.000 và khoảng 20,0 GB ở 5.000.000 (**ngoại suy** từ 3.992,8 B/giao dịch, chưa đo ở hai mức này), chưa tính phần pipeline (Kafka, MinIO các tầng, Postgres, Spark spill; **chưa đo**). Chỗ trống đo được: 36 GB ở ổ D, trừ dự trữ 8 GB còn khoảng 28 GB. Hệ quả cho lịch: không giữ đồng thời nhiều dataset lớn; sinh, đo, xóa lần lượt; 5.000.000 chỉ tối đa 8 GB dư cho phần pipeline sau khi sinh dữ liệu, mà phần pipeline chưa có số đo, nên E1 5.000.000 là mức rủi ro cao nhất và phải theo quy tắc B7.
 
-## Câu hỏi mở (cần người duyệt chốt; đề xuất không phải quyết định)
+## Quyết định đã chốt cho các câu hỏi Q1–Q10
 
-**Q1. Cấu hình gốc (baseline) của Spark.** S595: *"Cấu hình gốc (baseline) được chốt một lần sau M4 và dùng chung cho mọi thí nghiệm."* Hai tệp trong repo khác nhau: `config/default.toml` (`local[2]`, driver 2g, `kafka.num_partitions = 3`) và `config/benchmark.toml` (`local[4]`, driver 4g, `kafka.num_partitions = 6`). Đề xuất: cấu hình gốc là `config/benchmark.toml` đang có, nhưng chốt sau một lần chạy thử 1.000.000 giao dịch đo peak RAM; nếu tổng RAM đã dùng của máy vượt 85% `ram_total_mb` hoặc có swap, hạ `driver_memory` (và ghi) trước khi chốt. Ghi `config_hash` của cấu hình gốc vào `environment.json` và không đổi sau đó. Ghi chú: ở chế độ local, `executor_memory` không có tác dụng riêng (executor nằm trong JVM của driver) theo tài liệu Spark; chưa kiểm trong repo.
+Chủ repo (ủy quyền giám sát) duyệt ngày 2026-11-27: Q1 theo đề xuất kèm điều kiện ghi ở Q1; Q2–Q9 **theo đúng đề xuất**; Q10 và DuckDB chốt như ghi riêng. Trích dẫn đặc tả giữ nguyên như lúc đặt câu hỏi.
 
-**Q2. Ý nghĩa "lặp ít nhất 3 lần" và warm-up.** S614: *"Mỗi cấu hình lặp ít nhất 3 lần nếu tài nguyên cho phép [...] Tách warm-up, cold/warm cache và lần lỗi khỏi lần đo ổn định."* Không nói warm-up có tính vào 3 lần không. Đề xuất: không (1 warm-up cộng ≥ 3 lần đo), nên 4 lần/cấu hình tối thiểu. Nếu tài nguyên không cho phép, người chạy ghi `n_counted < 3` và lý do.
+**Q1. Cấu hình gốc (baseline) của Spark.** S595: *"Cấu hình gốc (baseline) được chốt một lần sau M4 và dùng chung cho mọi thí nghiệm."* Hai tệp trong repo khác nhau: `config/default.toml` (`local[2]`, driver 2g, `kafka.num_partitions = 3`) và `config/benchmark.toml` (`local[4]`, driver 4g, `kafka.num_partitions = 6`). **Quyết định** (theo đề xuất): cấu hình gốc là `config/benchmark.toml` đang có, nhưng chốt sau một lần chạy thử 1.000.000 giao dịch đo peak RAM; nếu tổng RAM đã dùng của máy vượt 85% `ram_total_mb` hoặc có swap, hạ `driver_memory` (và ghi) trước khi chốt. Ghi `config_hash` của cấu hình gốc vào `environment.json` và không đổi sau đó. Ghi chú: ở chế độ local, `executor_memory` không có tác dụng riêng (executor nằm trong JVM của driver) theo tài liệu Spark; chưa kiểm trong repo. Hai điều kiện đi kèm: `config_hash` của cấu hình gốc có trong **mỗi** dòng kết quả (cột `config_hash`, B8), và việc hạ `driver_memory` nếu có phải được ghi lại (trong `environment.json` và `noise_note`/`config_json` của các dòng).
 
-**Q3. Số lần chạy bù khi lần đo bị loại.** Đặc tả không nói. Đề xuất tối đa 2 lần mỗi cấu hình (B2 mục 5); quá đó báo `n_counted < 3`.
+**Q2. Ý nghĩa "lặp ít nhất 3 lần" và warm-up.** S614: *"Mỗi cấu hình lặp ít nhất 3 lần nếu tài nguyên cho phép [...] Tách warm-up, cold/warm cache và lần lỗi khỏi lần đo ổn định."* Không nói warm-up có tính vào 3 lần không. **Quyết định** (theo đề xuất): không (1 warm-up cộng ≥ 3 lần đo), nên 4 lần/cấu hình tối thiểu. Nếu tài nguyên không cho phép, người chạy ghi `n_counted < 3` và lý do.
 
-**Q4. Cột và truy vấn cụ thể của "ba truy vấn cố định".** S602 chỉ ghi: *"đếm toàn bộ, tổng hợp trên hai cột, lọc một `business_date`"*. Chưa có lược đồ Silver giao dịch (ADR-0004 chỉ phủ Raw và Bronze). Đề xuất Q-A, Q-B, Q-C ở B4; xác nhận khi lược đồ Silver được chốt.
+**Q3. Số lần chạy bù khi lần đo bị loại.** Đặc tả không nói. Đề xuất tối đa 2 lần mỗi cấu hình (B2 mục 5); quá đó báo `n_counted < 3`. **Quyết định: theo đề xuất.**
 
-**Q5. E8: Spark đọc từ đâu.** S610: *"cùng bản Silver Parquet đã commit"*; S606 cấu hình gốc Spark đọc qua S3A/MinIO. DuckDB không thể dùng S3 mà không tải extension lúc chạy (trái S187). Đề xuất: cả hai đọc cùng bản sao cục bộ làm hàng chính, thêm một hàng phụ "Spark qua S3A" (báo riêng, không thay hàng chính). Người duyệt cho biết có chấp nhận cách này hay muốn đóng gói extension `httpfs` vào image (cần kiểm tải offline, chưa kiểm).
+**Q4. Cột và truy vấn cụ thể của "ba truy vấn cố định".** S602 chỉ ghi: *"đếm toàn bộ, tổng hợp trên hai cột, lọc một `business_date`"*. Chưa có lược đồ Silver giao dịch (ADR-0004 chỉ phủ Raw và Bronze). Đề xuất Q-A, Q-B, Q-C ở B4; xác nhận khi lược đồ Silver được chốt. **Quyết định: theo đề xuất.**
 
-**Q6. Nén của E4.** S602 yêu cầu "cùng nội dung"; không nói codec. Đề xuất: JSON không nén và Parquet với codec mặc định của Spark 3.5.8 (snappy), ghi `codec` vào hàng; chạy thêm hàng phụ JSON nén gzip nếu muốn tách ảnh hưởng nén (không bắt buộc).
+**Q5. E8: Spark đọc từ đâu.** S610: *"cùng bản Silver Parquet đã commit"*; S606 cấu hình gốc Spark đọc qua S3A/MinIO. DuckDB không thể dùng S3 mà không tải extension lúc chạy (trái S187). **Quyết định** (theo đề xuất): cả hai đọc cùng bản sao cục bộ làm hàng chính, thêm một hàng phụ "Spark qua S3A" (báo riêng, không thay hàng chính). Người duyệt cho biết có chấp nhận cách này hay muốn đóng gói extension `httpfs` vào image (cần kiểm tải offline, chưa kiểm).
 
-**Q7. Mức "đủ mẫu" của p50/p95/p99.** S622: *"Báo p50/p95/p99 khi có đủ mẫu"*. Đề xuất ngưỡng 100 và 1.000 mẫu (B3), đặt thành tham số.
+**Q6. Nén của E4.** S602 yêu cầu "cùng nội dung"; không nói codec. **Quyết định** (theo đề xuất): JSON không nén và Parquet với codec mặc định của Spark 3.5.8 (snappy), ghi `codec` vào hàng; chạy thêm hàng phụ JSON nén gzip nếu muốn tách ảnh hưởng nén (không bắt buộc).
 
-**Q8. Vùng đo RAM của DuckDB và Spark.** S606 ghi "peak RAM". Spark local chạy trong JVM, DuckDB trong tiến trình Python; so tổng RSS tiến trình đo (không cả máy) để công bằng. Đề xuất `ram_scope = process_tree` cho E8 và `host` cho E1–E7.
+**Q7. Mức "đủ mẫu" của p50/p95/p99.** S622: *"Báo p50/p95/p99 khi có đủ mẫu"*. Đề xuất ngưỡng 100 và 1.000 mẫu (B3), đặt thành tham số. **Quyết định: theo đề xuất.**
 
-**Q9. Ngưỡng nhiễu tự động.** Máy dùng chung với các phiên khác (RAM khả dụng đã chỉ 3.601 MB lúc kiểm). Đề xuất: ghi swap và RAM khả dụng trước mỗi lần; lần có `swap_peak_mb > 0` hoặc RAM khả dụng đầu lần dưới `driver_memory + 2 GB` được đánh `noise` và chạy lại (không vào `counted`). Ngưỡng cần người duyệt chốt vì phụ thuộc cấu hình gốc (Q1).
+**Q8. Vùng đo RAM của DuckDB và Spark.** S606 ghi "peak RAM". Spark local chạy trong JVM, DuckDB trong tiến trình Python; so tổng RSS tiến trình đo (không cả máy) để công bằng. Đề xuất `ram_scope = process_tree` cho E8 và `host` cho E1–E7. **Quyết định: theo đề xuất.**
 
-**Q10. Biểu đồ.** S628 yêu cầu "cùng biểu đồ" nhưng không nói công cụ. Đề xuất sinh PNG từ `summary.csv` bằng matplotlib (phụ thuộc mới, cần chốt ở T51/T53) hoặc dùng công cụ ngoài không là phụ thuộc runtime; chưa chọn.
+**Q9. Ngưỡng nhiễu tự động.** Máy dùng chung với các phiên khác (RAM khả dụng đã chỉ 3.601 MB lúc kiểm). **Quyết định** (theo đề xuất): ghi swap và RAM khả dụng trước mỗi lần; lần có `swap_peak_mb > 0` hoặc RAM khả dụng đầu lần dưới `driver_memory + 2 GB` được đánh `noise` và chạy lại (không vào `counted`). Ngưỡng cần người duyệt chốt vì phụ thuộc cấu hình gốc (Q1).
+
+**Q10. Biểu đồ và phụ thuộc mới.** S628 yêu cầu "cùng biểu đồ" nhưng không nói công cụ. **Quyết định**: dùng `matplotlib` cho `charts/*.png`, và `duckdb==1.5.6` cho E8 (dòng 1.x ổn định; 2.0.x mới ra 2026-10 và 2026-11, xem bảng ứng viên ở B5), cả hai trong nhóm tùy chọn `benchmark` của `pyproject.toml`. Phiên bản `matplotlib`: bản ổn định mới nhất hỗ trợ cp311 tại thời điểm hiện thực, ghi nguồn PyPI và ngày truy vấn vào `docs/compatibility-matrix.md`. `pyproject.toml` và `uv.lock` chỉ sửa ở task hiện thực (T51 cho `matplotlib`, T65 cho `duckdb`), **không** sửa ở PR của ADR này.
 
 ## Phương án đã cân nhắc
 
@@ -258,7 +261,12 @@ Mức 100.000 (12 lần) và 5.000.000 (4 lần) tính riêng sau khi có `t_ch�
 
 - **T51** hiện thực B2, B3, B6, B7, B8, B9: lấy mẫu CPU/RAM theo chuỗi thời gian, đọc Spark event log, ghi `runs.*`, `metrics.csv`, `summary.*`, `not_run.csv`, `timeseries/`, `environment.json`; gọi harness ground truth qua tiến trình con. Thêm khóa `benchmark.tiny_file_bytes`, `benchmark.sample_interval_seconds` vào `config/` (C).
 - **T52, T63, T64, T65** chạy đúng ma trận B1; mỗi cấu hình theo B2; T65 cần phụ thuộc DuckDB (B5) và Silver Parquet đã commit.
-- **Phụ thuộc DuckDB:** PR riêng sửa `pyproject.toml`, `uv.lock`, `docs/compatibility-matrix.md` sau khi người duyệt chốt phiên bản và chạy kiểm B5 (cài thử, đọc Parquet Spark, RAM). Không thuộc PR này.
-- **`config/benchmark.toml`** có thể phải đổi sau khi Q1 được chốt (thuộc C).
+- **Phụ thuộc DuckDB và matplotlib:** `duckdb==1.5.6` (T65) và `matplotlib` (T51) vào nhóm tùy chọn `benchmark` của `pyproject.toml`, `uv.lock` và `docs/compatibility-matrix.md` ở task hiện thực, kèm kiểm B5 (cài thử, đọc Parquet Spark, RAM). Không thuộc PR của ADR này.
+- **`config/benchmark.toml`** là cấu hình gốc (Q1); chỉ đổi `driver_memory` nếu lần chạy thử 1M cho thấy RAM dùng >85% hoặc có swap, và ghi lại (thuộc C).
 - **Báo cáo (T53):** bảng kết quả chỉ từ `summary.csv`; mục "giới hạn" nêu E8 và mọi kết quả chỉ áp dụng cho máy một node đã ghi, dữ liệu mô phỏng (S632).
-- **`PROGRESS.md`:** sau khi Accepted, thêm dòng ghi quyết định cấu hình gốc và `config_hash` của nó.
+- **`PROGRESS.md`:** thêm dòng ghi `config_hash` của cấu hình gốc sau lần chạy thử 1M.
+
+## Lịch sử
+
+- 2026-11-27: soạn, trạng thái Proposed (PR #26).
+- 2026-11-27: Accepted bởi chủ repo (ủy quyền giám sát); Q1 baseline = `config/benchmark.toml`; Q2–Q9 theo đề xuất; Q10: `matplotlib` và `duckdb==1.5.6` trong nhóm `benchmark`, thêm vào lockfile ở T51/T65.
