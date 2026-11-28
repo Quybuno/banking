@@ -41,6 +41,7 @@ from n06.storage import (
     CommitError,
     ControlStore,
     IngestBatchRecord,
+    SnapshotSpec,
     connect_control_store,
     generate_run_id,
 )
@@ -698,19 +699,21 @@ def _build_and_write(
         config_hash_value=plan.config_hash(cfg),
         entity_digests=state.digests,
     )
-    snapshots = []
-    for item in state.written:
-        snap = coordinator.commit_run(
-            run_id=run_id,
-            dataset_id=dataset_id,
-            layer=item.layer,
-            entity=item.entity,
-            business_date=item.business_date,
-            output_path=item.path,
-            row_count=total_rows,
-            semantic_hash=semantic_hash,
-        )
-        snapshots.append(snap)
+    snapshots = coordinator.commit_run_snapshots(
+        run_id=run_id,
+        dataset_id=dataset_id,
+        snapshots=[
+            SnapshotSpec(
+                layer=item.layer,
+                entity=item.entity,
+                business_date=item.business_date,
+                output_path=item.path,
+            )
+            for item in state.written
+        ],
+        row_count=total_rows,
+        semantic_hash=semantic_hash,
+    )
 
     # Đếm trên toàn dataset: `--business-date` chỉ lọc phần được ghi, không lọc đối soát.
     counters = reconciliation.quality_counters(recon_all)

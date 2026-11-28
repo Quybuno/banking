@@ -29,6 +29,7 @@ from n06.storage import (
     CommitError,
     ControlStore,
     PsqlCliControlStore,
+    SnapshotSpec,
     connect_control_store,
     make_compose_psql_runner,
 )
@@ -324,3 +325,114 @@ def test_commit_lifecycle_atomicity_rerun_and_concurrency() -> None:
                 f"DELETE FROM runs WHERE dataset_id = '{dataset_id}';",
             ]
         )
+
+
+def test_commit_run_snapshots_atomic_both_stores_no_mixing() -> None:
+    """Chết giữa chừng khi commit nhiều snapshot -> rollback toàn bộ, không trộn hai run."""
+    cfg = _load_control_db_config()
+    primary_store, sql_exec = _control_store_and_sql_or_skip()
+    stores: list[ControlStore] = [primary_store]
+    docker_bin = shutil.which("docker")
+    if docker_bin is not None and not isinstance(primary_store, PsqlCliControlStore):
+        runner = make_compose_psql_runner(
+            cfg,
+            docker_bin=docker_bin,
+            compose_file=COMPOSE_FILE,
+            repo_root=REPO_ROOT,
+        )
+        stores.append(PsqlCliControlStore(cfg, psql_runner=runner))
+
+    for idx, store in enumerate(stores):
+        dataset_id = f"it-atomic-{idx}-{uuid.uuid4().hex[:8]}"
+        biz_date = date(2026, 1, 1)
+        run1 = f"run-a1-{uuid.uuid4().hex[:8]}"
+        run2 = f"run-a2-{uuid.uuid4().hex[:8]}"
+        coord = BatchCommitCoordinator(store)
+        try:
+            for rid in (run1, run2):
+                coord.start_run(
+                    run_id=rid,
+                    dataset_id=dataset_id,
+                    job_name="process_day",
+                    profile="test",
+                    business_date_from=biz_date,
+                    business_date_to=biz_date,
+                    input_versions=["b1"],
+                    config_hash="cfg-1",
+                    schema_version="1.0.0",
+                    rule_version="1.0.0",
+                    code_version="v1",
+                )
+            snaps1 = [
+                SnapshotSpec(
+                    "silver",
+                    "transactions",
+                    biz_date,
+                    f"s3a://b/silver/{dataset_id}/transactions/run_id={run1}/business_date=2026-01-01",
+                ),
+                SnapshotSpec(
+                    "gold",
+                    "fact_transactions",
+                    biz_date,
+                    f"s3a://b/gold/{dataset_id}/fact_transactions/run_id={run1}/business_date=2026-01-01",
+                ),
+                SnapshotSpec(
+                    "gold",
+                    "fact_reconciliation",
+                    biz_date,
+                    f"s3a://b/gold/{dataset_id}/fact_reconciliation/run_id={run1}/business_date=2026-01-01",
+                ),
+            ]
+            coord.commit_run_snapshots(
+                run_id=run1,
+                dataset_id=dataset_id,
+                snapshots=snaps1,
+                row_count=10,
+                semantic_hash="hash-1",
+            )
+
+            # Mô phỏng lỗi ngay giữa transaction (sau UPDATE runs, trong lúc ghi snapshot).
+            bad_snaps = [
+                SnapshotSpec(
+                    "silver",
+                    "transactions",
+                    biz_date,
+                    f"s3a://b/silver/{dataset_id}/transactions/run_id={run2}/business_date=2026-01-01",
+                ),
+                SnapshotSpec(
+                    "gold",
+                    None,  # type: ignore[arg-type]  # vi phạm NOT NULL ở snapshot thứ 2
+                    biz_date,
+                    f"s3a://b/gold/{dataset_id}/fact_transactions/run_id={run2}/business_date=2026-01-01",
+                ),
+            ]
+            with pytest.raises(CommitError):
+                coord.commit_run_snapshots(
+                    run_id=run2,
+                    dataset_id=dataset_id,
+                    snapshots=bad_snaps,
+                    row_count=20,
+                    semantic_hash="hash-2",
+                )
+
+            run2_rec = store.get_run(run2)
+            assert run2_rec is not None and run2_rec.status == "RUNNING"
+            for layer, entity in (
+                ("silver", "transactions"),
+                ("gold", "fact_transactions"),
+                ("gold", "fact_reconciliation"),
+            ):
+                cur = coord.resolve_current_snapshot(
+                    dataset_id=dataset_id,
+                    layer=layer,
+                    entity=entity,
+                    business_date=biz_date,
+                )
+                assert cur is not None and cur.run_id == run1
+        finally:
+            sql_exec.execute_in_transaction(
+                [
+                    f"DELETE FROM current_snapshot WHERE dataset_id = '{dataset_id}';",
+                    f"DELETE FROM runs WHERE dataset_id = '{dataset_id}';",
+                ]
+            )
