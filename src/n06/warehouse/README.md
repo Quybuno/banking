@@ -16,6 +16,8 @@
 | `migrations.py` | `migrate_mart_up/down` dùng lại trình chạy của `n06.control`, thư mục `sql/migrations/mart`. |
 | `runner.py` | `SqlRunner` (`psql` qua stdin, `ON_ERROR_STOP=1`), `make_psql_runner`, `with_params`. |
 | `publish.py` | `MartPublisher`: staging, kiểm tra, publish một transaction. |
+| `load_mart.py` | Logic thuần của `n06 load-mart` (T26): lập kế hoạch đọc `current_snapshot`, dựng `dim_date`/`dim_channel`/`dim_transaction_type`, chuẩn hóa dòng Spark. |
+| `load_mart_job.py` | Job Spark chạy trong container (`spark-submit`): đọc Gold Parquet đã commit theo `current_snapshot`, nạp staging + publish qua `MartPublisher`, cập nhật `runs.status = 'MART_PUBLISHED'`. |
 
 ### Migration mart
 
@@ -43,5 +45,5 @@ Giá trị dữ liệu đi qua biến psql `:'params'` (JSON); tiền phải là
 ### Điểm cần biết khi nối T26/T40
 
 - Phạm vi thay thế chỉ theo `business_date` của dòng. Nếu output mới đưa một khóa về một `business_date` trong phạm vi trong khi dòng cũ của khóa đó nằm ngoài phạm vi, `INSERT` vi phạm PK và cả transaction rollback (không tự xóa dòng ngoài phạm vi). ADR-0005 mục 4 chưa quy định trường hợp này.
-- `dim_date`, `dim_channel`, `dim_transaction_type` do đầu vào cung cấp (upsert); migration không seed dữ liệu.
-- Cập nhật trạng thái `MART_PUBLISHED` ở control DB (ADR-0005 mục 4.4) thuộc lệnh `load-mart` (T26), chưa nằm ở đây.
+- `dim_date`, `dim_channel`, `dim_transaction_type` được `n06 load-mart` (T26) dựng tự động từ dữ liệu fact trong phạm vi ngày và upsert trong cùng transaction.
+- Cập nhật trạng thái `runs.status = 'MART_PUBLISHED'` ở control DB (ADR-0005 mục 4.4) được `n06 load-mart` (T26) thực hiện **sau khi** transaction mart commit thành công.

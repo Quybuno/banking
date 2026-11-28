@@ -64,7 +64,7 @@ def test_values_travel_on_stdin_only(monkeypatch: pytest.MonkeyPatch) -> None:
         },
         ensure_ascii=False,
     )
-    calls = _capture(monkeypatch, ["", "[]", "", run_row, "", "", "", ""])
+    calls = _capture(monkeypatch, ["", "[]", "", run_row, "", "", "", "", "[]", ""])
     store = PsqlCliControlStore(CONFIG)
     store.upsert_ingest_batch(
         IngestBatchRecord(
@@ -117,8 +117,16 @@ def test_values_travel_on_stdin_only(monkeypatch: pytest.MonkeyPatch) -> None:
         entity=MARKER,
         business_date=date(2026, 1, 1),
     )
+    store.list_current_snapshots(
+        dataset_id=MARKER,
+        layer=MARKER,
+        entity=MARKER,
+        business_date_from=date(2026, 1, 1),
+        business_date_to=date(2026, 1, 2),
+    )
+    store.mark_run_mart_published(run_id=MARKER)
 
-    assert len(calls) == 8
+    assert len(calls) == 10
     _assert_stdin_only(calls)
 
 

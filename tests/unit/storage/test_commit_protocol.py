@@ -173,6 +173,56 @@ class _InMemoryControlStore:
             key=lambda b: b.batch_id,
         )
 
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | None = None,
+        business_date_to: date | None = None,
+    ) -> list[SnapshotRecord]:
+        out: list[SnapshotRecord] = []
+        for snap in self.snapshots.values():
+            if snap.dataset_id != dataset_id or snap.layer != layer:
+                continue
+            if entity is not None and snap.entity != entity:
+                continue
+            if business_date_from is not None and snap.business_date < business_date_from:
+                continue
+            if business_date_to is not None and snap.business_date > business_date_to:
+                continue
+            run = self.runs.get(snap.run_id)
+            if run is None or run.status not in COMMITTED_RUN_STATUSES:
+                continue
+            out.append(snap)
+        return sorted(out, key=lambda s: (s.entity, s.business_date))
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        with self._lock:
+            existing = self.runs.get(run_id)
+            if existing is None:
+                raise CommitError(f"Không tìm thấy run_id '{run_id}'")
+            if existing.status not in COMMITTED_RUN_STATUSES:
+                raise RunStateError(f"Trạng thái không hợp lệ: {existing.status}")
+            self.runs[run_id] = RunRecord(
+                run_id=existing.run_id,
+                dataset_id=existing.dataset_id,
+                job_name=existing.job_name,
+                profile=existing.profile,
+                business_date_from=existing.business_date_from,
+                business_date_to=existing.business_date_to,
+                status="MART_PUBLISHED",
+                row_count=existing.row_count,
+                input_versions=existing.input_versions,
+                config_hash=existing.config_hash,
+                schema_version=existing.schema_version,
+                rule_version=existing.rule_version,
+                code_version=existing.code_version,
+                semantic_hash=existing.semantic_hash,
+                error_summary=existing.error_summary,
+            )
+
 
 def test_build_run_output_path_follows_adr_0002() -> None:
     # Expected viết tay theo ADR-0002 mục 3, không lấy từ chính hàm đang test.
