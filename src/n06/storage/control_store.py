@@ -6,8 +6,8 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
@@ -80,6 +80,21 @@ class IngestBatchRecord:
     status: str
 
 
+@dataclass(frozen=True)
+class QualityMetricRecord:
+    """Một bản ghi chỉ số chất lượng trong bảng `quality_metrics` (ADR-0003, T32)."""
+
+    run_id: str
+    dataset_id: str
+    layer: str
+    entity: str
+    business_date: date
+    metric_name: str
+    metric_value: int
+    status: str = "PASS"
+    details: dict[str, Any] = field(default_factory=dict)
+
+
 class ControlStore(Protocol):
     """Giao diện lưu trữ Control DB cho `BatchCommitCoordinator`."""
 
@@ -124,6 +139,26 @@ class ControlStore(Protocol):
 
     def list_committed_ingest_batches(self, *, query_name: str) -> list[IngestBatchRecord]:
         """Liệt kê các `ingest_batches` đã commit của một query, theo `batch_id`."""
+
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | None = None,
+        business_date_to: date | None = None,
+    ) -> list[SnapshotRecord]:
+        """Liệt kê snapshot hiện hành đã commit theo `dataset_id`, `layer` và bộ lọc tùy chọn."""
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        """Đánh dấu run đã commit là `MART_PUBLISHED` (idempotent nếu đã ở trạng thái này)."""
+
+    def upsert_quality_metrics(self, metrics: Sequence[QualityMetricRecord]) -> None:
+        """Ghi các chỉ số chất lượng của một run vào bảng `quality_metrics` (idempotent)."""
+
+    def list_quality_metrics(self, *, run_id: str) -> list[QualityMetricRecord]:
+        """Đọc danh sách `quality_metrics` đã lưu của một `run_id`."""
 
 
 def _scope_key(dataset_id: str, layer: str, entity: str, business_date: date) -> str:
@@ -545,6 +580,165 @@ class PsycopgControlStore:
         finally:
             conn.close()
 
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | None = None,
+        business_date_to: date | None = None,
+    ) -> list[SnapshotRecord]:
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT cs.dataset_id, cs.layer, cs.entity, cs.business_date,
+                           cs.run_id, cs.output_path, cs.manifest_path, cs.semantic_hash
+                    FROM current_snapshot cs
+                    JOIN runs r ON r.run_id = cs.run_id
+                    WHERE cs.dataset_id = %s
+                      AND cs.layer = %s
+                      AND r.status IN ('SUCCEEDED', 'GOLD_COMMITTED', 'MART_PUBLISHED')
+                      AND (%s::text IS NULL OR cs.entity = %s)
+                      AND (%s::date IS NULL OR cs.business_date >= %s)
+                      AND (%s::date IS NULL OR cs.business_date <= %s)
+                    ORDER BY cs.entity ASC, cs.business_date ASC;
+                    """,
+                    (
+                        dataset_id,
+                        layer,
+                        entity,
+                        entity,
+                        business_date_from,
+                        business_date_from,
+                        business_date_to,
+                        business_date_to,
+                    ),
+                )
+                rows = cur.fetchall()
+            out: list[SnapshotRecord] = []
+            for row in rows:
+                biz_date = _to_date(row[3])
+                assert biz_date is not None
+                out.append(
+                    SnapshotRecord(
+                        dataset_id=row[0],
+                        layer=row[1],
+                        entity=row[2],
+                        business_date=biz_date,
+                        run_id=row[4],
+                        output_path=row[5],
+                        manifest_path=row[6],
+                        semantic_hash=row[7],
+                    )
+                )
+            return out
+        finally:
+            conn.close()
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM runs WHERE run_id = %s FOR UPDATE;", (run_id,))
+                existing = cur.fetchone()
+                if existing is None:
+                    raise RunNotFoundError(f"Không tìm thấy run_id '{run_id}'.")
+                status = existing[0]
+                if status not in COMMITTED_RUN_STATUSES:
+                    raise RunStateError(
+                        f"Không thể đánh dấu MART_PUBLISHED cho run '{run_id}' đang ở '{status}'."
+                    )
+                cur.execute(
+                    "UPDATE runs SET status = 'MART_PUBLISHED' WHERE run_id = %s;",
+                    (run_id,),
+                )
+            conn.commit()
+        except CommitError:
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise CommitError(f"mark_run_mart_published thất bại cho '{run_id}': {exc}") from exc
+        finally:
+            conn.close()
+
+    def upsert_quality_metrics(self, metrics: Sequence[QualityMetricRecord]) -> None:
+        if not metrics:
+            return
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                for m in metrics:
+                    cur.execute(
+                        """
+                        INSERT INTO quality_metrics (
+                            run_id, dataset_id, layer, entity, business_date,
+                            metric_name, metric_value, status, details
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        ON CONFLICT (run_id, layer, entity, business_date, metric_name) DO UPDATE
+                            SET metric_value = EXCLUDED.metric_value,
+                                status = EXCLUDED.status,
+                                details = EXCLUDED.details;
+                        """,
+                        (
+                            m.run_id,
+                            m.dataset_id,
+                            m.layer,
+                            m.entity,
+                            m.business_date,
+                            m.metric_name,
+                            m.metric_value,
+                            m.status,
+                            json.dumps(m.details, ensure_ascii=False),
+                        ),
+                    )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise CommitError(f"upsert_quality_metrics thất bại: {exc}") from exc
+        finally:
+            conn.close()
+
+    def list_quality_metrics(self, *, run_id: str) -> list[QualityMetricRecord]:
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT run_id, dataset_id, layer, entity, business_date,
+                           metric_name, metric_value, status, details
+                    FROM quality_metrics
+                    WHERE run_id = %s
+                    ORDER BY business_date ASC, layer ASC, entity ASC, metric_name ASC;
+                    """,
+                    (run_id,),
+                )
+                rows = cur.fetchall()
+            out: list[QualityMetricRecord] = []
+            for row in rows:
+                biz_date = _to_date(row[4])
+                assert biz_date is not None
+                details = json.loads(row[8]) if isinstance(row[8], str) else dict(row[8] or {})
+                out.append(
+                    QualityMetricRecord(
+                        run_id=row[0],
+                        dataset_id=row[1],
+                        layer=row[2],
+                        entity=row[3],
+                        business_date=biz_date,
+                        metric_name=row[5],
+                        metric_value=int(row[6]),
+                        status=row[7],
+                        details=details,
+                    )
+                )
+            return out
+        finally:
+            conn.close()
+
 
 # Mọi giá trị đi vào SQL bằng MỘT biến JSON của psql, không ghép vào chuỗi câu lệnh (ADR-0012
 # quyết định 1). Biến được đặt bằng `\set` ở đầu kịch bản gửi qua **stdin**, nên giá trị không nằm
@@ -722,6 +916,79 @@ SELECT COALESCE(
                topic_offsets, record_count, raw_path, bronze_path, status
         FROM ingest_batches
         WHERE query_name = {_PARAMS}->>'query_name' AND status = 'COMMITTED'
+    ) t),
+    '[]'
+);
+"""
+
+_LIST_SNAPSHOTS_SQL = f"""
+SELECT COALESCE(
+    (SELECT json_agg(t ORDER BY entity ASC, business_date ASC)::text FROM (
+        SELECT cs.dataset_id, cs.layer, cs.entity, cs.business_date::text AS business_date,
+               cs.run_id, cs.output_path, cs.manifest_path, cs.semantic_hash
+        FROM current_snapshot cs
+        JOIN runs r ON r.run_id = cs.run_id
+        WHERE cs.dataset_id = {_PARAMS}->>'dataset_id'
+          AND cs.layer = {_PARAMS}->>'layer'
+          AND r.status IN {_COMMITTED_SQL}
+          AND (({_PARAMS}->>'entity') IS NULL OR cs.entity = {_PARAMS}->>'entity')
+          AND (({_PARAMS}->>'date_from') IS NULL
+               OR cs.business_date >= ({_PARAMS}->>'date_from')::date)
+          AND (({_PARAMS}->>'date_to') IS NULL
+               OR cs.business_date <= ({_PARAMS}->>'date_to')::date)
+    ) t),
+    '[]'
+);
+"""
+
+_MARK_MART_PUBLISHED_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+DO $$
+DECLARE
+    v jsonb;
+    v_status TEXT;
+BEGIN
+    SELECT j INTO v FROM n06_params;
+    SELECT status INTO v_status FROM runs WHERE run_id = v->>'run_id' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run_id % not found', v->>'run_id';
+    END IF;
+    IF v_status NOT IN {_COMMITTED_SQL} THEN
+        RAISE EXCEPTION 'cannot mark run_id % MART_PUBLISHED from status %',
+            v->>'run_id', v_status;
+    END IF;
+    UPDATE runs SET status = 'MART_PUBLISHED' WHERE run_id = v->>'run_id';
+END $$;
+COMMIT;
+"""
+
+_UPSERT_QUALITY_METRICS_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+INSERT INTO quality_metrics (
+    run_id, dataset_id, layer, entity, business_date,
+    metric_name, metric_value, status, details
+)
+SELECT m->>'run_id', m->>'dataset_id', m->>'layer', m->>'entity',
+       (m->>'business_date')::date, m->>'metric_name', (m->>'metric_value')::bigint,
+       m->>'status', COALESCE(m->'details', '{{}}'::jsonb)
+FROM n06_params, jsonb_array_elements(j->'metrics') AS m
+ON CONFLICT (run_id, layer, entity, business_date, metric_name) DO UPDATE
+    SET metric_value = EXCLUDED.metric_value,
+        status = EXCLUDED.status,
+        details = EXCLUDED.details;
+COMMIT;
+"""
+
+_LIST_QUALITY_METRICS_SQL = f"""
+SELECT COALESCE(
+    (SELECT json_agg(t ORDER BY business_date ASC, layer ASC, entity ASC, metric_name ASC)::text
+     FROM (
+        SELECT run_id, dataset_id, layer, entity, business_date::text AS business_date,
+               metric_name, metric_value, status, details
+        FROM quality_metrics
+        WHERE run_id = {_PARAMS}->>'run_id'
     ) t),
     '[]'
 );
@@ -958,6 +1225,90 @@ class PsqlCliControlStore:
             _LIST_INGEST_SQL, tuples_only=True, params={"query_name": query_name}
         ).strip()
         return [_ingest_record(row) for row in json.loads(raw or "[]")]
+
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | None = None,
+        business_date_to: date | None = None,
+    ) -> list[SnapshotRecord]:
+        raw = self._run_sql(
+            _LIST_SNAPSHOTS_SQL,
+            tuples_only=True,
+            params={
+                "dataset_id": dataset_id,
+                "layer": layer,
+                "entity": entity,
+                "date_from": _iso(business_date_from),
+                "date_to": _iso(business_date_to),
+            },
+        ).strip()
+        rows = json.loads(raw or "[]")
+        out: list[SnapshotRecord] = []
+        for data in rows:
+            biz_date = _to_date(data["business_date"])
+            assert biz_date is not None
+            out.append(
+                SnapshotRecord(
+                    dataset_id=data["dataset_id"],
+                    layer=data["layer"],
+                    entity=data["entity"],
+                    business_date=biz_date,
+                    run_id=data["run_id"],
+                    output_path=data["output_path"],
+                    manifest_path=data["manifest_path"],
+                    semantic_hash=data["semantic_hash"],
+                )
+            )
+        return out
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        self._run_sql(_MARK_MART_PUBLISHED_SQL, params={"run_id": run_id})
+
+    def upsert_quality_metrics(self, metrics: Sequence[QualityMetricRecord]) -> None:
+        if not metrics:
+            return
+        payload = [
+            {
+                "run_id": m.run_id,
+                "dataset_id": m.dataset_id,
+                "layer": m.layer,
+                "entity": m.entity,
+                "business_date": m.business_date.isoformat(),
+                "metric_name": m.metric_name,
+                "metric_value": m.metric_value,
+                "status": m.status,
+                "details": m.details,
+            }
+            for m in metrics
+        ]
+        self._run_sql(_UPSERT_QUALITY_METRICS_SQL, params={"metrics": payload})
+
+    def list_quality_metrics(self, *, run_id: str) -> list[QualityMetricRecord]:
+        raw = self._run_sql(
+            _LIST_QUALITY_METRICS_SQL, tuples_only=True, params={"run_id": run_id}
+        ).strip()
+        out: list[QualityMetricRecord] = []
+        for data in json.loads(raw or "[]"):
+            biz_date = _to_date(data["business_date"])
+            assert biz_date is not None
+            out.append(
+                QualityMetricRecord(
+                    run_id=data["run_id"],
+                    dataset_id=data["dataset_id"],
+                    layer=data["layer"],
+                    entity=data["entity"],
+                    business_date=biz_date,
+                    metric_name=data["metric_name"],
+                    metric_value=int(data["metric_value"]),
+                    status=data["status"],
+                    details=dict(data.get("details") or {}),
+                )
+            )
+        return out
 
 
 def connect_control_store(db_config: PostgresDbConfig) -> ControlStore:

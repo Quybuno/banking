@@ -185,7 +185,8 @@ def test_ingest_statements_end_to_end_on_minio_respects_simulated_clock(tmp_path
         # Kiểm tra trực tiếp trên MinIO thật: liệt kê toàn bộ bucket phải bằng đúng 3 * early,
         # không rò rỉ lô tương lai hay statement_deliveries.jsonl ở bất kỳ vị trí nào.
         keys_on_minio = _list_keys(target, bucket)
-        assert len(keys_on_minio) == 3 * len(expected_early)
+        # Cộng thêm `accounts.jsonl` (ADR-0004b Q2), được tải cùng lệnh này.
+        assert len(keys_on_minio) == 3 * len(expected_early) + 1
         assert all("statement_deliveries" not in k for k in keys_on_minio)
 
         for batch in expected_early:

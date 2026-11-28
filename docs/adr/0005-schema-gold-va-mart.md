@@ -22,7 +22,7 @@ Theo ADR-0002 điểm 5, trên MinIO mọi entity Gold (kể cả dimension) đ�
 | Bảng | Grain / Primary Key trên Mart | Cột (Spark / PostgreSQL) |
 |---|---|---|
 | `dim_date` | `date_key` (`INT`, dạng `YYYYMMDD`) | `date_key` (int/INT PK), `calendar_date` (date/DATE UNIQUE NOT NULL), `year` (int/SMALLINT), `quarter` (int/SMALLINT), `month` (int/SMALLINT), `day` (int/SMALLINT), `day_of_week` (int/SMALLINT, 1=Mon..7=Sun) |
-| `dim_account` | `(dataset_id, account_id)` | `dataset_id` (string/TEXT), `account_id` (string/TEXT), `account_code` (string/TEXT NOT NULL), `account_type` (string/TEXT NOT NULL), `currency` (string/TEXT NOT NULL), `opening_balance_minor` (long/BIGINT NOT NULL), `opening_date` (date/DATE NOT NULL), `status` (string/TEXT NOT NULL), `run_id` (string/TEXT NOT NULL) |
+| `dim_account` | `(dataset_id, account_id)` | `dataset_id` (string/TEXT), `account_id` (string/TEXT), `account_type` (string/TEXT NOT NULL), `currency` (string/TEXT NOT NULL), `opening_balance_minor` (long/BIGINT NOT NULL), `opening_business_date` (date/DATE NOT NULL), `run_id` (string/TEXT NOT NULL). *Đính chính 2026-11-28:* bỏ `account_code`, `status`, đổi `opening_date` thành `opening_business_date` cho khớp `account.schema.json` của hợp đồng (phát hiện ở T25, PR #33) |
 | `dim_channel` | `channel` (`TEXT`) | `channel` (string/TEXT PK), `channel_label` (string/TEXT NOT NULL) |
 | `dim_transaction_type` | `transaction_type` (`TEXT`) | `transaction_type` (string/TEXT PK), `description` (string/TEXT NOT NULL) |
 
