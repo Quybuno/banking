@@ -26,4 +26,16 @@ n06 stream --profile demo --available-now     # xử lý hết dữ liệu hiệ
 
 **Mã thoát.** `0` xong (`--available-now`); `10` cấu hình sai; `13` không có Docker; `14` job thất bại.
 
-**Chưa có.** `wait-ingestion` (T22c); nạp accounts và sao kê; đo hiệu năng.
+**Chưa có.** Nạp accounts và sao kê; đo hiệu năng.
+
+## `n06 wait-ingestion`
+
+```bash
+n06 wait-ingestion --profile demo --dataset-id <id> [--source-dir <dir>/source] --timeout-seconds 300
+```
+
+**Cách container thấy nguồn của host.** Thư mục `source/` (mặc định `<paths.generator_output_dir>/source`, ghi đè bằng `--source-dir`) được gắn **chỉ đọc** vào `/opt/n06/source-input` của container dùng một lần. Chỉ gắn `source/`, không gắn thư mục cha chứa `ground_truth/`. Thư mục phải đọc được bởi user `spark` (uid 1000) của image; volume `n06_spark_data` của service không được dùng.
+
+**Thuật toán** (ADR-0004 mục 9): kiểm file events của dataset theo manifest (sha256, số dòng, không có file ngoài manifest); so đa tập `sha256` byte từng dòng với đa tập `sha256(value)` của Raw thuộc các batch có trong `ingest_batches` của query; đủ khi mọi dòng, kể cả bản lặp, có ít nhất bấy nhiêu bản giống từng byte.
+
+**Mã thoát.** `0` đủ; `10` cấu hình hoặc nguồn sai (không chờ); `14` hết thời gian chờ hoặc job thất bại, in `missing_lines` và số dòng `parse_error`. Cách đọc fixture nghiệm thu (bố cục khác) **chưa làm** (việc mở của ADR-0004).
