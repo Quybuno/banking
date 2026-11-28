@@ -482,6 +482,8 @@ def _execute_single_run(
             {
                 "experiment": spec_exp,
                 "kafka_partitions": (var_val if spec_exp == "E2" else cfg.kafka.num_partitions),
+                "run_process_day": spec_exp == "E1",
+                "as_of_time": as_of_time,
                 "env_file": env_file,
                 "env": env,
             },

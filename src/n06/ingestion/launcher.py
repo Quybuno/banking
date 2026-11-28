@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from n06.config import AppConfig
 
 CONTAINER_ROOT = "/opt/n06"
+CONTAINER_SOURCE_DIR = f"{CONTAINER_ROOT}/source-input"
 _READ_ONLY_DIRS = ("src", "config", "contracts", "sql")
 
 
@@ -49,6 +50,7 @@ def job_command(
     job_module: str,
     job_args: Sequence[str],
     env_names: Iterable[str],
+    source_dir: Path | None = None,
     event_log_dir: Path | None = None,
 ) -> list[str]:
     command = [
@@ -57,6 +59,9 @@ def job_command(
     ]  # fmt: skip
     for name in _READ_ONLY_DIRS:
         command += ["-v", f"{repo_root / name}:{CONTAINER_ROOT}/{name}:ro"]
+    if source_dir is not None:
+        # Thư mục `source/` của host, chỉ đọc. Không bao giờ gắn thư mục gốc chứa ground truth.
+        command += ["-v", f"{source_dir}:{CONTAINER_SOURCE_DIR}:ro"]
     if event_log_dir is not None:
         command += ["-v", f"{event_log_dir}:{CONTAINER_ROOT}/{cfg.spark.event_log_dir}"]
     command += ["-e", f"PYTHONPATH={CONTAINER_ROOT}/src", "-e", "PYTHONDONTWRITEBYTECODE=1"]

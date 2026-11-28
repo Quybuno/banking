@@ -104,7 +104,7 @@ def test_makeup_runs_triggered_when_measured_run_fails(
     monkeypatch.setattr(
         "n06.observability.runner.prepare_benchmark_dataset",
         lambda *a, **kw: DatasetPrepResult(
-            0, tmp_path / "ds", tmp_path / "ds/source", 0.5, 10.0, "", "", 100, 42
+            0, "ds-100-42", tmp_path / "ds", tmp_path / "ds/source", 0.5, 10.0, "", "", 100, 42
         ),
     )
     monkeypatch.setattr(

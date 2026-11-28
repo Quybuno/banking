@@ -78,3 +78,12 @@
 - Bucket: `HEAD` có ký.
 - Thời gian: mỗi thao tác socket chờ 2-5 giây, mỗi probe có hạn tổng 8 giây (cố định trong mã), nên dịch vụ nhỏ giọt từng byte không treo được `doctor`.
 - Giới hạn: probe PostgreSQL không xác thực nên không chứng minh DB nhận được truy vấn; listener TLS/SASL của Kafka chưa kiểm (Compose chỉ dùng PLAINTEXT); khi `docker compose ps` thất bại, mọi service bị báo "chưa được tạo".
+
+## `n06 process-day` (T25)
+
+`n06 process-day --dataset-id <id> [--as-of-time <UTC>] [--business-date <ngày> ...] [--query-name <q>] [--profile <p>]`.
+Chạy job Silver và Gold trong container Spark như `n06 stream`; mô tả đầy đủ ở
+`src/n06/spark_jobs/README.md`. Mã thoát: `0` xong; `10` tham số hoặc cấu hình sai; `13` không có
+Docker; `14` job thất bại, kể cả input mà T25 chưa xử lý được và `run_id` đã có object (job in
+`N06_PROCESS_DAY_ERROR={"code": ...}` nêu mã lỗi có tên). Không thêm mã thoát mới. `--run-id` và
+`--fail-at` là cờ kiểm thử, không hiện trong `--help`.

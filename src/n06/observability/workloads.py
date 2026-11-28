@@ -12,8 +12,10 @@ from typing import Any
 
 from n06.cli.doctor import ExitCode
 from n06.cli.generate import run_generate
-from n06.cli.ingestion import run_stream
+from n06.cli.ingestion import run_stream, run_wait_ingestion
+from n06.cli.process_day import run_process_day
 from n06.cli.publish import run_publish
+from n06.cli.statements import run_ingest_statements
 from n06.config import REPO_ROOT, AppConfig, load_config
 from n06.observability.sampler import default_process_tree_rss_reader
 from n06.storage.object_store import resolve_host_endpoint
@@ -49,6 +51,7 @@ class DatasetPrepResult:
     """Kết quả chuẩn bị dataset (tách generation_seconds khỏi wall_seconds theo I.14.2)."""
 
     exit_code: int
+    dataset_id: str
     dataset_dir: Path
     source_dir: Path
     generation_seconds: float
@@ -127,7 +130,8 @@ def prepare_benchmark_dataset(
     temp_cfg_dir = out_dir.parent
     temp_cfg_dir.mkdir(parents=True, exist_ok=True)
     raw_gcfg = json.loads(generator_config.read_text(encoding="utf-8"))
-    raw_gcfg["dataset_id"] = f"{cfg.dataset.dataset_id}-{transactions}-{seed}"
+    dataset_id = f"{cfg.dataset.dataset_id}-{transactions}-{seed}"
+    raw_gcfg["dataset_id"] = dataset_id
     raw_gcfg["seed"] = seed
     raw_gcfg["transaction_count"] = transactions
     raw_gcfg["account_count"] = max(50, transactions // 200)
@@ -152,6 +156,7 @@ def prepare_benchmark_dataset(
     manifest_path, manifest_sha = _find_manifest(source_dir)
     return DatasetPrepResult(
         exit_code=code,
+        dataset_id=dataset_id,
         dataset_dir=out_dir,
         source_dir=source_dir,
         generation_seconds=gen_seconds,
@@ -242,13 +247,12 @@ def _run_ingest_stages(
             },
         )
         stream_sec = round(time.monotonic() - t_stream0, 4)
-        ingest_sec = round(pub_sec + stream_sec, 4)
 
         if stream_code != int(ExitCode.OK):
             return WorkloadResult(
                 exit_code=stream_code,
                 status="error",
-                phase_seconds={"publish": pub_sec, "stream": stream_sec, "ingest": ingest_sec},
+                phase_seconds={"publish": pub_sec, "stream": stream_sec},
                 records_processed=0,
                 throughput_entity="event",
                 throughput_scope="ingest",
@@ -257,15 +261,97 @@ def _run_ingest_stages(
                 error_message=f"n06 stream failed with exit code {stream_code}",
             )
 
+        t_wait0 = time.monotonic()
+        wait_code = run_wait_ingestion(
+            dataset_id=dataset.dataset_id,
+            profile=cfg.profile,
+            env_file=env_file,
+            source_dir=dataset.source_dir,
+            query_name=query_name,
+            env={
+                **env,
+                "N06__KAFKA__EVENTS_TOPIC": topic,
+                "N06__KAFKA__QUERY_NAME": query_name,
+            },
+        )
+        wait_sec = round(time.monotonic() - t_wait0, 4)
+        ingest_sec = round(pub_sec + stream_sec + wait_sec, 4)
+        phases: dict[str, float] = {
+            "publish": pub_sec,
+            "stream": stream_sec,
+            "wait_ingestion": wait_sec,
+            "ingest": ingest_sec,
+        }
+        if wait_code != int(ExitCode.OK):
+            return WorkloadResult(
+                exit_code=wait_code,
+                status="error",
+                phase_seconds=phases,
+                records_processed=0,
+                throughput_entity="event",
+                throughput_scope="ingest",
+                correctness_ok=False,
+                error_type="WaitIngestionError",
+                error_message=f"n06 wait-ingestion failed with exit code {wait_code}",
+            )
+
+        scope = "ingest"
+        if params.get("run_process_day"):
+            as_of = str(params.get("as_of_time") or f"{cfg.dataset.to_date}T23:59:59Z")
+            if (dataset.source_dir / "statement_deliveries.jsonl").is_file():
+                stmt_code = run_ingest_statements(
+                    source_dir=dataset.source_dir,
+                    as_of_time=as_of,
+                    dataset_id=dataset.dataset_id,
+                    profile=cfg.profile,
+                    env_file=env_file,
+                    env=env,
+                )
+                if stmt_code != int(ExitCode.OK):
+                    return WorkloadResult(
+                        exit_code=stmt_code,
+                        status="error",
+                        phase_seconds=phases,
+                        records_processed=0,
+                        throughput_entity="transaction",
+                        throughput_scope="ingest + process-day",
+                        correctness_ok=False,
+                        error_type="IngestStatementsError",
+                        error_message=f"n06 ingest-statements failed with exit code {stmt_code}",
+                    )
+            t_pday0 = time.monotonic()
+            pday_code = run_process_day(
+                dataset_id=dataset.dataset_id,
+                profile=cfg.profile,
+                env_file=env_file,
+                query_name=query_name,
+                as_of_time=as_of,
+                run_id=run_id,
+                env={**env, "N06__KAFKA__QUERY_NAME": query_name},
+            )
+            pday_sec = round(time.monotonic() - t_pday0, 4)
+            phases["process_day"] = pday_sec
+            scope = "ingest + process-day"
+            if pday_code != int(ExitCode.OK):
+                return WorkloadResult(
+                    exit_code=pday_code,
+                    status="error",
+                    phase_seconds=phases,
+                    records_processed=0,
+                    throughput_entity="transaction",
+                    throughput_scope=scope,
+                    correctness_ok=False,
+                    error_type="ProcessDayError",
+                    error_message=f"n06 process-day failed with exit code {pday_code}",
+                )
+
         return WorkloadResult(
             exit_code=0,
             status="ok",
-            phase_seconds={"publish": pub_sec, "stream": stream_sec, "ingest": ingest_sec},
+            phase_seconds=phases,
             records_processed=dataset.transaction_count,
             throughput_entity="transaction",
-            throughput_scope=(
-                "ingest (process-day pending T25)" if params.get("experiment") == "E1" else "ingest"
-            ),
+            throughput_scope=scope,
             correctness_ok=True,
             extra_metrics=[
                 ("producer_target_rate", cfg.producer.rate, "events/s", "producer"),
@@ -306,5 +392,5 @@ def default_workload_registry() -> WorkloadRegistry:
 
 def default_generator_config_path() -> Path:
     return (
-        REPO_ROOT / "contracts" / "N06_INPUT_CONTRACT_V1" / "config" / "generator.demo-faults.json"
+        REPO_ROOT / "contracts" / "N06_INPUT_CONTRACT_V1" / "config" / "generator.demo-clean.json"
     )

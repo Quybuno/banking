@@ -30,13 +30,18 @@ from n06.cli.doctor import (
     run_doctor,
 )
 from n06.cli.generate import run_generate
-from n06.cli.ingestion import run_stream
+from n06.cli.ingestion import (
+    DEFAULT_WAIT_TIMEOUT_SECONDS,
+    run_stream,
+    run_wait_ingestion,
+)
 from n06.cli.init_local import (
     InitLocalResult,
     generate_local_env,
     parse_dotenv_file,
     run_init_local,
 )
+from n06.cli.process_day import run_process_day
 from n06.cli.publish import run_publish
 from n06.cli.statements import run_ingest_statements
 from n06.cli.validate import parse_as_of_time_utc, run_validate
@@ -103,7 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor,validate,publish,generate,stream,ingest-statements,benchmark}",
+        metavar=(
+            "{init-local,doctor,validate,publish,generate,stream,wait-ingestion,"
+            "ingest-statements,process-day,benchmark}"
+        ),
     )
 
     # Lệnh 1: n06 init-local
@@ -250,6 +258,39 @@ def build_parser() -> argparse.ArgumentParser:
             "Một query foreachBatch đọc topic events, ghi Raw rồi Bronze theo batch_id và upsert "
             "ingest_batches. Tiến trình dài hạn; dừng bằng Ctrl+C."
         ),
+    )
+    wait_parser = subparsers.add_parser(
+        "wait-ingestion",
+        help="Chờ tới khi mọi dòng events của một dataset đã nằm trong Raw đã commit.",
+        description=(
+            "So byte của file events nguồn với Raw của các batch có trong ingest_batches; thoát 0 "
+            "khi đủ, 14 khi hết thời gian chờ."
+        ),
+    )
+    wait_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    wait_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    wait_parser.add_argument(
+        "--query-name", default=None, help="Query streaming cần chờ (mặc định: kafka.query_name)."
+    )
+    wait_parser.add_argument("--dataset-id", required=True, help="dataset_id cần chờ.")
+    wait_parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=None,
+        help="Thư mục source/ đã publish (mặc định: <generator_output_dir>/source).",
+    )
+    wait_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_WAIT_TIMEOUT_SECONDS,
+        help="Thời gian chờ tối đa (mặc định 300).",
     )
     stream_parser.add_argument(
         "--profile",
@@ -508,6 +549,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="In kết quả dạng JSON có cấu trúc.",
     )
 
+    # Lệnh 9: n06 process-day (T25)
+    process_day_parser = subparsers.add_parser(
+        "process-day",
+        help="Bronze -> Silver (dedup cơ bản) -> đối soát MATCHED -> Gold, commit theo run_id.",
+        description=(
+            "Đọc Bronze theo ingest_batches và sao kê theo biên nhận _ingest/, ghi Silver và Gold "
+            "Parquet vào đường dẫn run_id mới (đã kiểm chưa có object) rồi trỏ current_snapshot. "
+            "Chạy trong image Spark. Dữ liệu cần quarantine hoặc xử lý xung đột (T30, T31) làm "
+            "job dừng với mã lỗi có tên."
+        ),
+    )
+    process_day_parser.add_argument("--dataset-id", required=True, help="dataset_id cần xử lý.")
+    process_day_parser.add_argument(
+        "--as-of-time",
+        default=None,
+        help="Đồng hồ giả lập UTC YYYY-MM-DDTHH:MM:SSZ; chỉ sao kê có biên nhận "
+        "file_available_at <= mốc này được đối soát (mặc định: thời điểm hiện tại UTC).",
+    )
+    process_day_parser.add_argument(
+        "--business-date",
+        action="append",
+        default=None,
+        help="Chỉ xử lý ngày này (YYYY-MM-DD); lặp lại để chọn nhiều ngày "
+        "(mặc định: mọi ngày có dữ liệu).",
+    )
+    process_day_parser.add_argument(
+        "--query-name", default=None, help="Ghi đè kafka.query_name (query đã ghi Bronze)."
+    )
+    process_day_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    process_day_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    process_day_parser.add_argument("--run-id", default=None, help=argparse.SUPPRESS)
+    process_day_parser.add_argument(
+        "--fail-at", choices=("after_write",), default=None, help=argparse.SUPPRESS
+    )
+
     return parser
 
 
@@ -581,6 +664,17 @@ def main(
             out=stdout,
         )
 
+    if parsed.command == "wait-ingestion":
+        return run_wait_ingestion(
+            dataset_id=parsed.dataset_id,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            source_dir=parsed.source_dir,
+            query_name=parsed.query_name,
+            timeout_seconds=parsed.timeout_seconds,
+            out=stdout,
+        )
+
     if parsed.command == "publish":
         publish_kwargs = {
             key: value
@@ -641,6 +735,19 @@ def main(
             share_baseline=parsed.share_baseline,
             generator_config=parsed.generator_config,
             as_json=parsed.as_json,
+            out=stdout,
+        )
+
+    if parsed.command == "process-day":
+        return run_process_day(
+            dataset_id=parsed.dataset_id,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            query_name=parsed.query_name,
+            as_of_time=parsed.as_of_time,
+            business_dates=parsed.business_date or (),
+            run_id=parsed.run_id,
+            fail_at=parsed.fail_at,
             out=stdout,
         )
 

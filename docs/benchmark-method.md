@@ -31,7 +31,7 @@ Tham số chính:
 
 ## 4. Trạng thái workload trên nhánh hiện tại
 
-- **Đã nối thật**: `E1` (hiện chạy giai đoạn `generate` + `ingest`: `publish` + `stream --available-now`; phần `process-day` sẽ nối khi T25 hợp nhất vào `main`), `E2` (`publish` rate=0 + `stream --available-now`).
+- **Đã nối thật**: `E1` (chạy `generate` tách riêng + `publish` + `stream --available-now` + `wait-ingestion` + `ingest-statements` + `process-day`), `E2` (`publish` rate=0 + `stream --available-now` + `wait-ingestion`).
 - **Chưa có workload** (`E3`–`E8`): trả mã thoát `17` (`WORKLOAD_UNAVAILABLE`) kèm thông báo rõ ràng, không giả số liệu.
 
 ## 5. Thư mục đầu ra (`reports/benchmark/<batch_id>/`)
