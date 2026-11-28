@@ -49,7 +49,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T42 | C | TODO | | | |
 | T43 | C | TODO | | | Metabase v0.64.9 LTS, profile `bi` (ADR-0013) |
 | T50 | B | TODO | | | |
-| T51 | C | TODO | | | Cách đo: ADR-0007 (Accepted) |
+| T51 | C | IN_REVIEW | #36 | `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff check/format` PASS, `pytest tests/unit` PASS, `test_benchmark_e1_smoke.py` PASS (1000 tx, `wall_seconds` ~218.5–234.9 s; bị gắn `noise` do máy đang có swap) | `n06 benchmark`, `n06.observability`, gộp `main` (`[quality]`, `[reconciliation]`, `[benchmark]`), sửa review + bắt `N06_PROCESS_DAY_RESULT`/`N06_PROCESS_DAY_ERROR` (`reconciliation.status_counts`, `QUALITY_GATE_BLOCKED`); chưa chạy `E3`–`E8` (trả mã 17) và đợt đo dài E1–E5 |
 | T52 | C + A | TODO | | | |
 | T53 | cả nhóm | TODO | | | |
 | T60 | C | TODO | | | P1, thuộc bản nộp; Airflow 3.4.0, profile `orchestration`, BashOperator gọi `n06` (ADR-0013) |

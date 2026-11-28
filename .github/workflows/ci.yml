@@ -25,7 +25,7 @@ jobs:
       - name: Lint và unit test (bật sau T00)
         if: hashFiles('pyproject.toml') != ''
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,benchmark]"
           ruff check .
           ruff format --check .
           pytest tests/unit -q

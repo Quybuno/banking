@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
+from n06.cli.benchmark import run_benchmark_cli
 from n06.cli.doctor import (
     CheckItem,
     DoctorReport,
@@ -97,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         "  14 (SERVICE_ERROR)     : Một hoặc nhiều service (kafka/minio/postgres/spark) lỗi"
         "\n  15 (KAFKA_DELIVERY_ERROR): Lỗi giao nhận Kafka khi publish (không retry được)"
         "\n  16 (CAPACITY_ERROR)    : Từ chối: không đủ dung lượng ổ hoặc vượt max_transactions"
+        "\n  17 (WORKLOAD_UNAVAILABLE): Thí nghiệm/workload chưa có trên nhánh hiện tại"
     )
     parser = argparse.ArgumentParser(
         prog="n06",
@@ -110,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
         title="commands",
         metavar=(
             "{init-local,doctor,validate,publish,generate,stream,wait-ingestion,"
-            "ingest-statements,process-day,load-mart}"
+            "ingest-statements,process-day,load-mart,benchmark}"
         ),
     )
 
@@ -460,7 +462,96 @@ def build_parser() -> argparse.ArgumentParser:
         help="In kết quả dạng JSON có cấu trúc.",
     )
 
-    # Lệnh 7: n06 process-day (T25)
+    # Lệnh 8: n06 benchmark
+    bench_parser = subparsers.add_parser(
+        "benchmark",
+        help="Chạy benchmark thí nghiệm E1–E8 theo ADR-0007 và xuất CSV/JSON/biểu đồ.",
+        description=(
+            "Chạy benchmark đo hiệu năng (CPU/RAM theo chuỗi thời gian, Spark event log, "
+            "lưu trữ, tính đúng) và ghi kết quả vào reports/benchmark/<batch_id>/."
+        ),
+    )
+    bench_parser.add_argument(
+        "--experiment",
+        required=True,
+        help="Mã thí nghiệm (E1..E8).",
+    )
+    bench_parser.add_argument(
+        "--level",
+        "--levels",
+        dest="levels",
+        nargs="+",
+        type=_positive_int,
+        default=None,
+        help="Mức biến thử nghiệm (mặc định lấy benchmark.smoke_level từ config).",
+    )
+    bench_parser.add_argument(
+        "--repeat",
+        "--repetitions",
+        dest="repetitions",
+        type=_positive_int,
+        default=None,
+        help="Số lần đo cho mỗi cấu hình (mặc định từ config: 3).",
+    )
+    bench_parser.add_argument(
+        "--warmup",
+        type=int,
+        default=None,
+        help="Số lần warm-up cho mỗi cấu hình (mặc định từ config: 1).",
+    )
+    bench_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed sinh dữ liệu và hoán vị thứ tự chạy.",
+    )
+    bench_parser.add_argument(
+        "--as-of-time",
+        default=None,
+        help="Mốc thời gian as_of_time UTC dạng ...Z.",
+    )
+    bench_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default="benchmark",
+        help="Profile cấu hình (mặc định: benchmark).",
+    )
+    bench_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="File .env cần nạp (mặc định: ./.env).",
+    )
+    bench_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Thư mục ghi kết quả (mặc định: reports/benchmark/<batch_id>).",
+    )
+    bench_parser.add_argument(
+        "--generator-config",
+        type=Path,
+        default=None,
+        help="File cấu hình generator JSON.",
+    )
+    bench_parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Cho phép chạy khi cây Git đang có thay đổi chưa commit.",
+    )
+    bench_parser.add_argument(
+        "--share-baseline",
+        action="store_true",
+        help="Cho phép ghi dấu dùng chung cấu hình gốc (ADR-0007 B1).",
+    )
+    bench_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
+    )
+
+    # Lệnh 9: n06 process-day (T25)
     process_day_parser = subparsers.add_parser(
         "process-day",
         help="Bronze -> Silver (dedup cơ bản) -> đối soát MATCHED -> Gold, commit theo run_id.",
@@ -662,6 +753,24 @@ def main(
             dataset_id=parsed.dataset_id,
             profile=parsed.profile,
             env_file=parsed.env_file,
+            as_json=parsed.as_json,
+            out=stdout,
+        )
+
+    if parsed.command == "benchmark":
+        return run_benchmark_cli(
+            experiment=parsed.experiment,
+            levels=parsed.levels,
+            repetitions=parsed.repetitions,
+            warmup=parsed.warmup,
+            seed=parsed.seed,
+            as_of_time=parsed.as_of_time,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            output_dir=parsed.output_dir,
+            allow_dirty=parsed.allow_dirty,
+            share_baseline=parsed.share_baseline,
+            generator_config=parsed.generator_config,
             as_json=parsed.as_json,
             out=stdout,
         )

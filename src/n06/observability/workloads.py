@@ -1,0 +1,508 @@
+"""Registry workload cho `n06 benchmark` (ADR-0007 B1, B4)."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import subprocess
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from n06.cli.doctor import ExitCode
+from n06.cli.generate import run_generate
+from n06.cli.ingestion import run_stream, run_wait_ingestion
+from n06.cli.process_day import run_process_day
+from n06.cli.publish import run_publish
+from n06.cli.statements import run_ingest_statements
+from n06.config import REPO_ROOT, AppConfig, load_config
+from n06.observability.sampler import default_process_tree_rss_reader
+from n06.storage.object_store import resolve_host_endpoint
+
+
+class WorkloadNotRegisteredError(LookupError):
+    """Ném khi thí nghiệm hoặc workload chưa được đăng ký trên nhánh hiện tại."""
+
+
+@dataclass(frozen=True)
+class WorkloadResult:
+    """Kết quả thực thi một lần chạy workload."""
+
+    exit_code: int
+    status: str  # "ok" | "error" | "invalid"
+    phase_seconds: dict[str, float]
+    records_processed: int
+    throughput_entity: str
+    throughput_scope: str
+    correctness_ok: bool
+    unique_key_count: int | None = None
+    totals_by_currency: dict[str, int] = field(default_factory=dict)
+    status_counts: dict[str, int] = field(default_factory=dict)
+    semantic_hash: str | None = None
+    oracle_match: bool | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    extra_metrics: list[tuple[str, float | int | str, str, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DatasetPrepResult:
+    """Kết quả chuẩn bị dataset (tách generation_seconds khỏi wall_seconds theo I.14.2)."""
+
+    exit_code: int
+    dataset_id: str
+    dataset_dir: Path
+    source_dir: Path
+    generation_seconds: float
+    generator_peak_rss_mb: float
+    manifest_path: str
+    manifest_sha256: str
+    transaction_count: int
+    seed: int
+    error_message: str | None = None
+
+
+WorkloadFn = Callable[
+    [AppConfig, DatasetPrepResult, str, int, Mapping[str, Any]],
+    WorkloadResult,
+]
+
+
+@dataclass(frozen=True)
+class WorkloadSpec:
+    """Mô tả một workload đã đăng ký."""
+
+    experiment: str
+    variable_name: str
+    variable2_name: str | None
+    ram_scope: str
+    description: str
+    runner: WorkloadFn
+
+
+class WorkloadRegistry:
+    """Quản lý ánh xạ mã thí nghiệm -> workload thật."""
+
+    def __init__(self) -> None:
+        self._specs: dict[str, WorkloadSpec] = {}
+
+    def register(self, spec: WorkloadSpec) -> None:
+        self._specs[spec.experiment.upper()] = spec
+
+    def get(self, experiment: str) -> WorkloadSpec:
+        key = experiment.upper()
+        if key not in self._specs:
+            raise WorkloadNotRegisteredError(
+                f"Chưa có workload cho thí nghiệm {key} trên nhánh hiện tại."
+            )
+        return self._specs[key]
+
+    def available_experiments(self) -> list[str]:
+        return sorted(self._specs.keys())
+
+
+def _find_manifest(source_dir: Path) -> tuple[str, str]:
+    """Tìm file manifest đầu tiên trong `source_dir` và tính sha256."""
+    import hashlib
+
+    if not source_dir.is_dir():
+        return "", ""
+    manifests = sorted(source_dir.rglob("*manifest*.json"))
+    if not manifests:
+        return str(source_dir), ""
+    first = manifests[0]
+    digest = hashlib.sha256(first.read_bytes()).hexdigest()
+    return str(first), digest
+
+
+def prepare_benchmark_dataset(
+    cfg: AppConfig,
+    *,
+    generator_config: Path,
+    out_dir: Path,
+    transactions: int,
+    seed: int,
+    env_file: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> DatasetPrepResult:
+    """Sinh dữ liệu một lần cho mức tải và đo riêng `generation_seconds` (I.14.2)."""
+    temp_cfg_dir = out_dir.parent
+    temp_cfg_dir.mkdir(parents=True, exist_ok=True)
+    raw_gcfg = json.loads(generator_config.read_text(encoding="utf-8"))
+    dataset_id = f"{cfg.dataset.dataset_id}-{transactions}-{seed}"
+    raw_gcfg["dataset_id"] = dataset_id
+    raw_gcfg["seed"] = seed
+    raw_gcfg["transaction_count"] = transactions
+    raw_gcfg["account_count"] = max(50, transactions // 200)
+    patched_cfg_path = temp_cfg_dir / f"generator-{transactions}-{seed}.json"
+    patched_cfg_path.write_text(json.dumps(raw_gcfg, indent=2), encoding="utf-8")
+
+    rss_before = default_process_tree_rss_reader()
+    t0 = time.monotonic()
+    code = run_generate(
+        generator_config=patched_cfg_path,
+        out_dir=out_dir,
+        transactions=transactions,
+        profile=cfg.profile,
+        env_file=env_file,
+        env=env,
+    )
+    gen_seconds = round(time.monotonic() - t0, 4)
+    rss_after = default_process_tree_rss_reader()
+    peak_rss = max(rss_before, rss_after)
+
+    source_dir = out_dir / "source"
+    manifest_path, manifest_sha = _find_manifest(source_dir)
+    return DatasetPrepResult(
+        exit_code=code,
+        dataset_id=dataset_id,
+        dataset_dir=out_dir,
+        source_dir=source_dir,
+        generation_seconds=gen_seconds,
+        generator_peak_rss_mb=peak_rss,
+        manifest_path=manifest_path,
+        manifest_sha256=manifest_sha,
+        transaction_count=transactions,
+        seed=seed,
+        error_message=None if code == 0 else f"n06 generate exited with code {code}",
+    )
+
+
+def _resolve_host_kafka_bootstrap(env: Mapping[str, str]) -> str:
+    _, host, _ = resolve_host_endpoint(env)
+    host_cfg = load_config(profile="test", env=env)
+    default_port = host_cfg.kafka.bootstrap_servers.partition(":")[2] or "19092"
+    port = env.get("N06_KAFKA_HOST_PORT", default_port).strip() or default_port
+    return f"{host}:{port}"
+
+
+def _cleanup_kafka_topic(bootstrap_servers: str, topic: str) -> None:
+    """Dọn topic tạm sau lần chạy (best-effort theo ADR-0007 B2.4)."""
+    try:
+        from confluent_kafka.admin import AdminClient
+
+        admin = AdminClient({"bootstrap.servers": bootstrap_servers})
+        futures = admin.delete_topics([topic], operation_timeout=10.0)
+        for fut in futures.values():
+            fut.result(timeout=10.0)
+    except Exception:
+        pass
+
+
+def _parse_prefixed_json(output: str, prefix: str) -> dict[str, Any] | None:
+    """Tìm dòng cuối cùng bắt đầu bằng `prefix` và parse JSON object."""
+    for line in reversed(output.splitlines()):
+        if not line.startswith(prefix):
+            continue
+        raw = line[len(prefix) :].strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    return None
+
+
+def _run_ingest_stages(
+    cfg: AppConfig,
+    dataset: DatasetPrepResult,
+    run_id: str,
+    level: int,
+    params: Mapping[str, Any],
+) -> WorkloadResult:
+    """Chạy thật `publish` + `stream --available-now` với topic cô lập theo `run_id`."""
+    topic = f"{cfg.kafka.events_topic}.{run_id}".replace(":", "-").lower()[:120]
+    query_name = f"bench_{run_id}".replace("-", "_").lower()[:60]
+    partitions = int(params.get("kafka_partitions", cfg.kafka.num_partitions))
+    env = dict(params.get("env") or os.environ)
+    env_file = params.get("env_file")
+    host_bootstrap = _resolve_host_kafka_bootstrap(env)
+
+    try:
+        t_pub0 = time.monotonic()
+        pub_code = run_publish(
+            profile=cfg.profile,
+            env_file=env_file,
+            source_dir=dataset.source_dir,
+            topic=topic,
+            rate=cfg.producer.rate,
+            key_strategy=cfg.producer.key_strategy,
+            allow_non_empty_topic=True,
+            config_overrides={
+                "kafka.num_partitions": partitions,
+                "kafka.bootstrap_servers": host_bootstrap,
+            },
+        )
+        pub_sec = round(time.monotonic() - t_pub0, 4)
+        if pub_code != int(ExitCode.OK):
+            return WorkloadResult(
+                exit_code=pub_code,
+                status="error",
+                phase_seconds={"publish": pub_sec},
+                records_processed=0,
+                throughput_entity="event",
+                throughput_scope="ingest",
+                correctness_ok=False,
+                error_type="PublishError",
+                error_message=f"n06 publish failed with exit code {pub_code}",
+            )
+
+        t_stream0 = time.monotonic()
+        stream_code = run_stream(
+            profile=cfg.profile,
+            env_file=env_file,
+            query_name=query_name,
+            available_now=True,
+            env={
+                **env,
+                "N06__KAFKA__EVENTS_TOPIC": topic,
+                "N06__KAFKA__QUERY_NAME": query_name,
+            },
+        )
+        stream_sec = round(time.monotonic() - t_stream0, 4)
+
+        if stream_code != int(ExitCode.OK):
+            return WorkloadResult(
+                exit_code=stream_code,
+                status="error",
+                phase_seconds={"publish": pub_sec, "stream": stream_sec},
+                records_processed=0,
+                throughput_entity="event",
+                throughput_scope="ingest",
+                correctness_ok=False,
+                error_type="StreamError",
+                error_message=f"n06 stream failed with exit code {stream_code}",
+            )
+
+        t_wait0 = time.monotonic()
+        wait_code = run_wait_ingestion(
+            dataset_id=dataset.dataset_id,
+            profile=cfg.profile,
+            env_file=env_file,
+            source_dir=dataset.source_dir,
+            query_name=query_name,
+            env={
+                **env,
+                "N06__KAFKA__EVENTS_TOPIC": topic,
+                "N06__KAFKA__QUERY_NAME": query_name,
+            },
+        )
+        wait_sec = round(time.monotonic() - t_wait0, 4)
+        ingest_sec = round(pub_sec + stream_sec + wait_sec, 4)
+        phases: dict[str, float] = {
+            "publish": pub_sec,
+            "stream": stream_sec,
+            "wait_ingestion": wait_sec,
+            "ingest": ingest_sec,
+        }
+        if wait_code != int(ExitCode.OK):
+            return WorkloadResult(
+                exit_code=wait_code,
+                status="error",
+                phase_seconds=phases,
+                records_processed=0,
+                throughput_entity="event",
+                throughput_scope="ingest",
+                correctness_ok=False,
+                error_type="WaitIngestionError",
+                error_message=f"n06 wait-ingestion failed with exit code {wait_code}",
+            )
+
+        scope = "ingest"
+        unique_key_count: int | None = None
+        status_counts: dict[str, int] = {}
+        semantic_hash: str | None = None
+        extra_metrics: list[tuple[str, float | int | str, str, str]] = [
+            ("producer_target_rate", cfg.producer.rate, "events/s", "producer"),
+            ("kafka_partitions", partitions, "count", "kafka"),
+        ]
+        if params.get("run_process_day"):
+            as_of = str(params.get("as_of_time") or f"{cfg.dataset.to_date}T23:59:59Z")
+            if (dataset.source_dir / "statement_deliveries.jsonl").is_file():
+                stmt_code = run_ingest_statements(
+                    source_dir=dataset.source_dir,
+                    as_of_time=as_of,
+                    dataset_id=dataset.dataset_id,
+                    profile=cfg.profile,
+                    env_file=env_file,
+                    env=env,
+                )
+                if stmt_code != int(ExitCode.OK):
+                    return WorkloadResult(
+                        exit_code=stmt_code,
+                        status="error",
+                        phase_seconds=phases,
+                        records_processed=0,
+                        throughput_entity="transaction",
+                        throughput_scope="ingest + process-day",
+                        correctness_ok=False,
+                        error_type="IngestStatementsError",
+                        error_message=f"n06 ingest-statements failed with exit code {stmt_code}",
+                    )
+            pday_out = io.StringIO()
+            pday_captured: list[str] = []
+
+            def _capture_pday_runner(
+                cmd: Sequence[str], **kwargs: Any
+            ) -> subprocess.CompletedProcess[str]:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=kwargs.get("cwd"),
+                    env=kwargs.get("env"),
+                    check=bool(kwargs.get("check", False)),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                if proc.stdout:
+                    pday_captured.append(proc.stdout)
+                return proc
+
+            t_pday0 = time.monotonic()
+            pday_code = run_process_day(
+                dataset_id=dataset.dataset_id,
+                profile=cfg.profile,
+                env_file=env_file,
+                query_name=query_name,
+                as_of_time=as_of,
+                run_id=run_id,
+                env={**env, "N06__KAFKA__QUERY_NAME": query_name},
+                runner=_capture_pday_runner,
+                out=pday_out,
+            )
+            pday_sec = round(time.monotonic() - t_pday0, 4)
+            phases["process_day"] = pday_sec
+            scope = "ingest + process-day"
+            pday_stdout = pday_out.getvalue() + "\n" + "\n".join(pday_captured)
+            if pday_code != int(ExitCode.OK):
+                err_payload = _parse_prefixed_json(pday_stdout, "N06_PROCESS_DAY_ERROR=")
+                err_type = (
+                    str(err_payload.get("code") or "ProcessDayError")
+                    if err_payload
+                    else "ProcessDayError"
+                )
+                err_msg = (
+                    str(err_payload.get("message") or f"n06 process-day failed ({pday_code})")
+                    if err_payload
+                    else f"n06 process-day failed with exit code {pday_code}"
+                )
+                return WorkloadResult(
+                    exit_code=pday_code,
+                    status="error",
+                    phase_seconds=phases,
+                    records_processed=0,
+                    throughput_entity="transaction",
+                    throughput_scope=scope,
+                    correctness_ok=False,
+                    error_type=err_type,
+                    error_message=err_msg,
+                )
+
+            res_payload = _parse_prefixed_json(pday_stdout, "N06_PROCESS_DAY_RESULT=")
+            if res_payload is None:
+                return WorkloadResult(
+                    exit_code=pday_code,
+                    status="invalid",
+                    phase_seconds=phases,
+                    records_processed=0,
+                    throughput_entity="transaction",
+                    throughput_scope=scope,
+                    correctness_ok=False,
+                    error_type="InvalidProcessDayOutput",
+                    error_message="process-day không trả về N06_PROCESS_DAY_RESULT hợp lệ.",
+                )
+            recon = res_payload.get("reconciliation")
+            if isinstance(recon, Mapping):
+                raw_counts = recon.get("status_counts")
+                if isinstance(raw_counts, Mapping):
+                    status_counts = {str(k): int(v) for k, v in raw_counts.items()}
+                if recon.get("total_keys") is not None:
+                    unique_key_count = int(recon["total_keys"])
+            if res_payload.get("semantic_hash"):
+                semantic_hash = str(res_payload["semantic_hash"])
+            committed_snapshots = int(res_payload.get("committed_snapshots") or 0)
+            quality = res_payload.get("quality")
+            if isinstance(quality, Mapping):
+                for qkey in ("rejected_records", "control_mismatches", "unexplained_mismatches"):
+                    if quality.get(qkey) is not None:
+                        extra_metrics.append(
+                            (f"quality_{qkey}", int(quality[qkey]), "count", "quality")
+                        )
+            if (
+                committed_snapshots <= 0
+                or not status_counts
+                or (
+                    dataset.transaction_count > 0
+                    and (unique_key_count is None or unique_key_count <= 0)
+                )
+            ):
+                return WorkloadResult(
+                    exit_code=pday_code,
+                    status="invalid",
+                    phase_seconds=phases,
+                    records_processed=dataset.transaction_count,
+                    throughput_entity="transaction",
+                    throughput_scope=scope,
+                    correctness_ok=False,
+                    unique_key_count=unique_key_count,
+                    status_counts=status_counts,
+                    semantic_hash=semantic_hash,
+                    error_type="InvalidProcessDayResult",
+                    error_message=(
+                        "process-day trả kết quả rỗng hoặc thiếu status_counts/committed_snapshots."
+                    ),
+                    extra_metrics=extra_metrics,
+                )
+
+        return WorkloadResult(
+            exit_code=0,
+            status="ok",
+            phase_seconds=phases,
+            records_processed=dataset.transaction_count,
+            throughput_entity="transaction",
+            throughput_scope=scope,
+            correctness_ok=True,
+            unique_key_count=unique_key_count,
+            status_counts=status_counts,
+            semantic_hash=semantic_hash,
+            extra_metrics=extra_metrics,
+        )
+    finally:
+        _cleanup_kafka_topic(host_bootstrap, topic)
+
+
+def default_workload_registry() -> WorkloadRegistry:
+    """Registry mặc định với các workload thật hiện có trên nhánh `main`."""
+    registry = WorkloadRegistry()
+    registry.register(
+        WorkloadSpec(
+            experiment="E1",
+            variable_name="transaction_count",
+            variable2_name=None,
+            ram_scope="host",
+            description="Quy mô giao dịch (ingest + ingest-statements + process-day)",
+            runner=_run_ingest_stages,
+        )
+    )
+    registry.register(
+        WorkloadSpec(
+            experiment="E2",
+            variable_name="kafka_partitions",
+            variable2_name=None,
+            ram_scope="host",
+            description="Ingest Raw/Bronze với số partition Kafka thay đổi, producer rate=0",
+            runner=_run_ingest_stages,
+        )
+    )
+    return registry
+
+
+def default_generator_config_path() -> Path:
+    return (
+        REPO_ROOT / "contracts" / "N06_INPUT_CONTRACT_V1" / "config" / "generator.demo-clean.json"
+    )
