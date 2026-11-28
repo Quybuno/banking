@@ -222,6 +222,7 @@ def reconcile_with_diagnostics(
     settings: ReconciliationSettings,
     run_id: str,
     input_snapshot_id: str,
+    previous_recon: DataFrame | None = None,
 ) -> DataFrame:
     """Như `reconcile` nhưng giữ thêm `cutoff_time`, `business_date_disagrees`, `age_clamped`."""
     if not run_id.strip() or not input_snapshot_id.strip():
@@ -322,7 +323,26 @@ def reconcile_with_diagnostics(
 
     amount_int = F.col("n_int") == 1
     amount_st = F.col("n_st") == 1
-    return stage4.select(
+    if previous_recon is not None:
+        prev = previous_recon.select(
+            "dataset_id",
+            "channel",
+            "external_reference",
+            F.col("first_seen_at").cast("timestamp").alias("_prev_first_seen_at"),
+            F.col("resolved_at").cast("timestamp").alias("_prev_resolved_at"),
+        ).dropDuplicates(["dataset_id", "channel", "external_reference"])
+        stage5 = stage4.join(prev, on=["dataset_id", "channel", "external_reference"], how="left")
+        first_seen_col = F.coalesce(F.col("_prev_first_seen_at"), as_of)
+        resolved_col = F.when(
+            F.col("recon_status") == F.lit(ReconStatus.MATCHED.value),
+            F.coalesce(F.col("_prev_resolved_at"), as_of),
+        ).otherwise(F.lit(None).cast("timestamp"))
+    else:
+        stage5 = stage4
+        first_seen_col = F.lit(None).cast("timestamp")
+        resolved_col = F.lit(None).cast("timestamp")
+
+    return stage5.select(
         "dataset_id",
         "channel",
         "external_reference",
@@ -343,8 +363,8 @@ def reconcile_with_diagnostics(
         F.col("discrepancy_age_seconds").cast("long").alias("discrepancy_age_seconds"),
         as_of.alias("as_of_time"),
         as_of.alias("last_evaluated_at"),  # ADR-0006 Q9: dùng as_of_time, không dùng đồng hồ máy
-        F.lit(None).cast("timestamp").alias("first_seen_at"),  # P1 (T61)
-        F.lit(None).cast("timestamp").alias("resolved_at"),  # P1 (T61)
+        first_seen_col.alias("first_seen_at"),
+        resolved_col.alias("resolved_at"),
         F.lit(settings.rule_version).alias("recon_rule_version"),
         "source_pointers",
         F.lit(run_id).alias("run_id"),
