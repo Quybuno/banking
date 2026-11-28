@@ -54,7 +54,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T53 | cả nhóm | TODO | | | |
 | T60 | C | TODO | | | P1, thuộc bản nộp; Airflow 3.4.0, profile `orchestration`, BashOperator gọi `n06` (ADR-0013) |
 | T61 | B | TODO | | | P1, thuộc bản nộp; Late correction, `first_seen_at`, `resolved_at` (ADR-0006) |
-| T62 | C | TODO | | | P1, thuộc bản nộp; Drill-down và runbook |
+| T62 | C | IN_REVIEW | | `verify_contract` (14/14), `check_rules`, `ruff` PASS | P1, thuộc bản nộp; Thêm `sql/dashboard_queries/07_discrepancy_drilldown.sql`, `docs/runbook.md` (restart/backfill/drill-down), cập nhật `README.md` cho T60 và T62 |
 | T63 | A | TODO | | | P1, thuộc bản nộp; E6 (ADR-0007) |
 | T64 | B | TODO | | | P1, thuộc bản nộp; E7 (ADR-0007) |
 | T65 | C | TODO | | | P1, thuộc bản nộp; E8, DuckDB 1.5.6 (ADR-0007) |
