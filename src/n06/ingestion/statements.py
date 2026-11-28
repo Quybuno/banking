@@ -33,6 +33,7 @@ DEFAULT_SOURCE_DIRNAME = "source"
 DEFAULT_MANIFESTS_DIRNAME = "manifests"
 DEFAULT_STATEMENTS_DIRNAME = "statements"
 DEFAULT_DELIVERIES_FILENAME = "statement_deliveries.jsonl"
+DEFAULT_ACCOUNTS_FILENAME = "accounts.jsonl"
 RECEIPT_SCHEMA_VERSION = "1.0.0"
 _DATASET_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 
@@ -70,6 +71,9 @@ class StatementIngestResult:
     skipped_batches: int
     deferred_batches: int
     uploaded_keys: tuple[str, ...] = ()
+    # ADR-0004b Q2: `accounts.jsonl` nằm ở `<statements_prefix>/<dataset_id>/accounts.jsonl`.
+    accounts_key: str | None = None
+    accounts_status: str | None = None  # `uploaded`, `skipped`; None khi nguồn không có file
 
 
 def _check_safe_relative(source_dir: Path, relative: str, where: str) -> Path:
@@ -299,6 +303,11 @@ def build_statement_keys(cfg: AppConfig, batch: StatementDeliveryBatch) -> tuple
     return data_key, manifest_key, receipt_key
 
 
+def build_accounts_key(cfg: AppConfig, dataset_id: str) -> str:
+    """Khóa của `accounts.jsonl` trên MinIO (ADR-0004b Q2)."""
+    return f"{cfg.paths.statements_prefix.strip('/')}/{dataset_id}/{DEFAULT_ACCOUNTS_FILENAME}"
+
+
 def build_receipt_payload(batch: StatementDeliveryBatch) -> bytes:
     """Nội dung JSON chuẩn hóa (kết LF) của biên nhận `_ingest/<delivery_order:09d>.json`."""
     receipt: dict[str, Any] = {
@@ -387,6 +396,23 @@ def ingest_statements(
         else:
             skipped_batches += 1
 
+    accounts_key: str | None = None
+    accounts_status: str | None = None
+    accounts_path = source_dir / DEFAULT_ACCOUNTS_FILENAME
+    if accounts_path.is_file():
+        # Dữ liệu tham chiếu, không bị chặn theo đồng hồ; bất biến như file sao kê (ADR-0002 mục 4).
+        accounts_key = build_accounts_key(cfg, resolved_ds)
+        accounts_status = put_object_immutable_file(
+            target,
+            bucket,
+            accounts_key,
+            accounts_path,
+            content_type="application/x-ndjson",
+            **clock_kwargs,
+        )
+        if accounts_status == "uploaded":
+            uploaded_keys.append(accounts_key)
+
     return StatementIngestResult(
         dataset_id=resolved_ds,
         as_of_time=cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -397,4 +423,6 @@ def ingest_statements(
         skipped_batches=skipped_batches,
         deferred_batches=deferred,
         uploaded_keys=tuple(uploaded_keys),
+        accounts_key=accounts_key,
+        accounts_status=accounts_status,
     )
