@@ -111,6 +111,11 @@ Vì `pipeline_bytes_per_tx` chưa đặt, `n06 doctor` luôn ra trạng thái `P
 - **Tối thiểu để chạy profile `demo` / `test` (`n06 doctor` kiểm tra):** `>= 2 CPU cores`, `>= 4.0 GiB RAM`, `>= 5.0 GiB` ổ đĩa trống, Python `3.11.x`, Docker Engine + Compose v2.
 - **Khuyến nghị khi chạy profile `benchmark` (1.000.000+ giao dịch):** `>= 4 CPU cores`, `>= 8.0 GiB RAM` khả dụng cho WSL2/Docker; tắt Airflow và Metabase (`airflow_enabled = false`, `metabase_enabled = false` trong `config/benchmark.toml`) để dành RAM cho Spark và Kafka.
 
+## Điều phối Airflow (T60) & Drill-down / Runbook (T62)
+
+- **Airflow (`profile orchestration`, T60):** Image `n06-airflow:3.4.0-py311` dựng từ `n06-spark:3.5.8-py311` (`infra/airflow/Dockerfile`), hai DAG `dags/n06_daily_pipeline.py` và `dags/n06_backfill_pipeline.py` gọi CLI `n06` qua `BashOperator` (không mount Docker socket, không chép logic Spark). Bật bằng `docker compose --profile core --profile orchestration up -d --wait` (dừng `bi` trước để đủ RAM).
+- **Drill-down & Runbook (T62):** Truy vấn `sql/dashboard_queries/07_discrepancy_drilldown.sql` truy vết từ một sai lệch tới giao dịch, 2 role `dim_account` và `source_pointers`; quy trình restart/backfill/late statement nằm trong [`docs/runbook.md`](docs/runbook.md).
+
 ## Kiểm tra hiện có
 
 ```bash
