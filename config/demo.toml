@@ -31,3 +31,8 @@ account_count = 100
 currency = "VND"
 allowed_lateness_seconds = 86400
 
+[quality]
+# Policy công khai cho demo có dữ liệu lỗi chủ đích (đặc tả I.6): lỗi trong ngưỡng được cách ly,
+# ghi WARN và vẫn publish; vượt ngưỡng hoặc lệch control report không giải thích được thì chặn.
+max_quarantine_rate_bps = 100
+max_conflict_count = 50

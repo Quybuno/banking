@@ -145,9 +145,34 @@ def test_semantic_hash_changes_with_content_input_or_config(override: dict[str, 
     assert _hash(**override) != _hash()
 
 
+def test_input_snapshot_id_ignores_run_options_but_not_inputs() -> None:
+    batch = {"kind": "ingest_batch", "query_name": "q", "batch_id": 0, "record_count": 3}
+    base = plan.input_snapshot_id([batch, {"kind": "as_of_time", "value": "a"}])
+    assert base == plan.input_snapshot_id(
+        [batch, {"kind": "as_of_time", "value": "b"}, {"kind": "business_dates", "value": ["d"]}]
+    )
+    assert base != plan.input_snapshot_id([{**batch, "record_count": 4}])
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("N06__DATASET__ALLOWED_LATENESS_SECONDS", "3600"),
+        ("N06__RECONCILIATION__STATUSES", "SUCCESS"),
+        ("N06__RECONCILIATION__CHANNELS", "SIM_CHANNEL_A"),
+    ],
+)
+def test_config_hash_changes_with_reconciliation_settings(name: str, value: str) -> None:
+    assert plan.config_hash(_cfg()) != plan.config_hash(_cfg(**{name: value}))
+
+
 def test_config_hash_covers_only_business_configuration() -> None:
     base = plan.config_hash(_cfg())
-    expected = hashlib.sha256(b'{"business_timezone":"Asia/Ho_Chi_Minh"}').hexdigest()
+    expected = hashlib.sha256(
+        b'{"allowed_lateness_seconds":86400,"business_timezone":"Asia/Ho_Chi_Minh",'
+        b'"reconciliation_channels":["SIM_CHANNEL_A","SIM_CHANNEL_B"],'
+        b'"reconciliation_statuses":["SUCCESS","FAILED"]}'
+    ).hexdigest()
     assert base == expected
     assert base == plan.config_hash(_cfg(N06__OBJECT_STORE__BUCKET="elsewhere"))
     assert base == plan.config_hash(_cfg(N06__SPARK__CORES="4"))

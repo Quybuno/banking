@@ -74,6 +74,11 @@ def accounts_uri(cfg: AppConfig, dataset_id: str) -> str:
     return _uri(cfg, f"{_base_key(cfg, dataset_id)}/accounts.jsonl")
 
 
+def control_report_uri(cfg: AppConfig, dataset_id: str) -> str:
+    """URI của `control_report.json` (ADR-0014, cạnh `accounts.jsonl`)."""
+    return _uri(cfg, f"{_base_key(cfg, dataset_id)}/control_report.json")
+
+
 def parse_receipt(name: str, content: bytes | str, *, dataset_id: str) -> Receipt:
     """Đọc một biên nhận; tên tệp phải khớp `delivery_order` và `dataset_id` phải khớp."""
     match = RECEIPT_NAME.fullmatch(name)

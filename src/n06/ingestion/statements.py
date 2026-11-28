@@ -21,7 +21,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from n06.config import AppConfig
-from n06.domain import parse_and_validate_json_schema, parse_utc_timestamp
+from n06.domain import (
+    parse_and_validate_json_schema,
+    parse_utc_timestamp,
+    validate_control_report_data,
+)
 from n06.generator.determinism import canonical_json
 from n06.storage.object_store import (
     ObjectStoreTarget,
@@ -34,6 +38,7 @@ DEFAULT_MANIFESTS_DIRNAME = "manifests"
 DEFAULT_STATEMENTS_DIRNAME = "statements"
 DEFAULT_DELIVERIES_FILENAME = "statement_deliveries.jsonl"
 DEFAULT_ACCOUNTS_FILENAME = "accounts.jsonl"
+DEFAULT_CONTROL_REPORT_FILENAME = "control_report.json"
 RECEIPT_SCHEMA_VERSION = "1.0.0"
 _DATASET_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 
@@ -74,6 +79,9 @@ class StatementIngestResult:
     # ADR-0004b Q2: `accounts.jsonl` nằm ở `<statements_prefix>/<dataset_id>/accounts.jsonl`.
     accounts_key: str | None = None
     accounts_status: str | None = None  # `uploaded`, `skipped`; None khi nguồn không có file
+    # ADR-0014: `control_report.json` nằm cạnh `accounts.jsonl`.
+    control_report_key: str | None = None
+    control_report_status: str | None = None
 
 
 def _check_safe_relative(source_dir: Path, relative: str, where: str) -> Path:
@@ -308,6 +316,43 @@ def build_accounts_key(cfg: AppConfig, dataset_id: str) -> str:
     return f"{cfg.paths.statements_prefix.strip('/')}/{dataset_id}/{DEFAULT_ACCOUNTS_FILENAME}"
 
 
+def build_control_report_key(cfg: AppConfig, dataset_id: str) -> str:
+    """Khóa của `control_report.json` trên MinIO (ADR-0014)."""
+    prefix = cfg.paths.statements_prefix.strip("/")
+    return f"{prefix}/{dataset_id}/{DEFAULT_CONTROL_REPORT_FILENAME}"
+
+
+def verify_control_report(source_dir: Path, dataset_id: str) -> str:
+    """Kiểm `control_report.json` với source manifest, schema và dataset; trả `sha256`."""
+    name = DEFAULT_CONTROL_REPORT_FILENAME
+    declared: set[str] = set()
+    for manifest_path in sorted((source_dir / DEFAULT_MANIFESTS_DIRNAME).glob("*.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("dataset_id") != dataset_id:
+            continue
+        declared.update(str(i["sha256"]) for i in manifest.get("files", []) if i["path"] == name)
+    if len(declared) != 1:
+        raise StatementIngestConfigError(
+            f"{name} phải được source manifest của {dataset_id} khai báo với đúng một sha256 "
+            f"(tìm thấy {len(declared)})."
+        )
+    expected = declared.pop()
+    content = (source_dir / name).read_bytes()
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != expected:
+        raise StatementIngestConfigError(
+            f"{name} không khớp manifest: sha256={actual} (manifest {expected})."
+        )
+    result = validate_control_report_data(content)
+    if not result.is_valid or result.record is None:
+        raise StatementIngestConfigError(f"{name} không đúng hợp đồng: {result.issues}")
+    if result.record["dataset_id"] != dataset_id:
+        raise StatementIngestConfigError(
+            f"{name} có dataset_id={result.record['dataset_id']} khác {dataset_id}."
+        )
+    return expected
+
+
 def build_receipt_payload(batch: StatementDeliveryBatch) -> bytes:
     """Nội dung JSON chuẩn hóa (kết LF) của biên nhận `_ingest/<delivery_order:09d>.json`."""
     receipt: dict[str, Any] = {
@@ -354,6 +399,10 @@ def ingest_statements(
             eligible.append(batch)
         else:
             deferred += 1
+
+    # Kiểm control report trước khi tải bất kỳ object nào: nguồn hỏng thì không để lại gì dở dang.
+    control_path = source_dir / DEFAULT_CONTROL_REPORT_FILENAME
+    control_sha = verify_control_report(source_dir, resolved_ds) if control_path.is_file() else None
 
     uploaded_batches = 0
     skipped_batches = 0
@@ -413,6 +462,23 @@ def ingest_statements(
         if accounts_status == "uploaded":
             uploaded_keys.append(accounts_key)
 
+    control_key: str | None = None
+    control_status: str | None = None
+    if control_sha is not None:
+        # Báo cáo tổng của dữ liệu nội bộ đã công bố, không chứa nhãn lỗi (đặc tả II.4).
+        control_key = build_control_report_key(cfg, resolved_ds)
+        control_status = put_object_immutable_file(
+            target,
+            bucket,
+            control_key,
+            control_path,
+            content_type="application/json",
+            expected_sha256=control_sha,
+            **clock_kwargs,
+        )
+        if control_status == "uploaded":
+            uploaded_keys.append(control_key)
+
     return StatementIngestResult(
         dataset_id=resolved_ds,
         as_of_time=cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -425,4 +491,6 @@ def ingest_statements(
         uploaded_keys=tuple(uploaded_keys),
         accounts_key=accounts_key,
         accounts_status=accounts_status,
+        control_report_key=control_key,
+        control_report_status=control_status,
     )
