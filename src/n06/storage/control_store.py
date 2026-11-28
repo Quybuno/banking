@@ -6,8 +6,8 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
@@ -80,6 +80,21 @@ class IngestBatchRecord:
     status: str
 
 
+@dataclass(frozen=True)
+class QualityMetricRecord:
+    """Một bản ghi chỉ số chất lượng trong bảng `quality_metrics` (ADR-0003, T32)."""
+
+    run_id: str
+    dataset_id: str
+    layer: str
+    entity: str
+    business_date: date
+    metric_name: str
+    metric_value: int
+    status: str = "PASS"
+    details: dict[str, Any] = field(default_factory=dict)
+
+
 class ControlStore(Protocol):
     """Giao diện lưu trữ Control DB cho `BatchCommitCoordinator`."""
 
@@ -138,6 +153,12 @@ class ControlStore(Protocol):
 
     def mark_run_mart_published(self, *, run_id: str) -> None:
         """Đánh dấu run đã commit là `MART_PUBLISHED` (idempotent nếu đã ở trạng thái này)."""
+
+    def upsert_quality_metrics(self, metrics: Sequence[QualityMetricRecord]) -> None:
+        """Ghi các chỉ số chất lượng của một run vào bảng `quality_metrics` (idempotent)."""
+
+    def list_quality_metrics(self, *, run_id: str) -> list[QualityMetricRecord]:
+        """Đọc danh sách `quality_metrics` đã lưu của một `run_id`."""
 
 
 def _scope_key(dataset_id: str, layer: str, entity: str, business_date: date) -> str:
@@ -644,6 +665,80 @@ class PsycopgControlStore:
         finally:
             conn.close()
 
+    def upsert_quality_metrics(self, metrics: Sequence[QualityMetricRecord]) -> None:
+        if not metrics:
+            return
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                for m in metrics:
+                    cur.execute(
+                        """
+                        INSERT INTO quality_metrics (
+                            run_id, dataset_id, layer, entity, business_date,
+                            metric_name, metric_value, status, details
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        ON CONFLICT (run_id, layer, entity, business_date, metric_name) DO UPDATE
+                            SET metric_value = EXCLUDED.metric_value,
+                                status = EXCLUDED.status,
+                                details = EXCLUDED.details;
+                        """,
+                        (
+                            m.run_id,
+                            m.dataset_id,
+                            m.layer,
+                            m.entity,
+                            m.business_date,
+                            m.metric_name,
+                            m.metric_value,
+                            m.status,
+                            json.dumps(m.details, ensure_ascii=False),
+                        ),
+                    )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise CommitError(f"upsert_quality_metrics thất bại: {exc}") from exc
+        finally:
+            conn.close()
+
+    def list_quality_metrics(self, *, run_id: str) -> list[QualityMetricRecord]:
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT run_id, dataset_id, layer, entity, business_date,
+                           metric_name, metric_value, status, details
+                    FROM quality_metrics
+                    WHERE run_id = %s
+                    ORDER BY business_date ASC, layer ASC, entity ASC, metric_name ASC;
+                    """,
+                    (run_id,),
+                )
+                rows = cur.fetchall()
+            out: list[QualityMetricRecord] = []
+            for row in rows:
+                biz_date = _to_date(row[4])
+                assert biz_date is not None
+                details = json.loads(row[8]) if isinstance(row[8], str) else dict(row[8] or {})
+                out.append(
+                    QualityMetricRecord(
+                        run_id=row[0],
+                        dataset_id=row[1],
+                        layer=row[2],
+                        entity=row[3],
+                        business_date=biz_date,
+                        metric_name=row[5],
+                        metric_value=int(row[6]),
+                        status=row[7],
+                        details=details,
+                    )
+                )
+            return out
+        finally:
+            conn.close()
+
 
 # Mọi giá trị đi vào SQL bằng MỘT biến JSON của psql, không ghép vào chuỗi câu lệnh (ADR-0012
 # quyết định 1). Biến được đặt bằng `\set` ở đầu kịch bản gửi qua **stdin**, nên giá trị không nằm
@@ -866,6 +961,37 @@ BEGIN
     UPDATE runs SET status = 'MART_PUBLISHED' WHERE run_id = v->>'run_id';
 END $$;
 COMMIT;
+"""
+
+_UPSERT_QUALITY_METRICS_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+INSERT INTO quality_metrics (
+    run_id, dataset_id, layer, entity, business_date,
+    metric_name, metric_value, status, details
+)
+SELECT m->>'run_id', m->>'dataset_id', m->>'layer', m->>'entity',
+       (m->>'business_date')::date, m->>'metric_name', (m->>'metric_value')::bigint,
+       m->>'status', COALESCE(m->'details', '{{}}'::jsonb)
+FROM n06_params, jsonb_array_elements(j->'metrics') AS m
+ON CONFLICT (run_id, layer, entity, business_date, metric_name) DO UPDATE
+    SET metric_value = EXCLUDED.metric_value,
+        status = EXCLUDED.status,
+        details = EXCLUDED.details;
+COMMIT;
+"""
+
+_LIST_QUALITY_METRICS_SQL = f"""
+SELECT COALESCE(
+    (SELECT json_agg(t ORDER BY business_date ASC, layer ASC, entity ASC, metric_name ASC)::text
+     FROM (
+        SELECT run_id, dataset_id, layer, entity, business_date::text AS business_date,
+               metric_name, metric_value, status, details
+        FROM quality_metrics
+        WHERE run_id = {_PARAMS}->>'run_id'
+    ) t),
+    '[]'
+);
 """
 
 # Runner: `(kịch bản, tuples_only) -> stdout`; kịch bản đã gồm biến tham số.
@@ -1141,6 +1267,48 @@ class PsqlCliControlStore:
 
     def mark_run_mart_published(self, *, run_id: str) -> None:
         self._run_sql(_MARK_MART_PUBLISHED_SQL, params={"run_id": run_id})
+
+    def upsert_quality_metrics(self, metrics: Sequence[QualityMetricRecord]) -> None:
+        if not metrics:
+            return
+        payload = [
+            {
+                "run_id": m.run_id,
+                "dataset_id": m.dataset_id,
+                "layer": m.layer,
+                "entity": m.entity,
+                "business_date": m.business_date.isoformat(),
+                "metric_name": m.metric_name,
+                "metric_value": m.metric_value,
+                "status": m.status,
+                "details": m.details,
+            }
+            for m in metrics
+        ]
+        self._run_sql(_UPSERT_QUALITY_METRICS_SQL, params={"metrics": payload})
+
+    def list_quality_metrics(self, *, run_id: str) -> list[QualityMetricRecord]:
+        raw = self._run_sql(
+            _LIST_QUALITY_METRICS_SQL, tuples_only=True, params={"run_id": run_id}
+        ).strip()
+        out: list[QualityMetricRecord] = []
+        for data in json.loads(raw or "[]"):
+            biz_date = _to_date(data["business_date"])
+            assert biz_date is not None
+            out.append(
+                QualityMetricRecord(
+                    run_id=data["run_id"],
+                    dataset_id=data["dataset_id"],
+                    layer=data["layer"],
+                    entity=data["entity"],
+                    business_date=biz_date,
+                    metric_name=data["metric_name"],
+                    metric_value=int(data["metric_value"]),
+                    status=data["status"],
+                    details=dict(data.get("details") or {}),
+                )
+            )
+        return out
 
 
 def connect_control_store(db_config: PostgresDbConfig) -> ControlStore:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date
 
 import pytest
@@ -19,6 +19,7 @@ from n06.storage import (
     BatchCommitCoordinator,
     CommitError,
     IngestBatchRecord,
+    QualityMetricRecord,
     RunRecord,
     RunStateError,
     SnapshotRecord,
@@ -36,6 +37,7 @@ class _InMemoryControlStore:
         self.runs: dict[str, RunRecord] = {}
         self.snapshots: dict[tuple[str, str, str, date], SnapshotRecord] = {}
         self.ingest_batches: list[IngestBatchRecord] = []
+        self.quality_metrics: dict[tuple[str, str, str, date, str], QualityMetricRecord] = {}
 
     def start_run(self, run: RunRecord) -> RunRecord:
         with self._lock:
@@ -222,6 +224,19 @@ class _InMemoryControlStore:
                 semantic_hash=existing.semantic_hash,
                 error_summary=existing.error_summary,
             )
+
+    def upsert_quality_metrics(self, metrics: Sequence[QualityMetricRecord]) -> None:
+        with self._lock:
+            for m in metrics:
+                self.quality_metrics[
+                    (m.run_id, m.layer, m.entity, m.business_date, m.metric_name)
+                ] = m
+
+    def list_quality_metrics(self, *, run_id: str) -> list[QualityMetricRecord]:
+        return sorted(
+            (m for m in self.quality_metrics.values() if m.run_id == run_id),
+            key=lambda m: (m.business_date, m.layer, m.entity, m.metric_name),
+        )
 
 
 def test_build_run_output_path_follows_adr_0002() -> None:
