@@ -111,6 +111,32 @@ Vì `pipeline_bytes_per_tx` chưa đặt, `n06 doctor` luôn ra trạng thái `P
 - **Tối thiểu để chạy profile `demo` / `test` (`n06 doctor` kiểm tra):** `>= 2 CPU cores`, `>= 4.0 GiB RAM`, `>= 5.0 GiB` ổ đĩa trống, Python `3.11.x`, Docker Engine + Compose v2.
 - **Khuyến nghị khi chạy profile `benchmark` (1.000.000+ giao dịch):** `>= 4 CPU cores`, `>= 8.0 GiB RAM` khả dụng cho WSL2/Docker; tắt Airflow và Metabase (`airflow_enabled = false`, `metabase_enabled = false` trong `config/benchmark.toml`) để dành RAM cho Spark và Kafka.
 
+## Sơ đồ kiến trúc tổng quan
+
+```mermaid
+flowchart LR
+    GEN[n06 generate<br/>Contract V1] -->|events| PUB[n06 publish]
+    PUB --> KAFKA[(Kafka)]
+    KAFKA --> STREAM[n06 stream<br/>Spark Structured Streaming]
+    STREAM --> MINIO_RB[(MinIO<br/>Raw + Bronze)]
+    GEN -->|statements + accounts + control_report| STMT[n06 ingest-statements]
+    STMT --> MINIO_ST[(MinIO<br/>Statements)]
+    MINIO_RB --> PDAY[n06 process-day<br/>Silver + Quarantine + Recon + Gold]
+    MINIO_ST --> PDAY
+    PDAY --> CTRL[(PostgreSQL<br/>n06_control)]
+    PDAY --> GOLD[(MinIO<br/>Gold Parquet)]
+    GOLD --> MART_LOAD[n06 load-mart<br/>Staging + 1 TX]
+    MART_LOAD --> MART[(PostgreSQL<br/>n06_mart)]
+    MART -->|n06_mart_ro| MB[Metabase<br/>profile bi]
+```
+
+## Tài liệu chi tiết (T53)
+
+- **Từ điển dữ liệu:** [`docs/data-dictionary.md`](docs/data-dictionary.md)
+- **Kịch bản demo cho giảng viên (5 kịch bản):** [`docs/demo-scenarios.md`](docs/demo-scenarios.md)
+- **Báo cáo kiểm thử (trung thực PASS / NOT_RUN):** [`docs/test-report.md`](docs/test-report.md)
+- **Truy vấn dashboard & hướng dẫn Metabase thủ công:** [`sql/dashboard_queries/README.md`](sql/dashboard_queries/README.md)
+
 ## Kiểm tra hiện có
 
 ```bash
