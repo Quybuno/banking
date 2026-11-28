@@ -29,6 +29,7 @@ from n06.config import QUERY_NAME_PATTERN, AppConfig, ConfigValidationError, loa
 from n06.control import connect_control_db, migrate_up
 from n06.ingestion import layout
 from n06.ingestion.spark_session import build_spark
+from n06.quality import spark_quarantine
 from n06.spark_jobs import plan, receipts, s3_listing, transforms
 from n06.storage import (
     BatchCommitCoordinator,
@@ -121,15 +122,24 @@ def _require_zero(df: DataFrame, code: str, message: str) -> None:
         raise DataError(code, f"{message} ({count} bản ghi).")
 
 
-def _bronze_frame(
+def _bronze_frame_with_raw(
     spark: SparkSession, batches: Sequence[IngestBatchRecord], entity: str
 ) -> DataFrame | None:
-    uris = [
-        layout.bronze_entity_uri(b.bronze_path, entity)
-        for b in batches
-        if s3_listing.exists(spark, layout.bronze_entity_uri(b.bronze_path, entity))
-    ]
-    return spark.read.parquet(*uris) if uris else None
+    frames: list[DataFrame] = []
+    for batch in batches:
+        uri = layout.bronze_entity_uri(batch.bronze_path, entity)
+        if s3_listing.exists(spark, uri):
+            frames.append(
+                spark.read.parquet(uri)
+                .withColumn("_raw_path", F.lit(batch.raw_path))
+                .withColumn("_ingestion_date", F.lit(batch.ingestion_date).cast("date"))
+            )
+    if not frames:
+        return None
+    result = frames[0]
+    for nxt in frames[1:]:
+        result = result.unionByName(nxt, allowMissingColumns=True)
+    return result
 
 
 def _load_receipts(
@@ -285,24 +295,73 @@ def _build_and_write(
     def date_filter(df: DataFrame) -> DataFrame:
         return df.where(F.col("business_date").isin(*filter_dates)) if filter_dates else df
 
+    # --- Silver tài khoản (đọc trước để kiểm UNKNOWN_ACCOUNT và ACCOUNT_CURRENCY_MISMATCH) ---
+    quarantine_parts: list[tuple[date, DataFrame, int]] = []
+    quarantine_dfs: list[DataFrame] = []
+    fallback_date = min(b.ingestion_date for b in batches)
+
+    account_files = transforms.read_binary_files(spark, [accounts_uri])
+    accounts, bad_accounts, conflicting = transforms.silver_accounts(
+        spark, account_files, dataset_id=dataset_id, source_file="accounts.jsonl", run_id=run_id
+    )
+    _require_zero(conflicting, "ACCOUNT_ID_CONFLICT", "cùng account_id khác nội dung (T31 chưa có)")
+    bad_accounts = state.persist(bad_accounts)
+    if bad_accounts.count() > 0:
+        quarantine_dfs.append(
+            bad_accounts.select(
+                F.coalesce(F.col("dataset_id"), F.lit(dataset_id)).alias("dataset_id"),
+                F.lit(None).cast("date").alias("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.when(F.col("unparsable"), F.lit("BRONZE_PARSE"))
+                .otherwise(F.lit("SILVER_BUSINESS"))
+                .alias("stage"),
+                F.lit("account").alias("entity"),
+                F.col("account_id").cast("string").alias("business_key"),
+                F.when(F.col("unparsable"), F.lit("INVALID_JSON"))
+                .otherwise(F.lit("SCHEMA_VALUE"))
+                .alias("error_code"),
+                F.array(
+                    F.when(F.col("unparsable"), F.lit("INVALID_JSON")).otherwise(
+                        F.lit("SCHEMA_VALUE")
+                    )
+                ).alias("issue_codes"),
+                F.lit("Dòng tài khoản không hợp lệ trong accounts.jsonl").alias("error_detail"),
+                F.concat_ws(
+                    ":", F.lit("accounts.jsonl"), F.col("source_line").cast("string")
+                ).alias("source_pointer"),
+                F.lit(accounts_uri).alias("raw_reference"),
+            )
+        )
+    accounts = state.persist(accounts)
+
+    # --- Quarantine từ Bronze parse_error (ADR-0004b Q1: phân vùng theo ingestion_date) ------
+    for batch in batches:
+        pe_uri = layout.bronze_entity_uri(batch.bronze_path, "parse_error")
+        if s3_listing.exists(spark, pe_uri):
+            pe_q = state.persist(
+                spark_quarantine.bronze_parse_errors_to_quarantine(
+                    spark.read.parquet(pe_uri),
+                    dataset_id=dataset_id,
+                    run_id=run_id,
+                    raw_path=batch.raw_path,
+                )
+            )
+            pe_count = pe_q.count()
+            if pe_count > 0:
+                quarantine_parts.append((batch.ingestion_date, pe_q, pe_count))
+
     # --- Silver giao dịch và bút toán -------------------------------------------------------
     counts: dict[str, int] = {}
     silver_all: dict[str, DataFrame] = {}  # chưa lọc ngày: đối soát cần toàn bộ dataset
     silver: dict[str, DataFrame] = {}  # sau `--business-date`: phần được ghi
-    parse_errors = _bronze_frame(spark, batches, "parse_error")
-    if parse_errors is not None:
-        _require_zero(
-            parse_errors.where(F.col("dataset_id").isNull() | (F.col("dataset_id") == dataset_id)),
-            "PARSE_ERROR_PRESENT",
-            "Bronze có bản ghi parse lỗi của dataset này hoặc không rõ dataset (T30 chưa có)",
-        )
-    for entity, bronze_entity, key, payload, build in (
+    for entity, bronze_entity, key, payload, build, validate_fn in (
         (
             "transactions",
             "transaction",
             "transaction_id",
             transforms.TRANSACTION_PAYLOAD,
             transforms.silver_transactions,
+            spark_quarantine.validate_bronze_transactions_spark,
         ),
         (
             "ledger_entries",
@@ -310,21 +369,30 @@ def _build_and_write(
             "entry_id",
             transforms.LEDGER_PAYLOAD,
             transforms.silver_ledger_entries,
+            spark_quarantine.validate_bronze_ledger_spark,
         ),
     ):
-        bronze = _bronze_frame(spark, batches, bronze_entity)
+        bronze = _bronze_frame_with_raw(spark, batches, bronze_entity)
         if bronze is None:
             raise DataError("NO_BRONZE_DATA", f"Không có Bronze entity={bronze_entity}.")
+        valid_bronze, q_df = validate_fn(
+            bronze,
+            accounts,
+            dataset_id=dataset_id,
+            business_timezone=tz,
+            run_id=run_id,
+        )
+        q_df = state.persist(q_df)
+        if q_df.count() > 0:
+            quarantine_dfs.append(q_df)
         grouped, source = transforms.dedup_event_bronze(
-            bronze, dataset_id=dataset_id, key=key, payload=payload
+            valid_bronze.drop("_raw_path", "_ingestion_date"),
+            dataset_id=dataset_id,
+            key=key,
+            payload=payload,
         )
         grouped = state.persist(grouped)
         source = state.persist(source)
-        _require_zero(
-            transforms.envelope_mismatch(source, dataset_id),
-            "ENVELOPE_PAYLOAD_MISMATCH",
-            f"{entity}: envelope và payload lệch dataset_id hoặc event_time (T30 chưa có)",
-        )
         _require_zero(
             grouped.where(F.col("variants") > 1),
             "BUSINESS_KEY_CONFLICT",
@@ -336,14 +404,22 @@ def _build_and_write(
             f"{entity}: cùng event_id khác nội dung (T31 chưa có)",
         )
         frame = build(grouped, run_id=run_id)
-        _require_zero(
-            transforms.invalid_event_rows(frame, tz),
-            "BUSINESS_DATE_INVALID",
-            f"{entity}: event_time/business_date sai hoặc lệch ngày Asia/Ho_Chi_Minh (T30 chưa có)",
-        )
         silver_all[entity] = state.persist(frame)
         silver[entity] = date_filter(silver_all[entity])
         counts[f"bronze_physical_{entity}"] = int(source.count())
+
+    # Kiểm nhóm sổ cái (LEDGER_INCOMPLETE, LEDGER_UNBALANCED, LEDGER_TRANSACTION_MISMATCH)
+    clean_ledger, ledger_grp_q = spark_quarantine.validate_ledger_groups_spark(
+        silver_all["transactions"],
+        silver_all["ledger_entries"],
+        run_id=run_id,
+        raw_reference=batches[0].raw_path,
+    )
+    ledger_grp_q = state.persist(ledger_grp_q)
+    if ledger_grp_q.count() > 0:
+        quarantine_dfs.append(ledger_grp_q)
+        silver_all["ledger_entries"] = state.persist(clean_ledger)
+        silver["ledger_entries"] = date_filter(silver_all["ledger_entries"])
 
     # --- Silver sao kê ----------------------------------------------------------------------
     if not ordered_receipts:
@@ -355,7 +431,36 @@ def _build_and_write(
     flat, invalid = transforms.silver_statements(
         spark, files, ordered_receipts, uris, dataset_id=dataset_id
     )
-    _require_zero(invalid, "STATEMENT_INVALID_ROWS", "sao kê không hợp lệ (T30 chưa có)")
+    invalid = state.persist(invalid)
+    if invalid.count() > 0:
+        quarantine_dfs.append(
+            invalid.select(
+                F.coalesce(F.col("dataset_id"), F.lit(dataset_id)).alias("dataset_id"),
+                F.to_date(F.col("business_date"), "yyyy-MM-dd").alias("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.when(F.col("unparsable"), F.lit("BRONZE_PARSE"))
+                .otherwise(F.lit("SILVER_BUSINESS"))
+                .alias("stage"),
+                F.lit("statement").alias("entity"),
+                F.col("statement_record_id").cast("string").alias("business_key"),
+                F.when(F.col("unparsable"), F.lit("INVALID_JSON"))
+                .otherwise(F.lit("SCHEMA_VALUE"))
+                .alias("error_code"),
+                F.array(
+                    F.when(F.col("unparsable"), F.lit("INVALID_JSON")).otherwise(
+                        F.lit("SCHEMA_VALUE")
+                    )
+                ).alias("issue_codes"),
+                F.lit("Dòng sao kê không hợp lệ").alias("error_detail"),
+                F.concat_ws(
+                    ":",
+                    F.col("source_file"),
+                    F.col("source_sha256"),
+                    F.col("source_line").cast("string"),
+                ).alias("source_pointer"),
+                F.col("source_file").alias("raw_reference"),
+            )
+        )
     flat = state.persist(flat)
     _require_zero(
         flat.where(F.col("variants") > 1),
@@ -363,22 +468,37 @@ def _build_and_write(
         "cùng statement_record_id khác nội dung (T31 chưa có)",
     )
     statements = transforms.finish_silver_statements(flat, run_id=run_id)
-    _require_zero(
-        transforms.invalid_event_rows(statements, tz),
-        "BUSINESS_DATE_INVALID",
-        "sao kê: event_time/business_date lệch ngày Asia/Ho_Chi_Minh (T30 chưa có)",
-    )
+    bad_stmt_dates = state.persist(transforms.invalid_event_rows(statements, tz))
+    if bad_stmt_dates.count() > 0:
+        quarantine_dfs.append(
+            bad_stmt_dates.select(
+                F.col("dataset_id"),
+                F.col("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.lit("SILVER_BUSINESS").alias("stage"),
+                F.lit("statement").alias("entity"),
+                F.col("statement_record_id").alias("business_key"),
+                F.lit("BUSINESS_DATE_MISMATCH").alias("error_code"),
+                F.array(F.lit("BUSINESS_DATE_MISMATCH")).alias("issue_codes"),
+                F.lit("sao kê: event_time/business_date lệch ngày theo múi giờ nghiệp vụ").alias(
+                    "error_detail"
+                ),
+                F.concat_ws(
+                    ":",
+                    F.col("source_file"),
+                    F.col("source_sha256"),
+                    F.col("source_line").cast("string"),
+                ).alias("source_pointer"),
+                F.col("source_file").alias("raw_reference"),
+            )
+        )
+        statements = statements.where(
+            ~transforms.business_date_mismatch("event_time", "business_date", tz)
+            & F.col("event_time").isNotNull()
+            & F.col("business_date").isNotNull()
+        )
     silver_all["statements"] = state.persist(statements)
     silver["statements"] = date_filter(silver_all["statements"])
-
-    # --- Silver tài khoản --------------------------------------------------------------------
-    account_files = transforms.read_binary_files(spark, [accounts_uri])
-    accounts, bad_accounts, conflicting = transforms.silver_accounts(
-        spark, account_files, dataset_id=dataset_id, source_file="accounts.jsonl", run_id=run_id
-    )
-    _require_zero(bad_accounts, "ACCOUNT_INVALID_ROWS", "tài khoản không hợp lệ (T30 chưa có)")
-    _require_zero(conflicting, "ACCOUNT_ID_CONFLICT", "cùng account_id khác nội dung (T31 chưa có)")
-    accounts = state.persist(accounts)
 
     dates = sorted(
         {
@@ -423,6 +543,38 @@ def _build_and_write(
     ]
     total_rows += write_entity(state, plan.LAYER_SILVER, "accounts", account_frames)
 
+    # --- Quarantine (T30): chỉ ghi nếu có bản ghi lỗi; không ghi đè lỗi run cũ --------------
+    quarantine_by_date: dict[date, list[DataFrame]] = {}
+    for pdate, qdf, _ in quarantine_parts:
+        quarantine_by_date.setdefault(pdate, []).append(qdf)
+    if quarantine_dfs:
+        unioned_q = quarantine_dfs[0]
+        for nxt in quarantine_dfs[1:]:
+            unioned_q = unioned_q.unionByName(nxt)
+        for pdate, qdf, _ in spark_quarantine.partition_quarantine_by_date(
+            unioned_q, fallback_date=fallback_date
+        ):
+            quarantine_by_date.setdefault(pdate, []).append(qdf)
+    quarantine_total = 0
+    if quarantine_by_date:
+        q_frames: list[tuple[date, DataFrame, int]] = []
+        for pdate in sorted(quarantine_by_date):
+            dfs = quarantine_by_date[pdate]
+            merged_q = dfs[0]
+            for nxt in dfs[1:]:
+                merged_q = merged_q.unionByName(nxt)
+            merged_q = state.persist(merged_q)
+            cnt = merged_q.count()
+            if cnt > 0:
+                q_frames.append((pdate, merged_q, cnt))
+        if q_frames:
+            all_q_for_digest = q_frames[0][1]
+            for _, nxt, _ in q_frames[1:]:
+                all_q_for_digest = all_q_for_digest.unionByName(nxt)
+            state.digests["quarantine.records"] = transforms.entity_digest(all_q_for_digest)
+            quarantine_total = write_entity(state, plan.LAYER_QUARANTINE, "records", q_frames)
+            total_rows += quarantine_total
+
     if args.fail_at == "after_write":  # chỉ cho kiểm thử: run thất bại không bao giờ được đọc
         raise DataError("INJECTED_FAILURE", "Tắt có chủ đích sau khi ghi output, trước commit.")
 
@@ -466,6 +618,7 @@ def _build_and_write(
             "unclassified_keys": total_keys - matched_keys,
         },
         "physical_counts": counts,
+        "quarantine_records": quarantine_total,
         "committed_snapshots": len(snapshots),
     }
 
