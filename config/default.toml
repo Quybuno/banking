@@ -129,3 +129,10 @@ max_conflict_count = 0
 fail_on_unexplained_control_mismatch = true
 # Thiếu control_report.json trên object store thì process-day dừng.
 require_control_report = true
+
+[reconciliation]
+# Tập status và channel đưa vào đối soát (docs/spec.md Phần I mục 7.2; ADR-0006 Q10). Chuỗi phân
+# tách bằng dấu phẩy; đặt lại qua N06__RECONCILIATION__STATUSES và N06__RECONCILIATION__CHANNELS.
+# Giao dịch FAILED không có ledger nhưng có bản ghi xác nhận từ kênh nên mặc định vẫn đối soát.
+statuses = "SUCCESS,FAILED"
+channels = "SIM_CHANNEL_A,SIM_CHANNEL_B"
