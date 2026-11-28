@@ -278,35 +278,8 @@ def silver_statements(
     `file_available_at` và `delivery_order` lấy từ biên nhận `_ingest/` (ADR-0006 D3). Nhiều
     `statement_record_id` cho cùng match key được GIỮ (ADR-0004b 3.3) để T33 phát hiện.
     """
-    mapping = spark.createDataFrame(
-        [
-            (
-                uris[r.file_path],
-                r.file_path,
-                r.delivery_order,
-                r.file_available_at.strftime("%Y-%m-%d %H:%M:%S"),
-                r.sha256,
-            )
-            for r in receipts
-        ],
-        "path string, source_file string, delivery_order int, file_available_at string, "
-        "source_sha256 string",
-    ).withColumn("file_available_at", F.col("file_available_at").cast("timestamp"))
-    parsed = (
-        _read_lines(files)
-        .join(F.broadcast(mapping), "path")
-        .withColumn("j", F.from_json(F.col("line"), STATEMENT_SCHEMA))
-        .select(
-            "source_file",
-            "source_sha256",
-            "delivery_order",
-            "file_available_at",
-            (F.col("idx") + 1).cast("long").alias("source_line"),
-            "j.*",
-            F.col("j").isNull().alias("unparsable"),
-        )
-    )
-    invalid = parsed.where(
+    parsed = parse_statement_lines(spark, files, receipts, uris)
+    is_invalid = (
         F.col("unparsable")
         | F.col("statement_record_id").isNull()
         | F.col("external_reference").isNull()
@@ -322,8 +295,13 @@ def silver_statements(
         | F.to_timestamp(F.col("available_at"), TS_FORMAT).isNull()
         | F.to_date(F.col("business_date"), "yyyy-MM-dd").isNull()
     )
-    valid = parsed.where(~F.col("unparsable")).withColumn(
-        "payload_hash", F.sha2(_text(STATEMENT_PAYLOAD), 256)
+    flagged = parsed.withColumn("_invalid", F.coalesce(is_invalid, F.lit(True)))
+    invalid = flagged.where(F.col("_invalid")).drop("_invalid")
+    # Dòng không hợp lệ chỉ đi quarantine, không được vào Silver hay đối soát.
+    valid = (
+        flagged.where(~F.col("_invalid"))
+        .drop("_invalid")
+        .withColumn("payload_hash", F.sha2(_text(STATEMENT_PAYLOAD), 256))
     )
     grouped = valid.groupBy("dataset_id", "statement_record_id").agg(
         F.countDistinct("payload_hash").alias("variants"),
@@ -340,6 +318,43 @@ def silver_statements(
     )
     flat = grouped.select("dataset_id", "statement_record_id", "variants", "m.*")
     return flat, invalid
+
+
+def parse_statement_lines(
+    spark: SparkSession,
+    files: DataFrame,
+    receipts: Sequence[Receipt],
+    uris: dict[str, str],
+) -> DataFrame:
+    """Mỗi dòng vật lý của các file sao kê có biên nhận, đã tách trường (chưa lọc, chưa gộp)."""
+    mapping = spark.createDataFrame(
+        [
+            (
+                uris[r.file_path],
+                r.file_path,
+                r.delivery_order,
+                r.file_available_at.strftime("%Y-%m-%d %H:%M:%S"),
+                r.sha256,
+            )
+            for r in receipts
+        ],
+        "path string, source_file string, delivery_order int, file_available_at string, "
+        "source_sha256 string",
+    ).withColumn("file_available_at", F.col("file_available_at").cast("timestamp"))
+    return (
+        _read_lines(files)
+        .join(F.broadcast(mapping), "path")
+        .withColumn("j", F.from_json(F.col("line"), STATEMENT_SCHEMA))
+        .select(
+            "source_file",
+            "source_sha256",
+            "delivery_order",
+            "file_available_at",
+            (F.col("idx") + 1).cast("long").alias("source_line"),
+            "j.*",
+            F.col("j").isNull().alias("unparsable"),
+        )
+    )
 
 
 def finish_silver_statements(flat: DataFrame, *, run_id: str) -> DataFrame:

@@ -148,6 +148,7 @@ flat2, invalid2, _ = silver_statements([
 s1_rows = flat2.where(F.col("statement_record_id") == "s1").collect()
 OUT["stmt_conflict_variants"] = [r["variants"] for r in s1_rows]
 OUT["stmt_invalid_rows"] = invalid2.count()
+OUT["stmt_ids_with_invalid_input"] = sorted(r["statement_record_id"] for r in flat2.collect())
 
 empty = spark.createDataFrame([("s3a://b/e", bytearray(b""))], "path string, content binary")
 OUT["empty_file_rows"] = [r["rows"] for r in transforms.file_stats(empty).collect()]
@@ -294,6 +295,8 @@ def test_statement_dedup_receipt_columns_and_invalid_rows(result: dict[str, Any]
     assert result["file_rows"] == [3, 3]
     assert result["stmt_conflict_variants"] == [2]  # s1 hai nội dung khác nhau
     assert result["stmt_invalid_rows"] == 3  # JSON hỏng, channel ngoài enum, amount = 0
+    # Dòng sai (s6 kênh lạ, s7 amount = 0) chỉ đi quarantine, không vào Silver/đối soát.
+    assert result["stmt_ids_with_invalid_input"] == ["s1"]
     assert result["empty_file_rows"] == [0]  # file rỗng có 0 dòng chứ không "không có"
 
 
