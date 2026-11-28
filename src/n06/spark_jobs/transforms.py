@@ -13,11 +13,14 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from datetime import date
 
-from pyspark.sql import Column, DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
-from pyspark.sql.types import LongType, StringType, StructField, StructType
+from pyspark.sql.types import DateType, LongType, StringType, StructField, StructType
 
 from n06.spark_jobs.receipts import Receipt
+
+BIGINT_MIN = -(2**63)
+BIGINT_MAX = 2**63 - 1
 
 TS_FORMAT = "yyyy-MM-dd'T'HH:mm:ssX"
 RECORD_SEPARATOR = "\x1f"
@@ -448,6 +451,120 @@ def gold_fact_transactions(silver: DataFrame, *, run_id: str) -> DataFrame:
         F.element_at("source_pointers", 1).alias("source_pointer"),
         F.lit(run_id).alias("run_id"),
     )
+
+
+def gold_fact_daily_balances_with_overflow(
+    spark: SparkSession,
+    accounts: DataFrame,
+    ledger_entries: DataFrame,
+    *,
+    business_dates: Sequence[date],
+    run_id: str,
+) -> tuple[DataFrame, DataFrame]:
+    """`fact_daily_balances` nhiều ngày (ADR-0005 §2.2, spec I.4.3) và các dòng tràn BIGINT.
+
+    - Mọi tài khoản có mặt trong mọi `business_date >= opening_business_date`
+      (kể cả tài khoản không phát sinh).
+    - Cộng dồn trên `decimal(38, 0)` để kiểm tra miền BIGINT trước khi ép về `long`.
+    """
+    unique_dates = sorted(set(business_dates))
+    dates_df = spark.createDataFrame(
+        [(d,) for d in unique_dates],
+        schema=StructType([StructField("business_date", DateType(), False)]),
+    )
+    grid = (
+        accounts.select(
+            "dataset_id",
+            "account_id",
+            "currency",
+            "opening_balance_minor",
+            "opening_business_date",
+        )
+        .crossJoin(dates_df)
+        .where(F.col("business_date") >= F.col("opening_business_date"))
+    )
+
+    ledger_daily = ledger_entries.groupBy(
+        "dataset_id",
+        F.col("ledger_account_id").alias("account_id"),
+        "business_date",
+        "currency",
+    ).agg(
+        F.sum(
+            F.when(F.col("side") == "DEBIT", F.col("amount_minor").cast("decimal(38,0)")).otherwise(
+                F.lit(0).cast("decimal(38,0)")
+            )
+        ).alias("debit_dec"),
+        F.sum(
+            F.when(
+                F.col("side") == "CREDIT", F.col("amount_minor").cast("decimal(38,0)")
+            ).otherwise(F.lit(0).cast("decimal(38,0)"))
+        ).alias("credit_dec"),
+        F.count(F.lit(1)).cast("int").alias("ledger_entry_count"),
+    )
+
+    joined = grid.join(
+        ledger_daily,
+        on=["dataset_id", "account_id", "business_date", "currency"],
+        how="left",
+    )
+    zero_dec = F.lit(0).cast("decimal(38,0)")
+    with_daily = joined.select(
+        "dataset_id",
+        "account_id",
+        "business_date",
+        "currency",
+        F.col("opening_balance_minor").cast("decimal(38,0)").alias("base_opening_dec"),
+        F.coalesce(F.col("debit_dec"), zero_dec).alias("debit_dec"),
+        F.coalesce(F.col("credit_dec"), zero_dec).alias("credit_dec"),
+        F.coalesce(F.col("ledger_entry_count"), F.lit(0)).cast("int").alias("ledger_entry_count"),
+    ).withColumn("net_dec", F.col("credit_dec") - F.col("debit_dec"))
+
+    win = (
+        Window.partitionBy("dataset_id", "account_id", "currency")
+        .orderBy("business_date")
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    computed = with_daily.withColumn(
+        "closing_dec", F.col("base_opening_dec") + F.sum("net_dec").over(win)
+    ).withColumn("opening_dec", F.col("closing_dec") - F.col("net_dec"))
+
+    min_dec = F.lit(BIGINT_MIN).cast("decimal(38,0)")
+    max_dec = F.lit(BIGINT_MAX).cast("decimal(38,0)")
+    out_of_range = (
+        (F.col("opening_dec") < min_dec)
+        | (F.col("opening_dec") > max_dec)
+        | (F.col("debit_dec") < min_dec)
+        | (F.col("debit_dec") > max_dec)
+        | (F.col("credit_dec") < min_dec)
+        | (F.col("credit_dec") > max_dec)
+        | (F.col("closing_dec") < min_dec)
+        | (F.col("closing_dec") > max_dec)
+    )
+    overflow = computed.where(out_of_range).select(
+        "dataset_id",
+        "account_id",
+        "business_date",
+        "currency",
+        "opening_dec",
+        "debit_dec",
+        "credit_dec",
+        "closing_dec",
+    )
+    balances = computed.select(
+        "dataset_id",
+        "account_id",
+        "business_date",
+        "currency",
+        F.date_format("business_date", "yyyyMMdd").cast("int").alias("date_key"),
+        F.col("opening_dec").cast("long").alias("opening_balance_minor"),
+        F.col("debit_dec").cast("long").alias("debit_minor"),
+        F.col("credit_dec").cast("long").alias("credit_minor"),
+        F.col("closing_dec").cast("long").alias("closing_balance_minor"),
+        "ledger_entry_count",
+        F.lit(run_id).alias("run_id"),
+    )
+    return balances, overflow
 
 
 def _null(type_name: str) -> Column:
