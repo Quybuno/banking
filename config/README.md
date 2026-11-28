@@ -16,6 +16,7 @@
 - `test.toml`: Profile cô lập endpoint/bucket/topic/prefix cho kiểm thử tự động.
 - `kafka.query_name` (mặc định `raw-bronze`): tên query của `n06 stream`, là một đoạn đường dẫn Raw, Bronze, checkpoint và khóa `ingest_batches`; mẫu `^[a-z][a-z0-9_-]{2,63}$`.
 - Mục `[limits]` (trong `default.toml`, mọi profile kế thừa): giới hạn theo dung lượng máy, xem `README.md` mục "Giới hạn quy mô theo dung lượng máy". Khóa không đặt (`max_transactions`, `pipeline_bytes_per_tx`, `disk_probe_path`) nhận giá trị `None`.
+- Mục `[benchmark]` (trong `default.toml`, mọi profile kế thừa): chu kỳ lấy mẫu (`sample_interval_seconds`), ngưỡng file nhỏ (`tiny_file_bytes`), số lần lặp/warm-up/chạy bù (`repetitions`, `warmup`, `max_makeup_runs`), mức smoke (`smoke_level`), ngưỡng mẫu độ trễ (`latency_min_samples_p50_p95`, `latency_min_samples_p99`), ngưỡng RAM nhiễu (`noise_min_free_ram_overhead_mb`).
 
 ## Thứ tự ưu tiên 4 tầng (thấp → cao)
 

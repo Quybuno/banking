@@ -10,6 +10,7 @@ Thứ tự ưu tiên (thấp đến cao):
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 import tomllib
@@ -136,6 +137,15 @@ FIELD_TYPES: dict[str, type] = {
     "limits.generator_bytes_per_tx": int,
     "limits.pipeline_bytes_per_tx": int,
     "limits.disk_probe_path": str,
+    "benchmark.sample_interval_seconds": float,
+    "benchmark.tiny_file_bytes": int,
+    "benchmark.repetitions": int,
+    "benchmark.warmup": int,
+    "benchmark.max_makeup_runs": int,
+    "benchmark.smoke_level": int,
+    "benchmark.latency_min_samples_p50_p95": int,
+    "benchmark.latency_min_samples_p99": int,
+    "benchmark.noise_min_free_ram_overhead_mb": int,
 }
 
 
@@ -273,6 +283,21 @@ class LimitsConfig:
 
 
 @dataclass(frozen=True)
+class BenchmarkConfig:
+    """Tham số khung đo `n06 benchmark` (ADR-0007 B2, B3, Q7, Q9)."""
+
+    sample_interval_seconds: float
+    tiny_file_bytes: int
+    repetitions: int
+    warmup: int
+    max_makeup_runs: int
+    smoke_level: int
+    latency_min_samples_p50_p95: int
+    latency_min_samples_p99: int
+    noise_min_free_ram_overhead_mb: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: str
     business_timezone: str
@@ -285,6 +310,7 @@ class AppConfig:
     dataset: DatasetConfig
     paths: PathsConfig
     limits: LimitsConfig
+    benchmark: BenchmarkConfig
 
 
 def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -358,6 +384,15 @@ def _coerce_env_value(field_path: str, raw_val: str) -> Any:
         stripped = raw_val.strip()
         if re.fullmatch(r"[+-]?\d+", stripped):
             return int(stripped)
+        return raw_val
+    if expected_type is float:
+        stripped = raw_val.strip()
+        try:
+            parsed = float(stripped)
+        except ValueError:
+            return raw_val
+        if math.isfinite(parsed):
+            return parsed
         return raw_val
     if expected_type is bool:
         lower = raw_val.strip().lower()
@@ -456,6 +491,13 @@ def _require_typed(data: Mapping[str, Any], field_path: str) -> Any:
                 field_path,
                 value,
                 f"Sai kiểu dữ liệu: yêu cầu int, nhận {type(value).__name__}.",
+            )
+    elif expected_type is float:
+        if type(value) not in (int, float) or not math.isfinite(float(value)):
+            raise ConfigValidationError(
+                field_path,
+                value,
+                f"Sai kiểu dữ liệu: yêu cầu float hữu hạn, nhận {type(value).__name__}.",
             )
     elif expected_type is bool:
         if type(value) is not bool:
@@ -791,6 +833,45 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         disk_probe_path=_optional_typed(merged, "limits.disk_probe_path"),
     )
 
+    sample_interval_raw = _require_typed(merged, "benchmark.sample_interval_seconds")
+    if sample_interval_raw <= 0:
+        raise ConfigValidationError(
+            "benchmark.sample_interval_seconds",
+            sample_interval_raw,
+            "Chu kỳ lấy mẫu phải > 0.",
+        )
+    benchmark = BenchmarkConfig(
+        sample_interval_seconds=float(sample_interval_raw),
+        tiny_file_bytes=_require_min_int(
+            "benchmark.tiny_file_bytes", _require_typed(merged, "benchmark.tiny_file_bytes"), 1
+        ),
+        repetitions=_require_min_int(
+            "benchmark.repetitions", _require_typed(merged, "benchmark.repetitions"), 1
+        ),
+        warmup=_require_min_int("benchmark.warmup", _require_typed(merged, "benchmark.warmup"), 0),
+        max_makeup_runs=_require_min_int(
+            "benchmark.max_makeup_runs", _require_typed(merged, "benchmark.max_makeup_runs"), 0
+        ),
+        smoke_level=_require_min_int(
+            "benchmark.smoke_level", _require_typed(merged, "benchmark.smoke_level"), 1
+        ),
+        latency_min_samples_p50_p95=_require_min_int(
+            "benchmark.latency_min_samples_p50_p95",
+            _require_typed(merged, "benchmark.latency_min_samples_p50_p95"),
+            1,
+        ),
+        latency_min_samples_p99=_require_min_int(
+            "benchmark.latency_min_samples_p99",
+            _require_typed(merged, "benchmark.latency_min_samples_p99"),
+            1,
+        ),
+        noise_min_free_ram_overhead_mb=_require_min_int(
+            "benchmark.noise_min_free_ram_overhead_mb",
+            _require_typed(merged, "benchmark.noise_min_free_ram_overhead_mb"),
+            0,
+        ),
+    )
+
     operational_prefixes = [
         paths.raw_prefix,
         paths.bronze_prefix,
@@ -820,6 +901,7 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         dataset=dataset,
         paths=paths,
         limits=limits,
+        benchmark=benchmark,
     )
 
 
