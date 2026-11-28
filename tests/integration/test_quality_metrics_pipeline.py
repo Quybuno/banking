@@ -52,6 +52,7 @@ try:
     tx_df = spark.createDataFrame(
         [
             (
+                r["transaction_id"],
                 date.fromisoformat(r["business_date"]),
                 r["currency"],
                 r["status"],
@@ -59,11 +60,13 @@ try:
             )
             for r in txs
         ],
-        "business_date date, currency string, status string, amount_minor long",
+        "transaction_id string, business_date date, currency string, status string, "
+        "amount_minor long",
     )
     le_df = spark.createDataFrame(
         [
             (
+                r["entry_id"],
                 date.fromisoformat(r["business_date"]),
                 r["currency"],
                 r["side"],
@@ -71,7 +74,7 @@ try:
             )
             for r in ledgers
         ],
-        "business_date date, currency string, side string, amount_minor long",
+        "entry_id string, business_date date, currency string, side string, amount_minor long",
     )
     actual = spark_metrics.compute_control_totals_spark(tx_df, le_df)
     comps = compare_control_totals(actual, report)
