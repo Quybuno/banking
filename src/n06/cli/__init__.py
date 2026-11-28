@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
+from n06.cli.backfill import run_backfill
 from n06.cli.doctor import (
     CheckItem,
     DoctorReport,
@@ -110,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
         title="commands",
         metavar=(
             "{init-local,doctor,validate,publish,generate,stream,wait-ingestion,"
-            "ingest-statements,process-day,load-mart}"
+            "ingest-statements,process-day,load-mart,backfill}"
         ),
     )
 
@@ -537,6 +538,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--fail-at", choices=("after_stage",), default=None, help=argparse.SUPPRESS
     )
 
+    backfill_parser = subparsers.add_parser(
+        "backfill",
+        help="Điều phối process-day rồi load-mart theo khoảng ngày [from_date, to_date].",
+        description=(
+            "Chạy process-day cho toàn bộ khoảng ngày gồm hai đầu mút, sau đó publish sang "
+            "PostgreSQL mart bằng load-mart. Nếu process-day lỗi hoặc bị cổng chất lượng chặn "
+            "thì dừng ngay, không load mart."
+        ),
+    )
+    backfill_parser.add_argument("--dataset-id", required=True, help="dataset_id cần backfill.")
+    backfill_parser.add_argument(
+        "--from-date", required=True, help="Ngày bắt đầu (YYYY-MM-DD, gồm đầu mút)."
+    )
+    backfill_parser.add_argument(
+        "--to-date", required=True, help="Ngày kết thúc (YYYY-MM-DD, gồm đầu mút)."
+    )
+    backfill_parser.add_argument(
+        "--as-of-time",
+        required=True,
+        help="Thời điểm đánh giá UTC dạng YYYY-MM-DDTHH:MM:SSZ.",
+    )
+    backfill_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    backfill_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    backfill_parser.add_argument(
+        "--query-name", default=None, help="Ghi đè kafka.query_name khi đọc Raw/Bronze."
+    )
+    backfill_parser.add_argument(
+        "--mart-only",
+        action="store_true",
+        help="Bỏ qua process-day, chỉ chạy lại load-mart từ Gold đã commit.",
+    )
+    backfill_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
+    )
+
     return parser
 
 
@@ -687,6 +733,20 @@ def main(
             profile=parsed.profile,
             env_file=parsed.env_file,
             fail_at=parsed.fail_at,
+            out=stdout,
+        )
+
+    if parsed.command == "backfill":
+        return run_backfill(
+            dataset_id=parsed.dataset_id,
+            from_date=parsed.from_date,
+            to_date=parsed.to_date,
+            as_of_time=parsed.as_of_time,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            query_name=parsed.query_name,
+            mart_only=parsed.mart_only,
+            as_json=parsed.as_json,
             out=stdout,
         )
 
