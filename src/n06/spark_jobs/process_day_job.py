@@ -15,7 +15,6 @@ Chạy trong image Spark bằng `spark-submit` (xem `n06.cli.process_day`).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys

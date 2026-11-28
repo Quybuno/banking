@@ -1,266 +1,301 @@
-"""Kiểm thử nghiệm thu M3 (TASK T34): 3 snapshot tính lại độc lập từ đầu, mỗi snapshot chạy 2 lần.
+"""Kiểm thử nghiệm thu M3 (TASK T34): 3 snapshot trên bộ acceptance theo quy trình II.7.
 
-Chạy toàn bộ chuỗi T30/T31 (Silver dedup + conflicts) -> T33 (`n06.reconciliation.reconcile`) trên
-Spark thật với bộ `contracts/N06_INPUT_CONTRACT_V1/fixtures/acceptance/` tại 3 mốc `as_of_time`:
-  1. `2026-01-02T03:00:00Z` (early)
-  2. `2026-01-02T18:00:00Z` (mid)
-  3. `2026-01-03T06:00:00Z` (late)
-
-Mỗi snapshot chạy độc lập 2 lần (khác `run_id`), kiểm tra bất biến nội dung giữa 2 lần chạy,
-và gọi trực tiếp CLI `n06 validate --against-ground-truth` (oracle T14) xác nhận PASS cả 3 snapshot.
+Chuỗi thật: dựng bản sao tạm theo bố cục generator (II.7) -> `n06 publish`
+-> `stream --available-now` -> `wait-ingestion` -> từng mốc `as_of_time`
+(`early`, `after_cutoff`, `late_corrected`): `ingest-statements --as-of-time`
+-> `process-day` 2 lần -> kiểm semantic_hash không đổi
+-> `n06 validate --against-ground-truth` PASS -> kiểm status/amount/currency/anchor/tuổi
+& control report 7 dòng.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import io
 import json
 import os
 import shutil
-import subprocess
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+import pytest
+from confluent_kafka.admin import AdminClient
+from test_process_day_clean import REPO_ROOT, Stack, _result
 
 from n06.cli import main
 from n06.cli.init_local import parse_dotenv_file
+from n06.cli.object_store import ensure_bucket, target_from_config
+from n06.cli.statements import run_ingest_statements
+from n06.config import load_config
+from n06.reconciliation import ReconStatus
+from n06.storage import PsqlCliControlStore, make_compose_psql_runner
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 ACCEPTANCE_DIR = REPO_ROOT / "contracts" / "N06_INPUT_CONTRACT_V1" / "fixtures" / "acceptance"
+DATASET_ID = "n06-acceptance-v1"
 
 SNAPSHOTS: tuple[tuple[str, str], ...] = (
-    ("early", "2026-01-02T03:00:00Z"),
-    ("mid", "2026-01-02T18:00:00Z"),
-    ("late", "2026-01-03T06:00:00Z"),
+    ("early", "2026-01-02T04:00:00Z"),
+    ("after_cutoff", "2026-01-02T18:00:00Z"),
+    ("late_corrected", "2026-01-03T01:00:00Z"),
 )
 
-_SPARK_SCRIPT = r"""
-import json
-import os
-from datetime import UTC, datetime
-from pathlib import Path
 
-from pyspark.sql import functions as F
-from pyspark.sql.types import LongType, StringType, StructField, StructType, TimestampType
+def _sha256_and_rows(path: Path) -> tuple[str, int]:
+    raw = path.read_bytes()
+    rows = len([line for line in raw.splitlines() if line.strip()])
+    return hashlib.sha256(raw).hexdigest(), rows
 
-from n06.config import load_config
-from n06.ingestion.spark_session import build_spark
-from n06.quality import spark_conflicts
-from n06.reconciliation import ReconciliationSettings
-from n06.reconciliation.reconcile import reconcile
-from n06.spark_jobs import transforms
 
-CONTRACT = Path("/opt/n06/contracts/N06_INPUT_CONTRACT_V1")
-ACCEPTANCE = CONTRACT / "fixtures" / "acceptance"
-OUT_DIR = Path("/opt/n06/it")
+def _stage_acceptance_source(target_dir: Path) -> Path:
+    """Dựng bản sao tạm của fixture acceptance theo bố cục đầu ra generator (II.7)."""
+    source = target_dir / "source"
+    (source / "events").mkdir(parents=True, exist_ok=True)
+    (source / "statements").mkdir(parents=True, exist_ok=True)
+    (source / "manifests").mkdir(parents=True, exist_ok=True)
 
-SNAPSHOTS = [
-    ("early", "2026-01-02T03:00:00Z"),
-    ("mid", "2026-01-02T18:00:00Z"),
-    ("late", "2026-01-03T06:00:00Z"),
-]
+    shutil.copyfile(ACCEPTANCE_DIR / "accounts.jsonl", source / "accounts.jsonl")
+    shutil.copyfile(ACCEPTANCE_DIR / "control_report.json", source / "control_report.json")
+    shutil.copyfile(ACCEPTANCE_DIR / "events.jsonl", source / "events" / "events_00000.jsonl")
 
-def read_jsonl(p: Path):
-    return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-cfg = load_config(profile="demo", env=os.environ)
-spark = build_spark(cfg, "it-t34-acceptance")
-try:
-    tx_events = [
-        ev for ev in read_jsonl(ACCEPTANCE / "events.jsonl")
-        if ev["event_type"] == "TRANSACTION_CREATED"
+    rel_files: list[str] = [
+        "accounts.jsonl",
+        "control_report.json",
+        "events/events_00000.jsonl",
     ]
-    ts = datetime(2026, 1, 1, 1, 0, 10, tzinfo=UTC)
-    tx_schema = StructType([
-        StructField("topic", StringType(), False),
-        StructField("partition", LongType(), False),
-        StructField("offset", LongType(), False),
-        StructField("kafka_timestamp", TimestampType(), False),
-        StructField("ingested_at", TimestampType(), False),
-        StructField("event_id", StringType(), False),
-        StructField("dataset_id", StringType(), False),
-        StructField("transaction_id", StringType(), False),
-        StructField("external_reference", StringType(), False),
-        StructField("account_from", StringType(), False),
-        StructField("account_to", StringType(), False),
-        StructField("amount_minor", LongType(), False),
-        StructField("currency", StringType(), False),
-        StructField("status", StringType(), False),
-        StructField("transaction_type", StringType(), False),
-        StructField("channel", StringType(), False),
-        StructField("event_time", StringType(), False),
-        StructField("business_date", StringType(), False),
-        StructField("_raw_path", StringType(), False),
-    ])
-    tx_rows = [
-        (
-            "n06.acceptance", 0, idx, ts, ts, ev["event_id"],
-            ev["payload"]["dataset_id"], ev["payload"]["transaction_id"],
-            ev["payload"]["external_reference"], ev["payload"]["account_from"],
-            ev["payload"]["account_to"], int(ev["payload"]["amount_minor"]),
-            ev["payload"]["currency"], ev["payload"]["status"],
-            ev["payload"]["transaction_type"], ev["payload"]["channel"],
-            ev["payload"]["event_time"], ev["payload"]["business_date"],
-            "s3a://n06-lakehouse/raw/acc/b0/",
-        )
-        for idx, ev in enumerate(tx_events)
-    ]
-    bronze_tx = spark.createDataFrame(tx_rows, schema=tx_schema)
+    for batch_path in sorted(ACCEPTANCE_DIR.glob("statement_batch_*.jsonl")):
+        dest = source / "statements" / batch_path.name
+        shutil.copyfile(batch_path, dest)
+        rel_files.append(f"statements/{batch_path.name}")
 
-    # Đọc statements + lịch giao file từ statement_deliveries.jsonl (ADR-0006 D3)
-    deliveries = read_jsonl(ACCEPTANCE / "statement_deliveries.jsonl")
-    file_avail_by_stmt_id = {}
-    delivery_order_by_stmt_id = {}
-    for d in deliveries:
-        batch_file = CONTRACT / d["file_path"]
-        for line in batch_file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            rec = json.loads(line)
-            sid = rec["statement_record_id"]
-            file_avail_by_stmt_id[sid] = d["file_available_at"]
-            delivery_order_by_stmt_id[sid] = int(d["delivery_order"])
-
-    stmts = read_jsonl(ACCEPTANCE / "statements.jsonl")
-    stmt_rows = [
-        (
-            s["dataset_id"], s["statement_record_id"], s["external_reference"], s["channel"],
-            int(s["amount_minor"]), s["currency"], s["status"],
-            datetime.fromisoformat(s["event_time"].replace("Z", "+00:00")),
-            datetime.fromisoformat(s["business_date"]).date(),
-            datetime.fromisoformat(s["available_at"].replace("Z", "+00:00")),
-            datetime.fromisoformat(
-                file_avail_by_stmt_id[s["statement_record_id"]].replace("Z", "+00:00")
-            ),
-            delivery_order_by_stmt_id[s["statement_record_id"]],
-            "statements.jsonl", "sha256-acc", idx + 1, "run-stmt",
-        )
-        for idx, s in enumerate(stmts)
-    ]
-    silver_stmts = spark.createDataFrame(
-        stmt_rows,
-        "dataset_id string, statement_record_id string, external_reference string, channel string, "
-        "amount_minor long, currency string, status string, event_time timestamp, "
-        "business_date date, available_at timestamp, file_available_at timestamp, "
-        "delivery_order int, source_file string, source_sha256 string, "
-        "source_line long, run_id string",
+    deliveries_out: list[str] = []
+    for line in (ACCEPTANCE_DIR / "statement_deliveries.jsonl").read_text("utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        rec["file_path"] = f"statements/{Path(rec['file_path']).name}"
+        deliveries_out.append(json.dumps(rec, separators=(",", ":"), sort_keys=True))
+    (source / "statement_deliveries.jsonl").write_text(
+        "\n".join(deliveries_out) + "\n", encoding="utf-8"
     )
 
-    settings = ReconciliationSettings.from_config(cfg)
-
-    def run_once(as_of_str: str, run_id: str):
-        grouped, _, _, kc = spark_conflicts.split_event_conflicts_spark(
-            bronze_tx,
-            dataset_id="n06-acceptance-v1",
-            entity="transaction",
-            key_col="transaction_id",
-            payload_cols=transforms.TRANSACTION_PAYLOAD,
-            run_id=run_id,
+    orig_manifest = json.loads((ACCEPTANCE_DIR / "source_manifest.json").read_text("utf-8"))
+    base_files = [
+        {
+            "path": rel,
+            "sha256": _sha256_and_rows(source / rel)[0],
+            "physical_rows": _sha256_and_rows(source / rel)[1],
+        }
+        for rel in ("accounts.jsonl", "control_report.json", "events/events_00000.jsonl")
+    ]
+    base_manifest = {
+        "schema_version": orig_manifest["schema_version"],
+        "dataset_id": DATASET_ID,
+        "source_batch_id": orig_manifest["source_batch_id"],
+        "files": base_files,
+    }
+    (source / "manifests" / "manifest_00000.json").write_text(
+        json.dumps(base_manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    stmt_files = [rel for rel in rel_files if rel.startswith("statements/")]
+    for idx, stmt_rel in enumerate(stmt_files, start=1):
+        sha, rows = _sha256_and_rows(source / stmt_rel)
+        stmt_manifest = {
+            "schema_version": orig_manifest["schema_version"],
+            "dataset_id": DATASET_ID,
+            "source_batch_id": orig_manifest["source_batch_id"],
+            "files": [{"path": stmt_rel, "sha256": sha, "physical_rows": rows}],
+        }
+        (source / "manifests" / f"manifest_{idx:05d}.json").write_text(
+            json.dumps(stmt_manifest, indent=2) + "\n", encoding="utf-8"
         )
-        silver_tx = transforms.silver_transactions(grouped, run_id=run_id)
-        as_of_dt = datetime.fromisoformat(as_of_str.replace("Z", "+00:00"))
-        gold_recon = reconcile(
-            silver_tx,
-            silver_stmts,
-            kc,
-            as_of_time=as_of_dt,
-            settings=settings,
-            run_id=run_id,
-            input_snapshot_id=f"snap-{as_of_str}",
+    return source
+
+
+def _cleanup_dataset(
+    stack: Stack,
+    runner: Any,
+    tmp_path_factory: pytest.TempPathFactory,
+    *,
+    delete_topic: bool,
+) -> None:
+    store_sql = (
+        f"DELETE FROM quality_metrics WHERE run_id IN "
+        f"(SELECT run_id FROM runs WHERE dataset_id = '{DATASET_ID}');"
+        f"DELETE FROM current_snapshot WHERE dataset_id = '{DATASET_ID}';"
+        f"DELETE FROM runs WHERE dataset_id = '{DATASET_ID}';"
+        f"DELETE FROM ingest_batches WHERE query_name = '{stack.query}';"
+    )
+    runner(store_sql, False)
+    uris = [
+        f"s3a://{stack.bucket}/{prefix}"
+        for prefix in (
+            f"{stack.cfg.paths.raw_prefix}/{stack.query}/",
+            f"{stack.cfg.paths.bronze_prefix}/{stack.query}/",
+            f"{stack.cfg.paths.checkpoints_prefix}/{stack.query}/",
+            f"{stack.cfg.paths.silver_prefix}/{DATASET_ID}/",
+            f"{stack.cfg.paths.gold_prefix}/{DATASET_ID}/",
+            f"{stack.cfg.paths.statements_prefix}/{DATASET_ID}/",
         )
-        rows = []
-        for r in gold_recon.collect():
-            anchor = r["anchor_event_time"]
-            rows.append({
-                "dataset_id": r["dataset_id"],
-                "channel": r["channel"],
-                "external_reference": r["external_reference"],
-                "business_date": r["business_date"].isoformat(),
-                "recon_status": r["recon_status"],
-                "issue_codes": list(r["issue_codes"]),
-                "anchor_event_time": (
-                    anchor.replace(tzinfo=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    if anchor is not None
-                    else None
-                ),
-                "discrepancy_age_seconds": (
-                    int(r["discrepancy_age_seconds"])
-                    if r["discrepancy_age_seconds"] is not None
-                    else None
-                ),
-            })
-        return sorted(rows, key=lambda x: (x["dataset_id"], x["channel"], x["external_reference"]))
-
-    summary = {}
-    for label, as_of_str in SNAPSHOTS:
-        run1 = run_once(as_of_str, f"run-{label}-1")
-        run2 = run_once(as_of_str, f"run-{label}-2")
-        assert run1 == run2, f"Snapshot {label} không idempotent giữa 2 lần chạy!"
-        (OUT_DIR / f"actual_{label}.json").write_text(
-            json.dumps(run1, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        summary[label] = len(run1)
-
-    print("N06_T34_RESULT=" + json.dumps(summary))
-finally:
-    spark.stop()
-"""
+    ]
+    scratch = tmp_path_factory.mktemp("acc-clean")
+    stack.spark({"action": "delete", "uris": uris}, scratch)
+    if delete_topic:
+        admin = AdminClient({"bootstrap.servers": stack.cfg.kafka.bootstrap_servers})
+        with contextlib.suppress(Exception):
+            for future in admin.delete_topics([stack.topic]).values():
+                future.result(timeout=30)
 
 
-def test_t34_three_acceptance_snapshots_idempotent_and_pass_n06_validate(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def acceptance_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
     docker = shutil.which("docker")
-    assert docker is not None, "Cần Docker CLI để chạy Spark nghiệm thu T34."
-    env_file = REPO_ROOT / ".env"
-    assert env_file.is_file(), "Cần file .env."
-
-    script = tmp_path / "run_t34_acceptance.py"
-    script.write_text(_SPARK_SCRIPT, encoding="utf-8")
-    tmp_path.chmod(0o777)
-
-    dotenv = parse_dotenv_file(env_file)
-    env = {**os.environ, **dotenv, "N06__SPARK__EVENT_LOG_ENABLED": "false"}
-    cmd = [
-        docker,
-        "compose",
-        "-f",
-        str(COMPOSE_FILE),
-        "--profile",
-        "core",
-        "run",
-        "--rm",
-        "--no-deps",
-        "-T",
-    ]
-    for folder in ("src", "config", "contracts", "sql"):
-        cmd += ["-v", f"{REPO_ROOT / folder}:/opt/n06/{folder}:ro"]
-    cmd += ["-v", f"{tmp_path}:/opt/n06/it", "-e", "PYTHONPATH=/opt/n06/src"]
-    for key in sorted(env):
-        if key.startswith("N06"):
-            cmd += ["-e", key]
-    cmd += [
-        "spark",
-        "/opt/spark/bin/spark-submit",
-        "--master",
-        "local[2]",
-        "--conf",
-        "spark.ui.enabled=false",
-        f"/opt/n06/it/{script.name}",
-    ]
-    proc = subprocess.run(
-        cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=360, check=False
+    assert docker is not None, "Cần Docker CLI để chạy nghiệm thu T34."
+    dotenv = parse_dotenv_file(REPO_ROOT / ".env")
+    suffix = uuid.uuid4().hex[:10]
+    topic, query = f"n06.test.acc.{suffix}", f"it-acc-{suffix}"
+    host_env = {**dotenv, **os.environ}
+    test_cfg = load_config(profile="test", env=host_env)
+    bucket = test_cfg.object_store.bucket
+    target = target_from_config(test_cfg, host_env)
+    assert ensure_bucket(target, bucket).ready
+    demo_prefixes = load_config(profile="demo", env=host_env).paths
+    env = {
+        **host_env,
+        "N06__KAFKA__EVENTS_TOPIC": topic,
+        "N06__KAFKA__QUERY_NAME": query,
+        "N06__KAFKA__MAX_OFFSETS_PER_TRIGGER": "100",
+        "N06__OBJECT_STORE__BUCKET": bucket,
+        "N06__PATHS__STATEMENTS_PREFIX": demo_prefixes.statements_prefix,
+        "N06__SPARK__SHUFFLE_PARTITIONS": "4",
+        "N06__SPARK__EVENT_LOG_ENABLED": "false",
+    }
+    cfg = load_config(profile="demo", env=env)
+    runner = make_compose_psql_runner(
+        cfg.postgres.control, docker_bin=docker, compose_file=COMPOSE_FILE, repo_root=REPO_ROOT
     )
-    assert proc.returncode == 0, (
-        f"Spark T34 thất bại:\n{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}"
-    )
+    store = PsqlCliControlStore(cfg.postgres.control, psql_runner=runner)
+    source = _stage_acceptance_source(tmp_path_factory.mktemp("acc-src"))
+    stack = Stack(docker, env, cfg, topic, query, DATASET_ID, bucket, store, runner, target, source)
+    _cleanup_dataset(stack, runner, tmp_path_factory, delete_topic=False)
 
-    # Gọi trực tiếp CLI `n06 validate --against-ground-truth` cho cả 3 snapshot!
-    for label, as_of_str in SNAPSHOTS:
-        actual_file = tmp_path / f"actual_{label}.json"
-        assert actual_file.is_file(), f"Thiếu file {actual_file}"
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("N06__KAFKA__NUM_PARTITIONS", "3")
+            out = io.StringIO()
+            code = main(
+                [
+                    "publish",
+                    "--profile",
+                    "test",
+                    "--source-dir",
+                    str(source),
+                    "--topic",
+                    topic,
+                    "--json",
+                ],
+                out=out,
+            )
+            assert code == 0, out.getvalue()
+
+        streamed = stack.job("n06.ingestion.stream_job", ["--available-now"], timeout=400)
+        assert streamed.returncode == 0, streamed.stdout[-3000:] + streamed.stderr[-3000:]
+
         out = io.StringIO()
         code = main(
             [
+                "wait-ingestion",
+                "--profile",
+                "demo",
+                "--dataset-id",
+                DATASET_ID,
+                "--source-dir",
+                str(source),
+                "--query-name",
+                query,
+                "--timeout-seconds",
+                "300",
+            ],
+            out=out,
+        )
+        assert code == 0, out.getvalue()
+
+        yield stack
+    finally:
+        _cleanup_dataset(stack, runner, tmp_path_factory, delete_topic=True)
+
+
+def _snapshot_hashes(store: PsqlCliControlStore) -> dict[tuple[str, str], str]:
+    snaps = store.list_current_snapshots(dataset_id=DATASET_ID, layer="gold")
+    return {(s.entity, s.business_date.isoformat()): s.semantic_hash for s in snaps}
+
+
+def test_t34_three_acceptance_snapshots_end_to_end(acceptance_stack: Stack, tmp_path: Path) -> None:
+    expected_doc = json.loads((ACCEPTANCE_DIR / "expected_results.json").read_text("utf-8"))
+    expected_by_name = {s["name"]: s for s in expected_doc["snapshots"]}
+
+    for label, as_of_str in SNAPSHOTS:
+        # II.7: chỉ công bố các lô statement có file_available_at <= as_of_time.
+        out = io.StringIO()
+        code = run_ingest_statements(
+            source_dir=acceptance_stack.source,
+            as_of_time=as_of_str,
+            dataset_id=DATASET_ID,
+            profile="test",
+            env_file=REPO_ROOT / ".env",
+            env=acceptance_stack.env,
+            as_json=True,
+            out=out,
+        )
+        assert code == 0, out.getvalue()
+
+        # Mỗi snapshot chạy 2 lần độc lập từ đầu; semantic_hash của Gold phải giống hệt nhau.
+        proc1 = acceptance_stack.process_day(as_of=as_of_str)
+        assert proc1.returncode == 0, proc1.stdout[-4000:] + proc1.stderr[-4000:]
+        res1 = _result(proc1, "N06_PROCESS_DAY_RESULT=")
+        hashes1 = _snapshot_hashes(acceptance_stack.store)
+
+        proc2 = acceptance_stack.process_day(as_of=as_of_str)
+        assert proc2.returncode == 0, proc2.stdout[-4000:] + proc2.stderr[-4000:]
+        res2 = _result(proc2, "N06_PROCESS_DAY_RESULT=")
+        hashes2 = _snapshot_hashes(acceptance_stack.store)
+
+        assert res1["run_id"] != res2["run_id"]
+        assert hashes1 == hashes2 and hashes1, (
+            f"Snapshot {label} đổi semantic_hash khi chạy lại: {hashes1} vs {hashes2}"
+        )
+
+        # Control report 7 dòng khớp qua pipeline, không bản ghi bị loại.
+        assert res2["quality"]["control_groups_checked"] == 7
+        assert res2["quality"]["control_mismatches"] == 0
+        assert res2["quality"]["rejected_records"] == 0
+
+        # Đọc fact_reconciliation thực tế từ MinIO cho run2.
+        paths = [
+            f"s3a://{acceptance_stack.bucket}/{acceptance_stack.cfg.paths.gold_prefix}/{DATASET_ID}/"
+            f"fact_reconciliation/run_id={res2['run_id']}/business_date={day}"
+            for day in res2["business_dates"]
+        ]
+        inspect_dir = tmp_path / f"inspect_{label}"
+        inspect_dir.mkdir(parents=True, exist_ok=True)
+        rows = acceptance_stack.spark(
+            {"action": "read", "frames": {"r": {"kind": "reconciliation_full", "paths": paths}}},
+            inspect_dir,
+        )["r"]
+
+        actual_file = tmp_path / f"actual_{label}.json"
+        actual_file.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 1) `n06 validate --against-ground-truth` PASS (status, anchor, age).
+        val_out = io.StringIO()
+        val_code = main(
+            [
                 "validate",
                 "--dataset-id",
-                "n06-acceptance-v1",
+                DATASET_ID,
                 "--against-ground-truth",
                 "--as-of-time",
                 as_of_str,
@@ -272,8 +307,33 @@ def test_t34_three_acceptance_snapshots_idempotent_and_pass_n06_validate(tmp_pat
                 "tests.harness.oracle",
                 "--json",
             ],
-            out=out,
+            out=val_out,
         )
-        payload = json.loads(out.getvalue())
-        assert code == 0, f"n06 validate FAIL cho snapshot {label}: {payload}"
-        assert payload["passed"] is True and payload["mismatches"] == []
+        val_payload = json.loads(val_out.getvalue())
+        assert val_code == 0, f"n06 validate FAIL cho {label}: {val_payload}"
+        assert val_payload["passed"] is True and val_payload["mismatches"] == []
+
+        # 2) So từng khóa với expected_results.json + kiểm amount/currency/status & tuổi (REF-T006).
+        exp_snap = expected_by_name[label]
+        by_ref = {r["external_reference"]: r for r in rows}
+        assert len(by_ref) == expected_doc["counts"]["match_keys"]
+        assert {ref: r["recon_status"] for ref, r in by_ref.items()} == exp_snap[
+            "expected_status_by_reference"
+        ]
+        assert {k: v for k, v in res2["reconciliation"]["status_counts"].items() if v} == exp_snap[
+            "expected_counts"
+        ]
+
+        assert by_ref["REF-T003"]["internal_amount_minor"] == 300
+        assert by_ref["REF-T003"]["statement_amount_minor"] == 301
+        assert by_ref["REF-T004"]["internal_currency"] == "VND"
+        assert by_ref["REF-T004"]["statement_currency"] == "USD"
+        assert by_ref["REF-T005"]["internal_status"] == "SUCCESS"
+        assert by_ref["REF-T005"]["statement_status"] == "FAILED"
+        assert by_ref["REF-X012"]["internal_amount_minor"] is None
+        assert by_ref["REF-X012"]["statement_amount_minor"] == 1200
+        assert by_ref["REF-X012"]["statement_currency"] == "VND"
+        if label == "early":
+            assert by_ref["REF-T006"]["recon_status"] == ReconStatus.PENDING.value
+            assert by_ref["REF-T006"]["anchor_event_time"] == "2026-01-01T01:00:06Z"
+            assert by_ref["REF-T006"]["discrepancy_age_seconds"] == 97194
