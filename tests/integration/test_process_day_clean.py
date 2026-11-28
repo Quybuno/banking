@@ -34,6 +34,7 @@ from n06.cli.statements import run_ingest_statements
 from n06.config import AppConfig, load_config
 from n06.generator import build_dataset
 from n06.ingestion.launcher import job_command
+from n06.reconciliation import ReconStatus
 from n06.storage import PsqlCliControlStore, make_compose_psql_runner
 from n06.storage.object_store import (
     EMPTY_PAYLOAD_SHA256,
@@ -93,6 +94,15 @@ try:
                                     F.size("issue_codes").alias("issues")).collect()
                 result[name] = [[r["channel"], r["external_reference"], r["recon_status"],
                                  r["d"], r["issues"]] for r in rows]
+            elif spec["kind"] == "reconciliation_full":
+                iso = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+                result[name] = [r.asDict() for r in frame.select(
+                    "dataset_id", "channel", "external_reference", "recon_status",
+                    "discrepancy_age_seconds",
+                    F.date_format("anchor_event_time", iso).alias("anchor_event_time"),
+                    "internal_amount_minor", "internal_currency", "internal_status",
+                    "statement_amount_minor", "statement_currency",
+                    "statement_status").collect()]
             else:
                 result[name] = {"columns": frame.columns, "rows": frame.count()}
     print("N06_IT_RESULT=" + json.dumps(result))
@@ -218,6 +228,15 @@ def _lines(source: Path, subdir: str) -> list[dict[str, Any]]:
 
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
+    yield from build_stack(tmp_path_factory, "generator.demo-clean.json", {})
+
+
+def build_stack(
+    tmp_path_factory: pytest.TempPathFactory,
+    generator_file: str,
+    overrides: dict[str, Any],
+) -> Iterator[Stack]:
+    """Sinh dataset từ cấu hình hợp đồng `generator_file`, dựng tài nguyên riêng, dọn khi xong."""
     docker = shutil.which("docker")
     assert docker is not None, "Test tích hợp cần docker; không bỏ qua."
     dotenv = parse_dotenv_file(REPO_ROOT / ".env")
@@ -234,7 +253,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
         **host_env,
         "N06__KAFKA__EVENTS_TOPIC": topic,
         "N06__KAFKA__QUERY_NAME": query,
-        "N06__KAFKA__MAX_OFFSETS_PER_TRIGGER": "100",
+        "N06__KAFKA__MAX_OFFSETS_PER_TRIGGER": overrides.pop("max_offsets", "100"),
         "N06__OBJECT_STORE__BUCKET": bucket,
         "N06__PATHS__STATEMENTS_PREFIX": demo_prefixes.statements_prefix,
         "N06__SPARK__SHUFFLE_PARTITIONS": "4",
@@ -247,7 +266,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
     store = PsqlCliControlStore(cfg.postgres.control, psql_runner=runner)
 
     # Quy mô, số tài khoản và khoảng ngày lấy từ profile `test` (không hardcode trong test).
-    generator = json.loads((CONTRACT_DIR / "config/generator.demo-clean.json").read_text("utf-8"))
+    generator = json.loads((CONTRACT_DIR / "config" / generator_file).read_text("utf-8"))
     generator.update(
         dataset_id=dataset_id,
         transaction_count=test_cfg.dataset.transaction_count,
@@ -255,6 +274,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
         from_date=test_cfg.dataset.from_date,
         to_date=test_cfg.dataset.to_date,
     )
+    generator.update(overrides)
     out_dir = tmp_path_factory.mktemp("pd") / "data"
     build_dataset(generator, out_dir, validate_outputs=False)
     source = out_dir / "source"
@@ -291,6 +311,10 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
 @pytest.fixture(scope="module")
 def ingested(stack: Stack, tmp_path_factory: pytest.TempPathFactory) -> Stack:
     """publish -> stream --available-now -> wait-ingestion -> ingest-statements."""
+    return ingest(stack)
+
+
+def ingest(stack: Stack) -> Stack:
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("N06__KAFKA__NUM_PARTITIONS", "3")
         out = io.StringIO()
@@ -431,8 +455,12 @@ def test_every_expected_key_is_matched_and_totals_equal_control_report(
     assert all(issues == 0 for *_, issues in recon)
     assert first_run["reconciliation"] == {
         "total_keys": len(expected_keys),
-        "matched_keys": len(expected_keys),
-        "unclassified_keys": 0,
+        "status_counts": {
+            status: (len(expected_keys) if status == "MATCHED" else 0)
+            for status in (s.value for s in ReconStatus)
+        },
+        "business_date_disagreements": 0,
+        "age_clamped": 0,
     }
     # Gold fact_transactions: cùng tổng với control_report, đúng cột theo ADR-0005 mục 2.1/2.3.
     assert {(d, c, s): (n, total) for d, c, s, n, total, k in answer["fact"]} == expected_tx
@@ -445,7 +473,7 @@ def test_every_expected_key_is_matched_and_totals_equal_control_report(
         "dataset_id", "channel", "external_reference", "business_date", "date_key",
         "recon_status", "issue_codes",
     ]  # fmt: skip
-    assert len(answer["recon_cols"]["columns"]) == 25
+    assert len(answer["recon_cols"]["columns"]) == 26  # ADR-0005 mục 2.3 + input_snapshot_id
 
     # Silver sao kê và tài khoản so với byte nguồn (số dòng khác nhau, loại trùng theo ID).
     source_statements = [

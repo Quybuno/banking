@@ -44,7 +44,7 @@ lần của image Spark (`spark-submit`, `spark.master` và `spark.driver_memory
 | silver | `statements` | loại trùng theo `statement_record_id`; nhiều `statement_record_id` cho cùng match key được giữ |
 | silver | `accounts` | bản chụp ghi dưới mọi `business_date` của run (ADR-0002 điểm 5) |
 | gold | `fact_transactions` | ADR-0005 mục 2.1 |
-| gold | `fact_reconciliation` | chỉ khóa MATCHED (xem dưới) |
+| gold | `fact_reconciliation` | một dòng mỗi match key, 8 trạng thái (xem dưới) |
 
 **Giao thức commit (đặc tả I.8.1 batch, ADR-0002 mục 3 và 6).**
 
@@ -67,18 +67,16 @@ nhận hàm này, nên kiểm tra chạy trên bucket thật chứ không trên 
 **Chưa làm (task khác).** Quarantine đầy đủ (T30), `key_conflicts` và xung đột khóa (T31), 8 trạng
 thái đối soát (T33), số dư (T40), mart (T26, T41). Hệ quả cho bản T25:
 
-- Bản ghi mà T30 hoặc T31 sẽ xử lý làm job **dừng** với một dòng `N06_PROCESS_DAY_ERROR={"code":...}`
-  và mã thoát 14, không bị bỏ qua. Các mã: `PARSE_ERROR_PRESENT` (Bronze `parse_error` của dataset
-  hoặc không rõ dataset), `ENVELOPE_PAYLOAD_MISMATCH`, `BUSINESS_KEY_CONFLICT`, `EVENT_ID_CONFLICT`
-  (cùng `event_id` khác nội dung hoặc khác khóa nghiệp vụ), `BUSINESS_DATE_INVALID`,
-  `STATEMENT_INVALID_ROWS`, `STATEMENT_ID_CONFLICT`, `STATEMENT_FILE_MISMATCH` (sha256 hoặc số dòng
-  khác biên nhận; file rỗng có 0 dòng), `RECEIPT_WITHOUT_FILE`, `RECEIPT_WITHOUT_MANIFEST`,
-  `ACCOUNT_INVALID_ROWS`, `ACCOUNT_ID_CONFLICT`, `NO_*`. Phạm vi kiểm của T25 là các mã này; phần
-  còn lại của quality (null, referential integrity, balance, overflow) thuộc T30 đến T32.
-- `fact_reconciliation` chỉ chứa khóa MATCHED (đủ một giao dịch độc lập và một sao kê độc lập, trùng
-  `currency`, `amount_minor`, `status`). Khóa còn lại chỉ được đếm trong
-  `reconciliation.unclassified_keys` của kết quả, chưa được ghi và chưa có trạng thái (T33).
-  Đối soát luôn chạy trên toàn dataset; `--business-date` chỉ lọc phần được ghi.
+- Bản ghi lỗi và xung đột khóa đi vào `quarantine.records` và `silver.key_conflicts` (T30, T31).
+  Job dừng với một dòng `N06_PROCESS_DAY_ERROR={"code":...}` và mã thoát 14 khi input không toàn vẹn
+  (`NO_INGEST_BATCHES`, `NO_BRONZE_DATA`, `NO_STATEMENT_RECEIPTS`, `RECEIPT_WITHOUT_FILE`,
+  `RECEIPT_WITHOUT_MANIFEST`, `STATEMENT_FILE_MISMATCH`, `ACCOUNTS_MISSING`, `CONTROL_REPORT_*`,
+  `OUTPUT_COUNT_MISMATCH`, `RECON_BUSINESS_DATE_MISSING`) hoặc cổng chất lượng chặn
+  (`QUALITY_GATE_BLOCKED`).
+- `fact_reconciliation` do `n06.reconciliation` tính (T33, ADR-0006): một dòng mỗi match key với một
+  trong 8 trạng thái, `issue_codes`, `anchor_event_time`, `discrepancy_age_seconds`. Kết quả job in
+  `reconciliation.status_counts`. Đối soát luôn chạy trên toàn dataset; `--business-date` chỉ lọc
+  phần được ghi. `input_snapshot_id` băm tập batch và biên nhận đầu vào, không phụ thuộc `as_of_time`.
 - Silver sao kê chứa mọi file có biên nhận (ADR-0006 D3: hàm đối soát nhận cột `file_available_at`
   và lọc `file_available_at <= as_of_time` ở đầu hàm). Nếu người duyệt hiểu D3 là chỉ file nhìn thấy
   mới vào Silver thì đổi một chỗ lọc ở `process_day_job.py`.
@@ -91,7 +89,8 @@ thái đối soát (T33), số dư (T40), mart (T26, T41). Hệ quả cho bản 
   được, và ghi dùng `coalesce(spark.cores)` nên giảm song song ở dữ liệu rất lớn. Chấp nhận cho
   quy mô P0; E1 ở 5 triệu giao dịch cần đo lại.
 - `--run-id` và `--fail-at` là cờ kiểm thử (không hiện trong `--help`) nằm trong đường chạy thật;
-  `CODE_VERSION` và `RECON_RULE_VERSION` ở `plan.py` là hằng đặt tay, phải tăng khi đổi logic.
+  `CODE_VERSION` (`plan.py`) và `RECON_RULE_VERSION` (`reconciliation/rules.py`) là hằng đặt tay,
+  phải tăng khi đổi logic.
 
 **Cột `accounts`.** Theo `account.schema.json` của hợp đồng (`opening_business_date`); danh sách cột
 trong ADR-0004b 3.4 có `account_code`, `status`, `opening_date` mà hợp đồng không có, và ADR-0005

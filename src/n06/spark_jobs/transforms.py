@@ -11,13 +11,12 @@ bỏ im lặng: xem `n06.spark_jobs.process_day_job`.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from datetime import date, datetime
+from datetime import date
 
 from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import LongType, StringType, StructField, StructType
 
-from n06.spark_jobs.plan import RECON_RULE_VERSION
 from n06.spark_jobs.receipts import Receipt
 
 TS_FORMAT = "yyyy-MM-dd'T'HH:mm:ssX"
@@ -453,93 +452,6 @@ def gold_fact_transactions(silver: DataFrame, *, run_id: str) -> DataFrame:
 
 def _null(type_name: str) -> Column:
     return F.lit(None).cast(type_name)
-
-
-def reconcile_matched(
-    silver_tx: DataFrame,
-    silver_statements: DataFrame,
-    *,
-    as_of_time: datetime,
-    run_id: str,
-) -> tuple[DataFrame, DataFrame]:
-    """Đối soát tối thiểu: chỉ khóa MATCHED (ADR-0006 D2, D5 hàng 5). Trả `(Gold, tổng quan)`.
-
-    Sao kê nhìn thấy khi `file_available_at <= as_of_time` (D3). Khóa là
-    `(dataset_id, channel, external_reference)`; mỗi phía phải có đúng một bản ghi độc lập trước
-    khi so thuộc tính (D2), nên không có many-to-many. Mọi khóa còn lại (khác thuộc tính, thiếu
-    một phía, trùng) KHÔNG được ghi và chỉ được đếm trong `tổng quan`: phân loại thuộc T33.
-    `business_date` của khóa là ngày của giao dịch nội bộ (ADR-0006 Q3).
-    """
-    stamp = as_of_time.strftime("%Y-%m-%d %H:%M:%S")
-    keys = ["dataset_id", "channel", "external_reference"]
-    internal = silver_tx.groupBy(*keys).agg(
-        F.countDistinct("transaction_id").cast("int").alias("internal_record_count"),
-        F.min("business_date").alias("business_date"),
-        F.min(
-            F.struct(
-                "transaction_id",
-                F.col("currency").alias("currency"),
-                F.col("status").alias("status"),
-                F.col("amount_minor").alias("amount_minor"),
-            )
-        ).alias("i"),
-        F.sort_array(F.flatten(F.collect_list("source_pointers"))).alias("internal_pointers"),
-    )
-    visible = silver_statements.where(F.col("file_available_at") <= F.lit(stamp).cast("timestamp"))
-    external = visible.groupBy(*keys).agg(
-        F.countDistinct("statement_record_id").cast("int").alias("statement_record_count"),
-        F.min(
-            F.struct(
-                F.col("currency").alias("currency"),
-                F.col("status").alias("status"),
-                F.col("amount_minor").alias("amount_minor"),
-            )
-        ).alias("s"),
-        F.sort_array(
-            F.collect_list(F.concat_ws(":", "source_file", "source_sha256", "source_line"))
-        ).alias("statement_pointers"),
-    )
-    joined = internal.join(external, keys, "full_outer")
-    matched_condition = (
-        (F.col("internal_record_count") == 1)
-        & (F.col("statement_record_count") == 1)
-        & (F.col("i.currency") == F.col("s.currency"))
-        & (F.col("i.amount_minor") == F.col("s.amount_minor"))
-        & (F.col("i.status") == F.col("s.status"))
-    )
-    matched = joined.where(matched_condition)
-    gold = matched.select(
-        "dataset_id",
-        "channel",
-        "external_reference",
-        "business_date",
-        F.date_format("business_date", "yyyyMMdd").cast("int").alias("date_key"),
-        F.lit("MATCHED").alias("recon_status"),
-        F.array().cast("array<string>").alias("issue_codes"),
-        F.col("i.transaction_id").alias("transaction_id"),
-        F.col("i.amount_minor").alias("internal_amount_minor"),
-        F.col("i.currency").alias("internal_currency"),
-        F.col("i.status").alias("internal_status"),
-        F.col("s.amount_minor").alias("statement_amount_minor"),
-        F.col("s.currency").alias("statement_currency"),
-        F.col("s.status").alias("statement_status"),
-        "internal_record_count",
-        "statement_record_count",
-        _null("timestamp").alias("anchor_event_time"),
-        _null("long").alias("discrepancy_age_seconds"),
-        F.lit(stamp).cast("timestamp").alias("as_of_time"),
-        F.lit(stamp).cast("timestamp").alias("last_evaluated_at"),
-        _null("timestamp").alias("first_seen_at"),
-        _null("timestamp").alias("resolved_at"),
-        F.lit(RECON_RULE_VERSION).alias("recon_rule_version"),
-        F.sort_array(F.concat("internal_pointers", "statement_pointers")).alias("source_pointers"),
-        F.lit(run_id).alias("run_id"),
-    )
-    summary = joined.agg(
-        F.count(F.lit(1)).alias("total_keys"),
-        F.sum(F.when(matched_condition, 1).otherwise(0)).alias("matched_keys"),
-    )
-    return gold, summary
 
 
 def entity_digest(df: DataFrame) -> str:

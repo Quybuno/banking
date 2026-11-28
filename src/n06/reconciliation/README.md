@@ -14,6 +14,9 @@
 - `settings.py`: `ReconciliationSettings` (thời gian chờ, múi giờ, tập status/channel) lấy từ `AppConfig`, mục `[reconciliation]` (ADR-0006 Q10). Không cần Spark.
 - `reconcile.py`: `reconcile(transactions, statements, key_conflicts, as_of_time=..., settings=..., run_id=..., input_snapshot_id=...)` nhận DataFrame Silver theo ADR-0004b và trả một dòng cho mỗi match key theo cột `fact_reconciliation` (ADR-0005 mục 2.3, thêm `input_snapshot_id` do spec S361 yêu cầu). Cần PySpark và `spark.sql.session.timeZone = UTC`; chạy trong image Spark. Unit test Spark nằm ở `tests/integration/test_recon_spark.py`.
 
+`n06 process-day` gọi `reconcile_with_diagnostics` trên Silver của toàn dataset và ghi
+`gold.fact_reconciliation`; kiểm trên dữ liệu lỗi ở `tests/integration/test_process_day_faults.py`.
+
 ## Quy tắc đã hiện thực (ADR-0006)
 
 - Sao kê có mặt khi `file_available_at <= as_of_time`, với `file_available_at` lấy từ biên nhận `_ingest/` (cột của `silver.statements`); giao dịch không bị lọc theo thời gian (Q4).

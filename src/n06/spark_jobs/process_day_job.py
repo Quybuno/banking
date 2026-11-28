@@ -1,4 +1,4 @@
-"""Job `n06 process-day` (T25): Bronze -> Silver -> đối soát MATCHED -> Gold, commit theo `run_id`.
+"""Job `n06 process-day`: Bronze -> Silver -> đối soát 8 trạng thái -> Gold, commit theo `run_id`.
 
 Giao thức (đặc tả I.8.1 batch, ADR-0002 mục 3 và 6):
 1. đọc input theo danh sách `ingest_batches` và biên nhận `_ingest/`, không glob toàn bucket;
@@ -32,6 +32,9 @@ from n06.ingestion import layout
 from n06.ingestion.spark_session import build_spark
 from n06.quality import metrics as quality_metrics
 from n06.quality import spark_conflicts, spark_metrics, spark_quarantine
+from n06.reconciliation import ReconciliationSettings, ReconStatus
+from n06.reconciliation import reconcile as reconciliation
+from n06.reconciliation.rules import KEY_CONFLICT_COLUMNS
 from n06.spark_jobs import plan, receipts, s3_listing, transforms
 from n06.storage import (
     BatchCommitCoordinator,
@@ -574,13 +577,27 @@ def _build_and_write(
         transforms.gold_fact_transactions(silver["transactions"], run_id=run_id)
     )
     # Đối soát chạy trên toàn bộ giao dịch và sao kê của dataset; `--business-date` chỉ lọc đầu ra.
-    recon_all, recon_summary = transforms.reconcile_matched(
-        silver_all["transactions"],
-        silver_all["statements"],
-        as_of_time=state.as_of_time,
-        run_id=run_id,
+    recon_all = state.persist(
+        reconciliation.reconcile_with_diagnostics(
+            silver_all["transactions"],
+            silver_all["statements"],
+            _key_conflicts_for_reconciliation(spark, key_conflict_dfs),
+            as_of_time=state.as_of_time,
+            settings=ReconciliationSettings.from_config(cfg),
+            run_id=run_id,
+            input_snapshot_id=plan.input_snapshot_id(
+                _input_versions(batches, ordered_receipts, args, with_paths=False)
+            ),
+        )
     )
-    recon = state.persist(date_filter(recon_all))
+    # Fact phân vùng theo business_date: dòng thiếu ngày sẽ mất im lặng khi ghi.
+    _require_zero(
+        recon_all.where(F.col("business_date").isNull()),
+        "RECON_BUSINESS_DATE_MISSING",
+        "Match key không xác định được business_date",
+    )
+    recon_wide = state.persist(date_filter(recon_all))
+    recon = state.persist(recon_wide.select(*reconciliation.RESULT_COLUMNS))
 
     outputs: dict[tuple[str, str], DataFrame] = {
         (plan.LAYER_SILVER, "transactions"): silver["transactions"],
@@ -696,8 +713,7 @@ def _build_and_write(
         )
         snapshots.append(snap)
 
-    summary_row = recon_summary.collect()[0]
-    total_keys, matched_keys = int(summary_row["total_keys"]), int(summary_row["matched_keys"] or 0)
+    counters = reconciliation.quality_counters(recon_wide)
     return {
         "run_id": run_id,
         "dataset_id": dataset_id,
@@ -710,9 +726,10 @@ def _build_and_write(
             f"{w.layer}.{w.entity}.{w.business_date.isoformat()}": w.rows for w in state.written
         },
         "reconciliation": {
-            "total_keys": total_keys,
-            "matched_keys": matched_keys,
-            "unclassified_keys": total_keys - matched_keys,
+            "total_keys": counters["keys"],
+            "status_counts": {s.value: counters[s.value] for s in ReconStatus},
+            "business_date_disagreements": counters["business_date_disagreements"],
+            "age_clamped": counters["age_clamped"],
         },
         "physical_counts": counts,
         "quarantine_records": quarantine_total,
@@ -726,6 +743,22 @@ def _build_and_write(
         },
         "committed_snapshots": len(snapshots),
     }
+
+
+def _key_conflicts_for_reconciliation(
+    spark: SparkSession, frames: Sequence[DataFrame]
+) -> DataFrame:
+    """Bằng chứng xung đột khóa của TOÀN BỘ dataset (không lọc ngày); không có thì bảng rỗng."""
+    if not frames:
+        return spark.createDataFrame(
+            [],
+            "dataset_id string, business_date date, entity string, channel string, "
+            "external_reference string, conflict_code string, source_pointers array<string>",
+        )
+    merged = frames[0]
+    for nxt in frames[1:]:
+        merged = merged.unionByName(nxt)
+    return merged.select(*KEY_CONFLICT_COLUMNS)
 
 
 def _evaluate_quality(
