@@ -50,7 +50,7 @@ S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 AS_OF_LATE = "2099-01-01T00:00:00Z"
 PROCESS_DAY = "n06.spark_jobs.process_day_job"
 SILVER_ENTITIES = ("transactions", "ledger_entries", "statements", "accounts")
-GOLD_ENTITIES = ("fact_transactions", "fact_reconciliation")
+GOLD_ENTITIES = ("fact_transactions", "fact_daily_balances", "fact_reconciliation")
 
 _INSPECT = r"""
 import json, os

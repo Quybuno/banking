@@ -17,6 +17,7 @@ from n06.storage.control_store import (
     IngestBatchRecord,
     RunRecord,
     SnapshotRecord,
+    SnapshotSpec,
 )
 
 
@@ -197,6 +198,49 @@ class BatchCommitCoordinator:
             business_date=biz_date,
             output_path=output_path,
             manifest_path=manifest_path,
+            row_count=row_count,
+            semantic_hash=semantic_hash,
+            target_status=target_status,
+            after_run_update_hook=after_run_update_hook,
+        )
+
+    def commit_run_snapshots(
+        self,
+        *,
+        run_id: str,
+        dataset_id: str,
+        snapshots: Sequence[SnapshotSpec],
+        row_count: int,
+        semantic_hash: str,
+        target_status: str = "SUCCEEDED",
+        after_run_update_hook: Callable[[], None] | None = None,
+    ) -> list[SnapshotRecord]:
+        """Cập nhật `runs` và toàn bộ `current_snapshot` của một run trong MỘT transaction."""
+        if not snapshots:
+            raise CommitError("Cần ít nhất một snapshot để commit.")
+        if row_count < 0:
+            raise CommitError(f"row_count không được âm: {row_count}")
+        if target_status not in VALID_TARGET_COMMIT_STATUSES:
+            raise CommitError(f"target_status không hợp lệ: {target_status!r}")
+        normalized: list[SnapshotSpec] = []
+        for s in snapshots:
+            if not s.output_path or f"run_id={run_id}" not in s.output_path:
+                raise CommitError(
+                    f"output_path phải cô lập theo run_id={run_id}: nhận {s.output_path!r}"
+                )
+            normalized.append(
+                SnapshotSpec(
+                    layer=s.layer,
+                    entity=s.entity,
+                    business_date=_normalize_date(s.business_date),
+                    output_path=s.output_path,
+                    manifest_path=s.manifest_path,
+                )
+            )
+        return self._store.commit_run_snapshots_atomic(
+            run_id=run_id,
+            dataset_id=dataset_id,
+            snapshots=normalized,
             row_count=row_count,
             semantic_hash=semantic_hash,
             target_status=target_status,

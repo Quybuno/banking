@@ -20,6 +20,7 @@ from n06.storage.control_store import (
     RunRecord,
     RunStateError,
     SnapshotRecord,
+    SnapshotSpec,
     connect_control_store,
     make_compose_psql_runner,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "RunRecord",
     "RunStateError",
     "SnapshotRecord",
+    "SnapshotSpec",
     "VALID_TARGET_COMMIT_STATUSES",
     "build_run_output_path",
     "compute_semantic_hash",

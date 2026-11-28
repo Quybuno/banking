@@ -15,6 +15,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
+from n06.cli.backfill import run_backfill
+from n06.cli.benchmark import run_benchmark_cli
 from n06.cli.doctor import (
     CheckItem,
     DoctorReport,
@@ -97,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         "  14 (SERVICE_ERROR)     : Một hoặc nhiều service (kafka/minio/postgres/spark) lỗi"
         "\n  15 (KAFKA_DELIVERY_ERROR): Lỗi giao nhận Kafka khi publish (không retry được)"
         "\n  16 (CAPACITY_ERROR)    : Từ chối: không đủ dung lượng ổ hoặc vượt max_transactions"
+        "\n  17 (WORKLOAD_UNAVAILABLE): Thí nghiệm/workload chưa có trên nhánh hiện tại"
     )
     parser = argparse.ArgumentParser(
         prog="n06",
@@ -110,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
         title="commands",
         metavar=(
             "{init-local,doctor,validate,publish,generate,stream,wait-ingestion,"
-            "ingest-statements,process-day,load-mart}"
+            "ingest-statements,process-day,load-mart,backfill,benchmark}"
         ),
     )
 
@@ -460,7 +463,96 @@ def build_parser() -> argparse.ArgumentParser:
         help="In kết quả dạng JSON có cấu trúc.",
     )
 
-    # Lệnh 7: n06 process-day (T25)
+    # Lệnh 8: n06 benchmark
+    bench_parser = subparsers.add_parser(
+        "benchmark",
+        help="Chạy benchmark thí nghiệm E1–E8 theo ADR-0007 và xuất CSV/JSON/biểu đồ.",
+        description=(
+            "Chạy benchmark đo hiệu năng (CPU/RAM theo chuỗi thời gian, Spark event log, "
+            "lưu trữ, tính đúng) và ghi kết quả vào reports/benchmark/<batch_id>/."
+        ),
+    )
+    bench_parser.add_argument(
+        "--experiment",
+        required=True,
+        help="Mã thí nghiệm (E1..E8).",
+    )
+    bench_parser.add_argument(
+        "--level",
+        "--levels",
+        dest="levels",
+        nargs="+",
+        type=_positive_int,
+        default=None,
+        help="Mức biến thử nghiệm (mặc định lấy benchmark.smoke_level từ config).",
+    )
+    bench_parser.add_argument(
+        "--repeat",
+        "--repetitions",
+        dest="repetitions",
+        type=_positive_int,
+        default=None,
+        help="Số lần đo cho mỗi cấu hình (mặc định từ config: 3).",
+    )
+    bench_parser.add_argument(
+        "--warmup",
+        type=int,
+        default=None,
+        help="Số lần warm-up cho mỗi cấu hình (mặc định từ config: 1).",
+    )
+    bench_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed sinh dữ liệu và hoán vị thứ tự chạy.",
+    )
+    bench_parser.add_argument(
+        "--as-of-time",
+        default=None,
+        help="Mốc thời gian as_of_time UTC dạng ...Z.",
+    )
+    bench_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default="benchmark",
+        help="Profile cấu hình (mặc định: benchmark).",
+    )
+    bench_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="File .env cần nạp (mặc định: ./.env).",
+    )
+    bench_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Thư mục ghi kết quả (mặc định: reports/benchmark/<batch_id>).",
+    )
+    bench_parser.add_argument(
+        "--generator-config",
+        type=Path,
+        default=None,
+        help="File cấu hình generator JSON.",
+    )
+    bench_parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Cho phép chạy khi cây Git đang có thay đổi chưa commit.",
+    )
+    bench_parser.add_argument(
+        "--share-baseline",
+        action="store_true",
+        help="Cho phép ghi dấu dùng chung cấu hình gốc (ADR-0007 B1).",
+    )
+    bench_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
+    )
+
+    # Lệnh 9: n06 process-day (T25)
     process_day_parser = subparsers.add_parser(
         "process-day",
         help="Bronze -> Silver (dedup cơ bản) -> đối soát MATCHED -> Gold, commit theo run_id.",
@@ -535,6 +627,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     load_mart_parser.add_argument(
         "--fail-at", choices=("after_stage",), default=None, help=argparse.SUPPRESS
+    )
+
+    backfill_parser = subparsers.add_parser(
+        "backfill",
+        help="Điều phối process-day rồi load-mart theo khoảng ngày [from_date, to_date].",
+        description=(
+            "Chạy process-day cho toàn bộ khoảng ngày gồm hai đầu mút, sau đó publish sang "
+            "PostgreSQL mart bằng load-mart. Nếu process-day lỗi hoặc bị cổng chất lượng chặn "
+            "thì dừng ngay, không load mart."
+        ),
+    )
+    backfill_parser.add_argument("--dataset-id", required=True, help="dataset_id cần backfill.")
+    backfill_parser.add_argument(
+        "--from-date", required=True, help="Ngày bắt đầu (YYYY-MM-DD, gồm đầu mút)."
+    )
+    backfill_parser.add_argument(
+        "--to-date", required=True, help="Ngày kết thúc (YYYY-MM-DD, gồm đầu mút)."
+    )
+    backfill_parser.add_argument(
+        "--as-of-time",
+        required=True,
+        help="Thời điểm đánh giá UTC dạng YYYY-MM-DDTHH:MM:SSZ.",
+    )
+    backfill_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    backfill_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    backfill_parser.add_argument(
+        "--query-name", default=None, help="Ghi đè kafka.query_name khi đọc Raw/Bronze."
+    )
+    backfill_parser.add_argument(
+        "--mart-only",
+        action="store_true",
+        help="Bỏ qua process-day, chỉ chạy lại load-mart từ Gold đã commit.",
+    )
+    backfill_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="In kết quả dạng JSON có cấu trúc.",
     )
 
     return parser
@@ -666,6 +803,24 @@ def main(
             out=stdout,
         )
 
+    if parsed.command == "benchmark":
+        return run_benchmark_cli(
+            experiment=parsed.experiment,
+            levels=parsed.levels,
+            repetitions=parsed.repetitions,
+            warmup=parsed.warmup,
+            seed=parsed.seed,
+            as_of_time=parsed.as_of_time,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            output_dir=parsed.output_dir,
+            allow_dirty=parsed.allow_dirty,
+            share_baseline=parsed.share_baseline,
+            generator_config=parsed.generator_config,
+            as_json=parsed.as_json,
+            out=stdout,
+        )
+
     if parsed.command == "process-day":
         return run_process_day(
             dataset_id=parsed.dataset_id,
@@ -687,6 +842,20 @@ def main(
             profile=parsed.profile,
             env_file=parsed.env_file,
             fail_at=parsed.fail_at,
+            out=stdout,
+        )
+
+    if parsed.command == "backfill":
+        return run_backfill(
+            dataset_id=parsed.dataset_id,
+            from_date=parsed.from_date,
+            to_date=parsed.to_date,
+            as_of_time=parsed.as_of_time,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            query_name=parsed.query_name,
+            mart_only=parsed.mart_only,
+            as_json=parsed.as_json,
             out=stdout,
         )
 

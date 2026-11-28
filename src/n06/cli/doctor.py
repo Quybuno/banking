@@ -77,6 +77,7 @@ class ExitCode(IntEnum):
     SERVICE_ERROR = 14
     KAFKA_DELIVERY_ERROR = 15
     CAPACITY_ERROR = 16
+    WORKLOAD_UNAVAILABLE = 17
 
 
 @dataclass(frozen=True)
