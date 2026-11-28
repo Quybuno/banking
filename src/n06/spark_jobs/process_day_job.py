@@ -29,7 +29,8 @@ from n06.config import QUERY_NAME_PATTERN, AppConfig, ConfigValidationError, loa
 from n06.control import connect_control_db, migrate_up
 from n06.ingestion import layout
 from n06.ingestion.spark_session import build_spark
-from n06.quality import spark_conflicts, spark_quarantine
+from n06.quality import metrics as quality_metrics
+from n06.quality import spark_conflicts, spark_metrics, spark_quarantine
 from n06.spark_jobs import plan, receipts, s3_listing, transforms
 from n06.storage import (
     BatchCommitCoordinator,
@@ -613,6 +614,28 @@ def _build_and_write(
             state.digests["quarantine.records"] = transforms.entity_digest(all_q_for_digest)
             quarantine_total = write_entity(state, plan.LAYER_QUARANTINE, "records", q_frames)
             total_rows += quarantine_total
+
+    # --- Quality metrics & control totals (T32) ---------------------------------------------
+    actual_totals = spark_metrics.compute_control_totals_spark(
+        silver_all["transactions"], silver_all["ledger_entries"]
+    )
+    eval_res = quality_metrics.evaluate_quality_gate(
+        run_id=run_id,
+        dataset_id=dataset_id,
+        business_date=dates[0],
+        physical_records=sum(counts.values()),
+        unique_business_records=int(silver_all["transactions"].count())
+        + int(silver_all["ledger_entries"].count()),
+        quarantine_records=quarantine_total,
+        conflict_records=key_conflicts_total,
+        actual_totals=actual_totals,
+        thresholds=quality_metrics.QualityThresholds(
+            max_quarantine_rate=1.0,
+            max_conflict_count=1_000_000_000,
+            fail_on_control_total_mismatch=False,
+        ),
+    )
+    store.upsert_quality_metrics(eval_res.metrics)
 
     if args.fail_at == "after_write":  # chỉ cho kiểm thử: run thất bại không bao giờ được đọc
         raise DataError("INJECTED_FAILURE", "Tắt có chủ đích sau khi ghi output, trước commit.")
