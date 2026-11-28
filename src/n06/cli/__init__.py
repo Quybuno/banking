@@ -36,6 +36,7 @@ from n06.cli.init_local import (
     parse_dotenv_file,
     run_init_local,
 )
+from n06.cli.process_day import run_process_day
 from n06.cli.publish import run_publish
 from n06.cli.statements import run_ingest_statements
 from n06.cli.validate import parse_as_of_time_utc, run_validate
@@ -101,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
-        metavar="{init-local,doctor,validate,publish,generate,stream,ingest-statements}",
+        metavar="{init-local,doctor,validate,publish,generate,stream,ingest-statements,process-day}",
     )
 
     # Lệnh 1: n06 init-local
@@ -417,6 +418,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="In kết quả dạng JSON có cấu trúc.",
     )
 
+    # Lệnh 7: n06 process-day (T25)
+    process_day_parser = subparsers.add_parser(
+        "process-day",
+        help="Bronze -> Silver (dedup cơ bản) -> đối soát MATCHED -> Gold, commit theo run_id.",
+        description=(
+            "Đọc Bronze theo ingest_batches và sao kê theo biên nhận _ingest/, ghi Silver và Gold "
+            "Parquet vào đường dẫn run_id mới (đã kiểm chưa có object) rồi trỏ current_snapshot. "
+            "Chạy trong image Spark. Dữ liệu cần quarantine hoặc xử lý xung đột (T30, T31) làm "
+            "job dừng với mã lỗi có tên."
+        ),
+    )
+    process_day_parser.add_argument("--dataset-id", required=True, help="dataset_id cần xử lý.")
+    process_day_parser.add_argument(
+        "--as-of-time",
+        default=None,
+        help="Đồng hồ giả lập UTC YYYY-MM-DDTHH:MM:SSZ; chỉ sao kê có biên nhận "
+        "file_available_at <= mốc này được đối soát (mặc định: thời điểm hiện tại UTC).",
+    )
+    process_day_parser.add_argument(
+        "--business-date",
+        action="append",
+        default=None,
+        help="Chỉ xử lý ngày này (YYYY-MM-DD); lặp lại để chọn nhiều ngày "
+        "(mặc định: mọi ngày có dữ liệu).",
+    )
+    process_day_parser.add_argument(
+        "--query-name", default=None, help="Ghi đè kafka.query_name (query đã ghi Bronze)."
+    )
+    process_day_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    process_day_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    process_day_parser.add_argument("--run-id", default=None, help=argparse.SUPPRESS)
+    process_day_parser.add_argument(
+        "--fail-at", choices=("after_write",), default=None, help=argparse.SUPPRESS
+    )
+
     return parser
 
 
@@ -532,6 +575,19 @@ def main(
             profile=parsed.profile,
             env_file=parsed.env_file,
             as_json=parsed.as_json,
+            out=stdout,
+        )
+
+    if parsed.command == "process-day":
+        return run_process_day(
+            dataset_id=parsed.dataset_id,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
+            query_name=parsed.query_name,
+            as_of_time=parsed.as_of_time,
+            business_dates=parsed.business_date or (),
+            run_id=parsed.run_id,
+            fail_at=parsed.fail_at,
             out=stdout,
         )
 
