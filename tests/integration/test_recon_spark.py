@@ -244,17 +244,25 @@ def _scenarios() -> list[dict[str, Any]]:
             "name": "key-conflicts",
             "settings": base,
             "as_of_time": far,
-            "transactions": [tx("C1"), tx("C3")],
-            "statements": [st("C1"), st("C2", event_time="2026-01-01T03:00:00Z")],
+            "transactions": [tx("C1"), tx("C3"), tx("C8")],
+            "statements": [st("C1"), st("C2", event_time="2026-01-01T03:00:00Z"), st("C8")],
             "key_conflicts": [
                 kc("C1", "BUSINESS_KEY_CONFLICT"),
                 kc("C2", "SCHEMA_VALUE", entity="statement"),
                 kc("C4", "EVENT_ID_CONFLICT"),
                 kc("C5", "SCHEMA_VALUE"),
+                kc("C8", "SCHEMA_VALUE"),
                 kc(None, "BUSINESS_KEY_CONFLICT"),
                 kc("C6", "BUSINESS_KEY_CONFLICT", entity="ledger_entry"),
                 kc("C7", "BUSINESS_KEY_CONFLICT", channel="SIM_CHANNEL_X"),
             ],
+        },
+        {  # thuộc tính NULL ở một phía không được coi là khớp
+            "name": "null-attributes",
+            "settings": base,
+            "as_of_time": far,
+            "transactions": [tx("Z1", currency=None), tx("Z2", amount=None)],
+            "statements": [st("Z1"), st("Z2")],
         },
         {  # tập channel/status cấu hình
             "name": "config-filter",
@@ -387,6 +395,30 @@ def test_three_acceptance_snapshots_match_expected_results_and_oracle(
             assert row["discrepancy_age_seconds"] == int((as_of - _ts(anchor)).total_seconds())
             assert row["discrepancy_age_seconds"] >= 0
             assert row["issue_codes"], f"{ref} khác MATCHED phải có issue_codes"
+
+        # tiền, currency, status hai phía của từng khóa đủ một bản ghi mỗi phía (spec II.6 dòng 855)
+        for ref, row in rows.items():
+            if row["recon_status"] == "DUPLICATE_OR_CONFLICT":
+                continue
+            internal = tx_rows.get(ref)
+            seen = [
+                s
+                for s in st_rows
+                if s["external_reference"] == ref
+                and _ts(delivered[s["statement_record_id"]]) <= as_of
+            ]
+            for side, record, prefix in (
+                ("internal", internal, "internal"),
+                ("statement", seen[0] if seen else None, "statement"),
+            ):
+                if record is None:
+                    assert row[f"{prefix}_amount_minor"] is None, (ref, side)
+                    assert row[f"{prefix}_currency"] is None, (ref, side)
+                    assert row[f"{prefix}_status"] is None, (ref, side)
+                else:
+                    assert row[f"{prefix}_amount_minor"] == record["amount_minor"], (ref, side)
+                    assert row[f"{prefix}_currency"] == record["currency"], (ref, side)
+                    assert row[f"{prefix}_status"] == record["status"], (ref, side)
 
         oracle = evaluate_snapshot(
             transactions=transactions, statements=statements, deliveries=deliveries,
@@ -554,10 +586,20 @@ def test_key_conflicts_and_quarantine_markers(worker_output: dict[str, Any]) -> 
     assert rows["C4"]["anchor_event_time"] is None and rows["C4"]["discrepancy_age_seconds"] is None
     assert (rows["C4"]["internal_record_count"], rows["C4"]["statement_record_count"]) == (0, 0)
     # Không bịa khóa: quarantine không còn bản ghi hợp lệ, thiếu key, ledger_entry, kênh ngoài tập
-    assert set(rows) == {"C1", "C2", "C3", "C4"}
+    assert set(rows) == {"C1", "C2", "C3", "C4", "C8"}
+    # C8: hai phía khớp, có một bản ghi quarantine cùng khóa: MATCHED, issue_codes rỗng (ADR-0005)
+    assert rows["C8"]["recon_status"] == "MATCHED" and rows["C8"]["issue_codes"] == []
 
 
 # tập channel/status cấu hình
+def test_null_attribute_on_one_side_is_a_mismatch_not_a_match(
+    worker_output: dict[str, Any],
+) -> None:
+    rows = _by_ref(_scenario(worker_output, "null-attributes")["runs"][0])
+    assert rows["Z1"]["recon_status"] == "CURRENCY_MISMATCH"
+    assert rows["Z2"]["recon_status"] == "AMOUNT_MISMATCH"
+
+
 def test_configured_channel_and_status_sets_filter_both_sides(
     worker_output: dict[str, Any],
 ) -> None:

@@ -65,7 +65,10 @@ RESULT_COLUMNS: tuple[str, ...] = (
 )
 """Cột đầu ra: đúng ADR-0005 mục 2.3, thêm `input_snapshot_id` (spec S361 yêu cầu lưu ở P0)."""
 
-_EMPTY_STRINGS = F.array().cast("array<string>")
+
+def _empty_strings() -> Column:
+    """Mảng chuỗi rỗng; tạo khi gọi hàm, vì `F.array()` cần SparkContext đang hoạt động."""
+    return F.array().cast("array<string>")
 
 
 def _require_columns(df: DataFrame, name: str, required: Sequence[str]) -> None:
@@ -256,23 +259,27 @@ def reconcile_with_diagnostics(
         n_int.alias("n_int"),
         n_st.alias("n_st"),
         has_quarantine.alias("has_quarantine"),
-        F.coalesce(F.col("conflict_codes"), _EMPTY_STRINGS).alias("conflict_codes"),
+        F.coalesce(F.col("conflict_codes"), _empty_strings()).alias("conflict_codes"),
         F.col("t"),
         F.col("s"),
         F.coalesce(F.col("t_event"), F.col("s_event")).alias("anchor_candidate"),
         F.array_sort(
             F.array_distinct(
                 F.concat(
-                    F.coalesce(F.col("t_ptrs"), _EMPTY_STRINGS),
-                    F.coalesce(F.col("s_ptrs"), _EMPTY_STRINGS),
-                    F.coalesce(F.col("kc_ptrs"), _EMPTY_STRINGS),
+                    F.coalesce(F.col("t_ptrs"), _empty_strings()),
+                    F.coalesce(F.col("s_ptrs"), _empty_strings()),
+                    F.coalesce(F.col("kc_ptrs"), _empty_strings()),
                 )
             )
         ).alias("source_pointers"),
         duplicate.alias("is_duplicate"),
-        (comparable & (F.col("t.currency") != F.col("s.currency"))).alias("is_currency_diff"),
-        (comparable & (F.col("t.amount_minor") != F.col("s.amount_minor"))).alias("is_amount_diff"),
-        (comparable & (F.col("t.status") != F.col("s.status"))).alias("is_status_diff"),
+        (comparable & ~F.col("t.currency").eqNullSafe(F.col("s.currency"))).alias(
+            "is_currency_diff"
+        ),
+        (comparable & ~F.col("t.amount_minor").eqNullSafe(F.col("s.amount_minor"))).alias(
+            "is_amount_diff"
+        ),
+        (comparable & ~F.col("t.status").eqNullSafe(F.col("s.status"))).alias("is_status_diff"),
         comparable.alias("is_comparable"),
     )
 
