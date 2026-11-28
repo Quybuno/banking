@@ -598,6 +598,22 @@ def _build_and_write(
     )
     gold_balances = state.persist(date_filter(balances_all))
     # Đối soát chạy trên toàn bộ giao dịch và sao kê của dataset; `--business-date` chỉ lọc đầu ra.
+    prev_recon_snaps = store.list_current_snapshots(
+        dataset_id=dataset_id,
+        layer=plan.LAYER_GOLD,
+        entity="fact_reconciliation",
+    )
+    prev_recon_paths = [
+        s.output_path for s in prev_recon_snaps if s3_listing.exists(spark, s.output_path)
+    ]
+    if prev_recon_paths:
+        previous_recon = spark.read.parquet(*prev_recon_paths)
+    else:
+        previous_recon = spark.createDataFrame(
+            [],
+            "dataset_id string, channel string, external_reference string, "
+            "first_seen_at timestamp, resolved_at timestamp",
+        )
     recon_all = state.persist(
         reconciliation.reconcile_with_diagnostics(
             silver_all["transactions"],
@@ -609,6 +625,7 @@ def _build_and_write(
             input_snapshot_id=plan.input_snapshot_id(
                 _input_versions(batches, ordered_receipts, args, with_paths=False)
             ),
+            previous_recon=previous_recon,
         )
     )
     # Fact phân vùng theo business_date: dòng thiếu ngày sẽ mất im lặng khi ghi.

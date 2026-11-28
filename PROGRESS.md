@@ -53,7 +53,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T52 | C + A | TODO | | | |
 | T53 | cả nhóm | TODO | | | |
 | T60 | C | TODO | | | P1, thuộc bản nộp; Airflow 3.4.0, profile `orchestration`, BashOperator gọi `n06` (ADR-0013) |
-| T61 | B | TODO | | | P1, thuộc bản nộp; Late correction, `first_seen_at`, `resolved_at` (ADR-0006) |
+| T61 | B | IN_REVIEW | | `verify_contract.py` (14/14 PASS), `check_rules.py` OK, `ruff` PASS, `pytest tests/integration/test_late_correction.py` (2/2 PASS trên hạ tầng thật, 643.04s); `pytest tests/unit` chỉ vướng 2 test `observability` thiếu `matplotlib` trong `.venv` | P1: duy trì `first_seen_at`/`resolved_at` từ `current_snapshot` trước đó (không reset khi chạy lại), tăng `CODE_VERSION="process-day-6"`; kiểm late statement sửa kết quả đã publish trên mart (13 match keys không tăng sai) và late ledger ngày cũ tính lại số dư ngày sau |
 | T62 | C | TODO | | | P1, thuộc bản nộp; Drill-down và runbook |
 | T63 | A | TODO | | | P1, thuộc bản nộp; E6 (ADR-0007) |
 | T64 | B | TODO | | | P1, thuộc bản nộp; E7 (ADR-0007) |
