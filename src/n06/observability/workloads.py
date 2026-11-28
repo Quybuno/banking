@@ -172,6 +172,19 @@ def _resolve_host_kafka_bootstrap(env: Mapping[str, str]) -> str:
     return f"{host}:{port}"
 
 
+def _cleanup_kafka_topic(bootstrap_servers: str, topic: str) -> None:
+    """Dọn topic tạm sau lần chạy (best-effort theo ADR-0007 B2.4)."""
+    try:
+        from confluent_kafka.admin import AdminClient
+
+        admin = AdminClient({"bootstrap.servers": bootstrap_servers})
+        futures = admin.delete_topics([topic], operation_timeout=10.0)
+        for fut in futures.values():
+            fut.result(timeout=10.0)
+    except Exception:
+        pass
+
+
 def _run_ingest_stages(
     cfg: AppConfig,
     dataset: DatasetPrepResult,
@@ -187,73 +200,80 @@ def _run_ingest_stages(
     env_file = params.get("env_file")
     host_bootstrap = _resolve_host_kafka_bootstrap(env)
 
-    t_pub0 = time.monotonic()
-    pub_code = run_publish(
-        profile=cfg.profile,
-        env_file=env_file,
-        source_dir=dataset.source_dir,
-        topic=topic,
-        rate=cfg.producer.rate,
-        key_strategy=cfg.producer.key_strategy,
-        allow_non_empty_topic=True,
-        config_overrides={
-            "kafka.num_partitions": partitions,
-            "kafka.bootstrap_servers": host_bootstrap,
-        },
-    )
-    pub_sec = round(time.monotonic() - t_pub0, 4)
-    if pub_code != int(ExitCode.OK):
-        return WorkloadResult(
-            exit_code=pub_code,
-            status="error",
-            phase_seconds={"publish": pub_sec},
-            records_processed=0,
-            throughput_entity="event",
-            throughput_scope="ingest",
-            correctness_ok=False,
-            error_type="PublishError",
-            error_message=f"n06 publish failed with exit code {pub_code}",
+    try:
+        t_pub0 = time.monotonic()
+        pub_code = run_publish(
+            profile=cfg.profile,
+            env_file=env_file,
+            source_dir=dataset.source_dir,
+            topic=topic,
+            rate=cfg.producer.rate,
+            key_strategy=cfg.producer.key_strategy,
+            allow_non_empty_topic=True,
+            config_overrides={
+                "kafka.num_partitions": partitions,
+                "kafka.bootstrap_servers": host_bootstrap,
+            },
         )
+        pub_sec = round(time.monotonic() - t_pub0, 4)
+        if pub_code != int(ExitCode.OK):
+            return WorkloadResult(
+                exit_code=pub_code,
+                status="error",
+                phase_seconds={"publish": pub_sec},
+                records_processed=0,
+                throughput_entity="event",
+                throughput_scope="ingest",
+                correctness_ok=False,
+                error_type="PublishError",
+                error_message=f"n06 publish failed with exit code {pub_code}",
+            )
 
-    t_stream0 = time.monotonic()
-    stream_code = run_stream(
-        profile=cfg.profile,
-        env_file=env_file,
-        query_name=query_name,
-        available_now=True,
-        env={
-            **env,
-            "N06__KAFKA__EVENTS_TOPIC": topic,
-            "N06__KAFKA__QUERY_NAME": query_name,
-        },
-    )
-    stream_sec = round(time.monotonic() - t_stream0, 4)
-    ingest_sec = round(pub_sec + stream_sec, 4)
+        t_stream0 = time.monotonic()
+        stream_code = run_stream(
+            profile=cfg.profile,
+            env_file=env_file,
+            query_name=query_name,
+            available_now=True,
+            env={
+                **env,
+                "N06__KAFKA__EVENTS_TOPIC": topic,
+                "N06__KAFKA__QUERY_NAME": query_name,
+            },
+        )
+        stream_sec = round(time.monotonic() - t_stream0, 4)
+        ingest_sec = round(pub_sec + stream_sec, 4)
 
-    if stream_code != int(ExitCode.OK):
+        if stream_code != int(ExitCode.OK):
+            return WorkloadResult(
+                exit_code=stream_code,
+                status="error",
+                phase_seconds={"publish": pub_sec, "stream": stream_sec, "ingest": ingest_sec},
+                records_processed=0,
+                throughput_entity="event",
+                throughput_scope="ingest",
+                correctness_ok=False,
+                error_type="StreamError",
+                error_message=f"n06 stream failed with exit code {stream_code}",
+            )
+
         return WorkloadResult(
-            exit_code=stream_code,
-            status="error",
+            exit_code=0,
+            status="ok",
             phase_seconds={"publish": pub_sec, "stream": stream_sec, "ingest": ingest_sec},
-            records_processed=0,
-            throughput_entity="event",
-            throughput_scope="ingest",
-            correctness_ok=False,
-            error_type="StreamError",
-            error_message=f"n06 stream failed with exit code {stream_code}",
+            records_processed=dataset.transaction_count,
+            throughput_entity="transaction",
+            throughput_scope=(
+                "ingest (process-day pending T25)" if params.get("experiment") == "E1" else "ingest"
+            ),
+            correctness_ok=True,
+            extra_metrics=[
+                ("producer_target_rate", cfg.producer.rate, "events/s", "producer"),
+                ("kafka_partitions", partitions, "count", "kafka"),
+            ],
         )
-
-    return WorkloadResult(
-        exit_code=0,
-        status="ok",
-        phase_seconds={"publish": pub_sec, "stream": stream_sec, "ingest": ingest_sec},
-        records_processed=dataset.transaction_count,
-        throughput_entity="transaction",
-        throughput_scope=(
-            "ingest (process-day pending T25)" if params.get("experiment") == "E1" else "ingest"
-        ),
-        correctness_ok=True,
-    )
+    finally:
+        _cleanup_kafka_topic(host_bootstrap, topic)
 
 
 def default_workload_registry() -> WorkloadRegistry:

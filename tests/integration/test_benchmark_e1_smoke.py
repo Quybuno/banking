@@ -61,10 +61,10 @@ def test_benchmark_e1_smoke_end_to_end(tmp_path: Path) -> None:
     with runs_csv.open(encoding="utf-8") as fh:
         rows = list(csv.reader(fh))
     assert tuple(rows[0]) == RUNS_COLUMNS
-    assert len(rows) == 2
+    assert len(rows) >= 2
 
     parsed_runs = json.loads(runs_json.read_text(encoding="utf-8"))
-    assert len(parsed_runs) == 1
+    assert 1 <= len(parsed_runs) <= 1 + cfg.benchmark.max_makeup_runs
     assert parsed_runs[0]["experiment"] == "E1"
     assert parsed_runs[0]["status"] == "ok"
     assert len(parsed_runs[0]["commit_sha"]) == 40

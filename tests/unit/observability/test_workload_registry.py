@@ -60,3 +60,76 @@ def test_cli_help_includes_benchmark() -> None:
     code = main(["benchmark", "--help"], out=buf)
     assert code == 0
     assert "--experiment" in buf.getvalue()
+
+
+def test_makeup_runs_triggered_when_measured_run_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from n06.observability.runner import run_benchmark
+    from n06.observability.workloads import (
+        DatasetPrepResult,
+        WorkloadRegistry,
+        WorkloadResult,
+        WorkloadSpec,
+    )
+
+    calls = 0
+
+    def fake_runner(cfg, ds, run_id, level, params):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return WorkloadResult(
+                exit_code=1,
+                status="error",
+                phase_seconds={"ingest": 0.1},
+                records_processed=0,
+                throughput_entity="transaction",
+                throughput_scope="ingest",
+                correctness_ok=False,
+            )
+        return WorkloadResult(
+            exit_code=0,
+            status="ok",
+            phase_seconds={"ingest": 0.2},
+            records_processed=100,
+            throughput_entity="transaction",
+            throughput_scope="ingest",
+            correctness_ok=True,
+        )
+
+    reg = WorkloadRegistry()
+    reg.register(WorkloadSpec("E1", "transaction_count", None, "host", "fake", fake_runner))
+
+    monkeypatch.setattr(
+        "n06.observability.runner.prepare_benchmark_dataset",
+        lambda *a, **kw: DatasetPrepResult(
+            0, tmp_path / "ds", tmp_path / "ds/source", 0.5, 10.0, "", "", 100, 42
+        ),
+    )
+    monkeypatch.setattr(
+        "n06.observability.runner.evaluate_run_counting",
+        lambda **kw: (kw["status"] == "ok" and kw["correctness_ok"], None),
+    )
+
+    summary = run_benchmark(
+        experiment="E1",
+        levels=[100],
+        repetitions=2,
+        warmup=0,
+        profile="test",
+        output_dir=tmp_path / "out",
+        allow_dirty=True,
+        registry=reg,
+        env={
+            "N06_OBJECT_STORE_ACCESS_KEY": "ak",
+            "N06_OBJECT_STORE_SECRET_KEY": "sk",
+            "N06_POSTGRES_MART_PASSWORD": "pw",
+            "N06_POSTGRES_CONTROL_PASSWORD": "pw",
+            "N06_POSTGRES_AIRFLOW_PASSWORD": "pw",
+            "N06_POSTGRES_METABASE_PASSWORD": "pw",
+        },
+    )
+    # 2 lần chính (1 lỗi, 1 ok) + 1 lần chạy bù (ok) = 3 lần chạy, 2 lần đếm được
+    assert summary.total_runs == 3
+    assert summary.counted_runs == 2

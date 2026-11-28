@@ -321,6 +321,7 @@ def run_benchmark(
                     all_metrics.extend(run_metrics)
 
         # Measured repetitions
+        counted_by_level: dict[int, int] = {lvl: 0 for lvl in prepared_by_level}
         for rep in range(1, effective_reps + 1):
             order_levels = list(prepared_by_level.keys())
             rng.shuffle(order_levels)
@@ -357,6 +358,56 @@ def run_benchmark(
                 )
                 all_runs.append(row)
                 all_metrics.extend(run_metrics)
+                if row["counted"]:
+                    counted_by_level[lvl] += 1
+                if row["status"] == "ok" and row["correctness_ok"]:
+                    highest_level_ok = (
+                        lvl if highest_level_ok is None else max(highest_level_ok, lvl)
+                    )
+
+        # Chạy bù tối đa `max_makeup_runs` lần mỗi cấu hình khi thiếu lần đếm được (ADR-0007 B2.5).
+        for lvl in prepared_by_level:
+            makeup_idx = 0
+            while (
+                counted_by_level[lvl] < effective_reps
+                and makeup_idx < cfg.benchmark.max_makeup_runs
+            ):
+                makeup_idx += 1
+                rep = effective_reps + makeup_idx
+                run_order += 1
+                run_id = f"{batch_id}-{spec.experiment}-{lvl}-m{makeup_idx}"
+                ds = prepared_by_level[lvl]
+                row, run_metrics = _execute_single_run(
+                    cfg=cfg,
+                    spec_exp=spec.experiment,
+                    var_name=spec.variable_name,
+                    var_val=lvl,
+                    var2_name=spec.variable2_name,
+                    var2_val=None,
+                    ram_scope=spec.ram_scope,
+                    runner_fn=spec.runner,
+                    dataset=ds,
+                    batch_id=batch_id,
+                    run_id=run_id,
+                    config_id=f"{spec.experiment}-{lvl}",
+                    repetition=rep,
+                    run_order=run_order,
+                    phase="measured",
+                    cache_state="warm",
+                    shared_with="baseline" if share_baseline else None,
+                    env_info=env_info,
+                    config_hash=config_hash,
+                    config_json=config_json,
+                    as_of_time=effective_as_of,
+                    driver_mb=driver_mb,
+                    ts_dir=ts_dir,
+                    env_file=env_file,
+                    env=env,
+                )
+                all_runs.append(row)
+                all_metrics.extend(run_metrics)
+                if row["counted"]:
+                    counted_by_level[lvl] += 1
                 if row["status"] == "ok" and row["correctness_ok"]:
                     highest_level_ok = (
                         lvl if highest_level_ok is None else max(highest_level_ok, lvl)
