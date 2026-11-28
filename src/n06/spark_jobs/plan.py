@@ -18,26 +18,29 @@ from n06.storage import build_run_output_path, compute_semantic_hash, require_un
 
 LAYER_SILVER = "silver"
 LAYER_GOLD = "gold"
+LAYER_QUARANTINE = "quarantine"
 SILVER_ENTITIES = ("transactions", "ledger_entries", "statements", "accounts")
 GOLD_ENTITIES = ("fact_transactions", "fact_reconciliation")
-# Thứ tự ghi và commit; quarantine, key_conflicts và dimension là việc của task khác.
+QUARANTINE_ENTITIES = ("records",)
+# Thứ tự ghi và commit; key_conflicts (T31) và dimension bổ sung là việc của task khác.
 OUTPUTS: tuple[tuple[str, str], ...] = tuple(
     [(LAYER_SILVER, entity) for entity in SILVER_ENTITIES]
     + [(LAYER_GOLD, entity) for entity in GOLD_ENTITIES]
+    + [(LAYER_QUARANTINE, entity) for entity in QUARANTINE_ENTITIES]
 )
 
 SCHEMA_VERSION = "silver-gold-1.0.0"
 # Phiên bản quy tắc đối soát: T25 chỉ phân loại MATCHED; T33 đổi sang bộ 8 trạng thái đầy đủ.
 RECON_RULE_VERSION = "recon-1.0.0-matched-only"
 # Tăng khi đổi logic biến đổi; vào semantic hash (đặc tả I.8.1 batch bước 5).
-CODE_VERSION = "process-day-1"
+CODE_VERSION = "process-day-2"
 RUN_LEVEL_LAYER = "silver+gold"
 RUN_LEVEL_ENTITY = "process-day"
 
 
 def tier_uri(cfg: AppConfig, layer: str) -> str:
     """`s3a://<bucket>/<paths.<layer>_prefix>` (ADR-0002 quy ước chung và mục 3)."""
-    if layer not in (LAYER_SILVER, LAYER_GOLD):
+    if layer not in (LAYER_SILVER, LAYER_GOLD, LAYER_QUARANTINE):
         raise ValueError(f"Tầng không được ghi bởi process-day: {layer!r}")
     prefix = getattr(cfg.paths, f"{layer}_prefix").strip("/")
     return urlunsplit(("s3a", cfg.object_store.bucket, "/" + prefix, "", ""))

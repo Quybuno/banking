@@ -57,16 +57,18 @@ def test_output_paths_use_tier_prefix_dataset_entity_and_run_id() -> None:
 def test_tier_uri_follows_configured_prefix_and_bucket() -> None:
     cfg = _cfg(N06__PATHS__SILVER_PREFIX="s-x", N06__OBJECT_STORE__BUCKET="other-bucket")
     assert plan.tier_uri(cfg, "silver") == "s3a://other-bucket/s-x"
+    assert plan.tier_uri(cfg, "quarantine") == "s3a://other-bucket/quarantine"
     with pytest.raises(ValueError):
-        plan.tier_uri(cfg, "quarantine")
+        plan.tier_uri(cfg, "bronze")
 
 
 def test_every_output_has_a_distinct_layer_entity_pair() -> None:
-    assert len(set(plan.OUTPUTS)) == len(plan.OUTPUTS) == 6
+    assert len(set(plan.OUTPUTS)) == len(plan.OUTPUTS) == 7
     assert {entity for layer, entity in plan.OUTPUTS if layer == "gold"} == {
         "fact_transactions",
         "fact_reconciliation",
     }
+    assert ("quarantine", "records") in plan.OUTPUTS
 
 
 def test_claim_checks_every_run_root_with_a_trailing_slash_before_any_write() -> None:
@@ -84,6 +86,7 @@ def test_claim_checks_every_run_root_with_a_trailing_slash_before_any_write() ->
         "s3a://n06-lakehouse/silver/n06-demo-clean/accounts/run_id=run-1/",
         "s3a://n06-lakehouse/gold/n06-demo-clean/fact_transactions/run_id=run-1/",
         "s3a://n06-lakehouse/gold/n06-demo-clean/fact_reconciliation/run_id=run-1/",
+        "s3a://n06-lakehouse/quarantine/n06-demo-clean/records/run_id=run-1/",
     ]
 
 
