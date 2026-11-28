@@ -583,8 +583,7 @@ def test_business_date_filter_writes_only_the_selected_day_but_reconciles_everyt
     result = _result(proc, "N06_PROCESS_DAY_RESULT=")
     assert result["business_dates"] == [dates[0]]
     # Đối soát chạy trên toàn dataset (không bị khóa "chưa phân loại" giả do lọc ngày).
-    assert result["reconciliation"]["unclassified_keys"] == 0
-    assert result["reconciliation"]["total_keys"] == first_run["reconciliation"]["total_keys"]
+    assert result["reconciliation"] == first_run["reconciliation"]
     after = {k: v.run_id for k, v in _snapshots(stack, dates).items()}
     for key, run in after.items():
         if key[2] == dates[0]:

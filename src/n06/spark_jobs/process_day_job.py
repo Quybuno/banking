@@ -596,8 +596,7 @@ def _build_and_write(
         "RECON_BUSINESS_DATE_MISSING",
         "Match key không xác định được business_date",
     )
-    recon_wide = state.persist(date_filter(recon_all))
-    recon = state.persist(recon_wide.select(*reconciliation.RESULT_COLUMNS))
+    recon = state.persist(date_filter(recon_all).select(*reconciliation.RESULT_COLUMNS))
 
     outputs: dict[tuple[str, str], DataFrame] = {
         (plan.LAYER_SILVER, "transactions"): silver["transactions"],
@@ -713,7 +712,8 @@ def _build_and_write(
         )
         snapshots.append(snap)
 
-    counters = reconciliation.quality_counters(recon_wide)
+    # Đếm trên toàn dataset: `--business-date` chỉ lọc phần được ghi, không lọc đối soát.
+    counters = reconciliation.quality_counters(recon_all)
     return {
         "run_id": run_id,
         "dataset_id": dataset_id,
