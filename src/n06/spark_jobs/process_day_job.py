@@ -563,6 +563,13 @@ def _build_and_write(
     silver_all["statements"] = state.persist(statements)
     silver["statements"] = date_filter(silver_all["statements"])
 
+    all_dates = sorted(
+        {
+            d
+            for name in ("transactions", "ledger_entries", "statements")
+            for d, _, _ in transforms.split_by_date(silver_all[name])
+        }
+    )
     dates = sorted(
         {
             d
@@ -577,6 +584,19 @@ def _build_and_write(
     gold_tx = state.persist(
         transforms.gold_fact_transactions(silver["transactions"], run_id=run_id)
     )
+    balances_all, balance_overflow = transforms.gold_fact_daily_balances_with_overflow(
+        spark,
+        accounts,
+        silver_all["ledger_entries"],
+        business_dates=all_dates,
+        run_id=run_id,
+    )
+    _require_zero(
+        balance_overflow,
+        "BALANCE_BIGINT_OVERFLOW",
+        "Số dư hoặc tổng phát sinh ngày vượt miền BIGINT",
+    )
+    gold_balances = state.persist(date_filter(balances_all))
     # Đối soát chạy trên toàn bộ giao dịch và sao kê của dataset; `--business-date` chỉ lọc đầu ra.
     recon_all = state.persist(
         reconciliation.reconcile_with_diagnostics(
@@ -604,6 +624,7 @@ def _build_and_write(
         (plan.LAYER_SILVER, "ledger_entries"): silver["ledger_entries"],
         (plan.LAYER_SILVER, "statements"): silver["statements"],
         (plan.LAYER_GOLD, "fact_transactions"): gold_tx,
+        (plan.LAYER_GOLD, "fact_daily_balances"): gold_balances,
         (plan.LAYER_GOLD, "fact_reconciliation"): recon,
     }
     for (layer, entity), frame in outputs.items():
