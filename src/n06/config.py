@@ -136,6 +136,10 @@ FIELD_TYPES: dict[str, type] = {
     "limits.generator_bytes_per_tx": int,
     "limits.pipeline_bytes_per_tx": int,
     "limits.disk_probe_path": str,
+    "quality.max_quarantine_rate_bps": int,
+    "quality.max_conflict_count": int,
+    "quality.fail_on_unexplained_control_mismatch": bool,
+    "quality.require_control_report": bool,
     "reconciliation.statuses": str,
     "reconciliation.channels": str,
 }
@@ -275,6 +279,19 @@ class LimitsConfig:
 
 
 @dataclass(frozen=True)
+class QualityConfig:
+    """Ngưỡng cổng chất lượng trước khi publish (đặc tả I.6, ADR-0014).
+
+    `max_quarantine_rate_bps` tính theo điểm cơ bản (1 bps = 0,01 %), số nguyên để không dùng float.
+    """
+
+    max_quarantine_rate_bps: int
+    max_conflict_count: int
+    fail_on_unexplained_control_mismatch: bool
+    require_control_report: bool
+
+
+@dataclass(frozen=True)
 class ReconciliationConfig:
     """Tập status và channel được đối soát (ADR-0006 Q10, spec Phần I mục 7.2).
 
@@ -299,6 +316,7 @@ class AppConfig:
     dataset: DatasetConfig
     paths: PathsConfig
     limits: LimitsConfig
+    quality: QualityConfig
     reconciliation: ReconciliationConfig
 
 
@@ -819,6 +837,28 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         disk_probe_path=_optional_typed(merged, "limits.disk_probe_path"),
     )
 
+    quarantine_bps = _require_min_int(
+        "quality.max_quarantine_rate_bps",
+        _require_typed(merged, "quality.max_quarantine_rate_bps"),
+        0,
+    )
+    if quarantine_bps > 10_000:
+        raise ConfigValidationError(
+            "quality.max_quarantine_rate_bps", quarantine_bps, "Giá trị phải <= 10000."
+        )
+    quality = QualityConfig(
+        max_quarantine_rate_bps=quarantine_bps,
+        max_conflict_count=_require_min_int(
+            "quality.max_conflict_count",
+            _require_typed(merged, "quality.max_conflict_count"),
+            0,
+        ),
+        fail_on_unexplained_control_mismatch=_require_typed(
+            merged, "quality.fail_on_unexplained_control_mismatch"
+        ),
+        require_control_report=_require_typed(merged, "quality.require_control_report"),
+    )
+
     reconciliation = ReconciliationConfig(
         statuses=_require_csv_set(merged, "reconciliation.statuses"),
         channels=_require_csv_set(merged, "reconciliation.channels"),
@@ -853,6 +893,7 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         dataset=dataset,
         paths=paths,
         limits=limits,
+        quality=quality,
         reconciliation=reconciliation,
     )
 

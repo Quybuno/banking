@@ -157,6 +157,7 @@ def run_ingest_statements(
         "skipped_batches": result.skipped_batches,
         "deferred_batches": result.deferred_batches,
         "accounts_status": result.accounts_status,
+        "control_report_status": result.control_report_status,
     }
     text = (
         f"[ingest-statements] OK dataset={result.dataset_id} as_of={result.as_of_time} "

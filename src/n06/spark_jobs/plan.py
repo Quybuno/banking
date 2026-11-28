@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlunsplit
 
 from n06.config import AppConfig
+from n06.reconciliation.rules import RECON_RULE_VERSION
 from n06.storage import build_run_output_path, compute_semantic_hash, require_unused_run_prefix
 
 LAYER_SILVER = "silver"
@@ -30,8 +31,6 @@ OUTPUTS: tuple[tuple[str, str], ...] = tuple(
 )
 
 SCHEMA_VERSION = "silver-gold-1.0.0"
-# Phiên bản quy tắc đối soát đủ 8 trạng thái (T33, ADR-0006).
-RECON_RULE_VERSION = "1.0.0"
 # Tăng khi đổi logic biến đổi; vào semantic hash (đặc tả I.8.1 batch bước 5).
 CODE_VERSION = "process-day-4"
 RUN_LEVEL_LAYER = "silver+gold"
@@ -88,10 +87,29 @@ def claim_run_prefixes(
 
 def config_hash(cfg: AppConfig) -> str:
     """Băm phần cấu hình nghiệp vụ ảnh hưởng kết quả; không gồm endpoint, bucket hay executor."""
-    payload = {"business_timezone": cfg.business_timezone}
+    payload = {
+        "business_timezone": cfg.business_timezone,
+        # Bốn tham số quyết định trạng thái đối soát (ADR-0006 Q10).
+        "allowed_lateness_seconds": cfg.dataset.allowed_lateness_seconds,
+        "reconciliation_statuses": list(cfg.reconciliation.statuses),
+        "reconciliation_channels": list(cfg.reconciliation.channels),
+    }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def input_snapshot_id(input_versions: Sequence[Any]) -> str:
+    """Định danh tập input của một lần đối soát (đặc tả I.7.3).
+
+    Chỉ phụ thuộc dữ liệu đầu vào: bỏ `as_of_time` và bộ lọc `business_date` của lần chạy.
+    """
+    run_options = ("as_of_time", "business_dates")
+    items = [
+        i for i in input_versions if not (isinstance(i, dict) and i.get("kind") in run_options)
+    ]
+    text = json.dumps(items, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "in-" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def run_semantic_hash(
