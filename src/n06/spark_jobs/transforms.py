@@ -134,9 +134,14 @@ def dedup_event_bronze(
 
     Cột `variants` > 1 nghĩa là cùng khóa khác nội dung: xung đột, thuộc T31; T25 không chọn.
     """
+    # Lấy cả bản ghi mà envelope hoặc payload nêu dataset này để bản lệch nhau lộ ra ở
+    # `envelope_mismatch` thay vì bị lọc mất im lặng.
     source = (
-        bronze.where(F.col("dataset_id") == dataset_id)
+        bronze.where(
+            (F.col("dataset_id") == dataset_id) | (F.col("envelope_dataset_id") == dataset_id)
+        )
         .withColumn("payload_hash", F.sha2(_text(payload), 256))
+        .withColumn("event_hash", F.sha2(_text([key, *payload]), 256))
         .withColumn("pointer", pointer_column())
     )
     grouped = source.groupBy("dataset_id", key).agg(
@@ -153,11 +158,21 @@ def dedup_event_bronze(
 
 
 def event_id_conflicts(source: DataFrame) -> DataFrame:
-    """`event_id` xuất hiện với nhiều nội dung khác nhau (EVENT_ID_CONFLICT, thuộc T31)."""
+    """`event_id` gắn với nhiều nội dung hoặc nhiều khóa nghiệp vụ (EVENT_ID_CONFLICT, T31)."""
     return (
         source.groupBy("event_id")
-        .agg(F.countDistinct("payload_hash").alias("variants"))
+        .agg(F.countDistinct("event_hash").alias("variants"))
         .where(F.col("variants") > 1)
+    )
+
+
+def envelope_mismatch(source: DataFrame, dataset_id: str) -> DataFrame:
+    """Bản ghi mà envelope và payload không cùng dataset hoặc cùng `event_time` (spec S891)."""
+    return source.where(
+        _differs("envelope_dataset_id", dataset_id)
+        | _differs("dataset_id", dataset_id)
+        | (F.col("envelope_event_time") != F.col("event_time"))
+        | F.col("envelope_event_time").isNull()
     )
 
 
@@ -215,6 +230,17 @@ def invalid_event_rows(silver: DataFrame, timezone: str) -> DataFrame:
     )
 
 
+def file_stats(files: DataFrame) -> DataFrame:
+    """`binaryFile` -> `(path, sha256, rows)`; `rows` là số dòng không rỗng (file rỗng có 0)."""
+    return files.select(
+        "path",
+        F.sha2(F.col("content"), 256).alias("sha256"),
+        F.size(
+            F.filter(F.split(F.decode(F.col("content"), "UTF-8"), "\n"), lambda x: x != "")
+        ).alias("rows"),
+    )
+
+
 def _read_lines(files: DataFrame) -> DataFrame:
     """`binaryFile` -> `(path, sha256, idx, line)`; mỗi dòng không rỗng của file một hàng."""
     return (
@@ -232,20 +258,16 @@ def read_binary_files(spark: SparkSession, uris: Sequence[str]) -> DataFrame:
     return spark.read.format("binaryFile").load(list(uris))
 
 
-def statement_lines(
+def statement_files(
     spark: SparkSession, receipts: Sequence[Receipt], uris: dict[str, str]
 ) -> DataFrame:
-    """Mọi dòng của các file sao kê có biên nhận, kèm cột `(sha256 thật, số dòng vật lý)`.
-
-    `uris` ánh xạ `file_path` của biên nhận sang URI S3A. Chưa kiểm sha256 và số dòng.
-    """
-    files = read_binary_files(spark, [uris[r.file_path] for r in receipts])
-    return _read_lines(files)
+    """`binaryFile` của mọi file sao kê có biên nhận; `uris` ánh xạ `file_path` sang URI S3A."""
+    return read_binary_files(spark, [uris[r.file_path] for r in receipts])
 
 
 def silver_statements(
     spark: SparkSession,
-    lines: DataFrame,
+    files: DataFrame,
     receipts: Sequence[Receipt],
     uris: dict[str, str],
     *,
@@ -271,7 +293,8 @@ def silver_statements(
         "source_sha256 string",
     ).withColumn("file_available_at", F.col("file_available_at").cast("timestamp"))
     parsed = (
-        lines.join(F.broadcast(mapping), "path")
+        _read_lines(files)
+        .join(F.broadcast(mapping), "path")
         .withColumn("j", F.from_json(F.col("line"), STATEMENT_SCHEMA))
         .select(
             "source_file",

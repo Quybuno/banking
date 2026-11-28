@@ -73,6 +73,12 @@ class RunState:
     files_per_partition: int
     written: list[Written] = field(default_factory=list)
     digests: dict[str, str] = field(default_factory=dict)
+    cached: list[DataFrame] = field(default_factory=list)
+
+    def persist(self, frame: DataFrame) -> DataFrame:
+        """Persist và nhớ để `unpersist` khi run kết thúc, dù thành công hay thất bại."""
+        self.cached.append(frame)
+        return frame.persist()
 
 
 def parse_as_of_time(value: str) -> datetime:
@@ -163,12 +169,12 @@ def _load_receipts(
 
 
 def _statement_integrity(
-    lines: DataFrame, ordered: Sequence[receipts.Receipt], uris: dict[str, str]
+    files: DataFrame, ordered: Sequence[receipts.Receipt], uris: dict[str, str]
 ) -> None:
     """So sha256 và số dòng vật lý của từng file với biên nhận trước khi đọc nội dung."""
     seen = {
         row["path"]: (row["sha256"], int(row["rows"]))
-        for row in lines.groupBy("path", "sha256").agg(F.count(F.lit(1)).alias("rows")).collect()
+        for row in transforms.file_stats(files).collect()
     }
     for r in ordered:
         sha, rows = seen.get(uris[r.file_path], (None, 0))
@@ -255,6 +261,9 @@ def run_job(
         except CommitError:
             pass  # run đã commit hoặc không còn RUNNING; lỗi gốc quan trọng hơn
         raise
+    finally:
+        for frame in state.cached:
+            frame.unpersist()
     return summary
 
 
@@ -278,7 +287,15 @@ def _build_and_write(
 
     # --- Silver giao dịch và bút toán -------------------------------------------------------
     counts: dict[str, int] = {}
-    silver: dict[str, DataFrame] = {}
+    silver_all: dict[str, DataFrame] = {}  # chưa lọc ngày: đối soát cần toàn bộ dataset
+    silver: dict[str, DataFrame] = {}  # sau `--business-date`: phần được ghi
+    parse_errors = _bronze_frame(spark, batches, "parse_error")
+    if parse_errors is not None:
+        _require_zero(
+            parse_errors.where(F.col("dataset_id").isNull() | (F.col("dataset_id") == dataset_id)),
+            "PARSE_ERROR_PRESENT",
+            "Bronze có bản ghi parse lỗi của dataset này hoặc không rõ dataset (T30 chưa có)",
+        )
     for entity, bronze_entity, key, payload, build in (
         (
             "transactions",
@@ -301,7 +318,13 @@ def _build_and_write(
         grouped, source = transforms.dedup_event_bronze(
             bronze, dataset_id=dataset_id, key=key, payload=payload
         )
-        grouped = grouped.persist()
+        grouped = state.persist(grouped)
+        source = state.persist(source)
+        _require_zero(
+            transforms.envelope_mismatch(source, dataset_id),
+            "ENVELOPE_PAYLOAD_MISMATCH",
+            f"{entity}: envelope và payload lệch dataset_id hoặc event_time (T30 chưa có)",
+        )
         _require_zero(
             grouped.where(F.col("variants") > 1),
             "BUSINESS_KEY_CONFLICT",
@@ -318,7 +341,8 @@ def _build_and_write(
             "BUSINESS_DATE_INVALID",
             f"{entity}: event_time/business_date sai hoặc lệch ngày Asia/Ho_Chi_Minh (T30 chưa có)",
         )
-        silver[entity] = date_filter(frame).persist()
+        silver_all[entity] = state.persist(frame)
+        silver[entity] = date_filter(silver_all[entity])
         counts[f"bronze_physical_{entity}"] = int(source.count())
 
     # --- Silver sao kê ----------------------------------------------------------------------
@@ -326,13 +350,13 @@ def _build_and_write(
         raise DataError(
             "NO_STATEMENT_RECEIPTS", "Chưa có biên nhận sao kê; chạy `n06 ingest-statements`."
         )
-    lines = transforms.statement_lines(spark, ordered_receipts, uris).persist()
-    _statement_integrity(lines, ordered_receipts, uris)
+    files = transforms.statement_files(spark, ordered_receipts, uris)
+    _statement_integrity(files, ordered_receipts, uris)
     flat, invalid = transforms.silver_statements(
-        spark, lines, ordered_receipts, uris, dataset_id=dataset_id
+        spark, files, ordered_receipts, uris, dataset_id=dataset_id
     )
     _require_zero(invalid, "STATEMENT_INVALID_ROWS", "sao kê không hợp lệ (T30 chưa có)")
-    flat = flat.persist()
+    flat = state.persist(flat)
     _require_zero(
         flat.where(F.col("variants") > 1),
         "STATEMENT_ID_CONFLICT",
@@ -344,7 +368,8 @@ def _build_and_write(
         "BUSINESS_DATE_INVALID",
         "sao kê: event_time/business_date lệch ngày Asia/Ho_Chi_Minh (T30 chưa có)",
     )
-    silver["statements"] = date_filter(statements).persist()
+    silver_all["statements"] = state.persist(statements)
+    silver["statements"] = date_filter(silver_all["statements"])
 
     # --- Silver tài khoản --------------------------------------------------------------------
     account_files = transforms.read_binary_files(spark, [accounts_uri])
@@ -353,7 +378,7 @@ def _build_and_write(
     )
     _require_zero(bad_accounts, "ACCOUNT_INVALID_ROWS", "tài khoản không hợp lệ (T30 chưa có)")
     _require_zero(conflicting, "ACCOUNT_ID_CONFLICT", "cùng account_id khác nội dung (T31 chưa có)")
-    accounts = accounts.persist()
+    accounts = state.persist(accounts)
 
     dates = sorted(
         {
@@ -366,12 +391,17 @@ def _build_and_write(
         raise DataError("NO_BUSINESS_DATES", "Không có business_date nào để xử lý.")
 
     # --- Gold -------------------------------------------------------------------------------
-    gold_tx = transforms.gold_fact_transactions(silver["transactions"], run_id=run_id).persist()
-    # Đối soát cần toàn bộ giao dịch và sao kê của dataset, không chỉ ngày đang lọc.
-    recon, recon_summary = transforms.reconcile_matched(
-        silver["transactions"], silver["statements"], as_of_time=state.as_of_time, run_id=run_id
+    gold_tx = state.persist(
+        transforms.gold_fact_transactions(silver["transactions"], run_id=run_id)
     )
-    recon = recon.persist()
+    # Đối soát chạy trên toàn bộ giao dịch và sao kê của dataset; `--business-date` chỉ lọc đầu ra.
+    recon_all, recon_summary = transforms.reconcile_matched(
+        silver_all["transactions"],
+        silver_all["statements"],
+        as_of_time=state.as_of_time,
+        run_id=run_id,
+    )
+    recon = state.persist(date_filter(recon_all))
 
     outputs: dict[tuple[str, str], DataFrame] = {
         (plan.LAYER_SILVER, "transactions"): silver["transactions"],

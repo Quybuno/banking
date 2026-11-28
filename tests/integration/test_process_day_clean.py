@@ -81,6 +81,11 @@ try:
                     F.countDistinct("entry_id").alias("k")).collect()
                 result[name] = [[str(r["business_date"]), r["currency"], r["side"],
                                  r["n"], r["total"], r["k"]] for r in rows]
+            elif spec["kind"] == "ids":
+                rows = frame.agg(F.count(F.lit(1)).alias("n"),
+                                 F.countDistinct(spec["key"]).alias("k")).collect()[0]
+                result[name] = {"rows": rows["n"], "distinct": rows["k"],
+                                "columns": frame.columns}
             elif spec["kind"] == "reconciliation":
                 rows = frame.select("channel", "external_reference", "recon_status",
                                     F.col("business_date").cast("string").alias("d"),
@@ -373,7 +378,19 @@ def test_every_expected_key_is_matched_and_totals_equal_control_report(
                 "tx": {"kind": "transactions", "paths": paths("silver", "transactions")},
                 "ledger": {"kind": "ledger", "paths": paths("silver", "ledger_entries")},
                 "recon": {"kind": "reconciliation", "paths": paths("gold", "fact_reconciliation")},
-                "fact": {"kind": "columns", "paths": paths("gold", "fact_transactions")},
+                "fact": {"kind": "transactions", "paths": paths("gold", "fact_transactions")},
+                "fact_cols": {"kind": "columns", "paths": paths("gold", "fact_transactions")},
+                "recon_cols": {"kind": "columns", "paths": paths("gold", "fact_reconciliation")},
+                "stmts": {
+                    "kind": "ids",
+                    "key": "statement_record_id",
+                    "paths": paths("silver", "statements"),
+                },
+                "accounts": {
+                    "kind": "ids",
+                    "key": "account_id",
+                    "paths": paths("silver", "accounts"),
+                },
             },
         },
         tmp_path,
@@ -416,7 +433,33 @@ def test_every_expected_key_is_matched_and_totals_equal_control_report(
         "matched_keys": len(expected_keys),
         "unclassified_keys": 0,
     }
-    assert answer["fact"]["rows"] == sum(n for n, _ in expected_tx.values())
+    # Gold fact_transactions: cùng tổng với control_report, đúng cột theo ADR-0005 mục 2.1/2.3.
+    assert {(d, c, s): (n, total) for d, c, s, n, total, k in answer["fact"]} == expected_tx
+    assert answer["fact_cols"]["columns"] == [
+        "dataset_id", "transaction_id", "business_date", "date_key", "external_reference",
+        "account_from", "account_to", "channel", "transaction_type", "currency", "status",
+        "amount_minor", "event_time", "replay_count", "source_pointer", "run_id",
+    ]  # fmt: skip
+    assert answer["recon_cols"]["columns"][:7] == [
+        "dataset_id", "channel", "external_reference", "business_date", "date_key",
+        "recon_status", "issue_codes",
+    ]  # fmt: skip
+    assert len(answer["recon_cols"]["columns"]) == 25
+
+    # Silver sao kê và tài khoản so với byte nguồn (số dòng khác nhau, loại trùng theo ID).
+    source_statements = [
+        json.loads(line)["statement_record_id"]
+        for path in sorted((stack.source / "statements").rglob("*.jsonl"))
+        for line in path.read_bytes().split(b"\n")
+        if line
+    ]
+    assert answer["stmts"]["rows"] == answer["stmts"]["distinct"] == len(set(source_statements))
+    source_accounts = [
+        line for line in (stack.source / "accounts.jsonl").read_bytes().split(b"\n") if line
+    ]
+    # Bản chụp tài khoản được ghi dưới mọi business_date của run (ADR-0002 điểm 5).
+    assert answer["accounts"]["distinct"] == len(source_accounts)
+    assert answer["accounts"]["rows"] == len(source_accounts) * len(dates)
 
 
 def test_run_paths_current_snapshot_and_rerun_hash(
@@ -466,11 +509,15 @@ def test_failed_run_is_never_read(stack: Stack, first_run: dict[str, Any]) -> No
     assert run_id not in after.values()
 
 
+@pytest.mark.parametrize(
+    ("layer", "entity"), [("silver", "transactions"), ("gold", "fact_reconciliation")]
+)
 def test_run_id_that_already_has_objects_is_rejected_without_writing(
-    stack: Stack, first_run: dict[str, Any]
+    stack: Stack, first_run: dict[str, Any], layer: str, entity: str
 ) -> None:
     run_id = f"run-it-used-{uuid.uuid4().hex[:8]}"
-    stale = f"{stack.cfg.paths.silver_prefix}/{stack.dataset_id}/transactions/run_id={run_id}/x.txt"
+    tier = getattr(stack.cfg.paths, f"{layer}_prefix")
+    stale = f"{tier}/{stack.dataset_id}/{entity}/run_id={run_id}/x.txt"
     put_object_bytes(stack.target, stack.bucket, stale, b"da co object")
     before = {k: v.run_id for k, v in _snapshots(stack, first_run["business_dates"]).items()}
 
@@ -479,13 +526,39 @@ def test_run_id_that_already_has_objects_is_rejected_without_writing(
     error = _result(proc, "N06_PROCESS_DAY_ERROR=")
     assert error["code"] == "COMMIT_ERROR" and "đã có object" in error["message"]
 
-    for layer, entities in (("silver", SILVER_ENTITIES), ("gold", GOLD_ENTITIES)):
-        for entity in entities:
-            prefix = getattr(stack.cfg.paths, f"{layer}_prefix")
-            root = f"{prefix}/{stack.dataset_id}/{entity}/run_id={run_id}/"
+    # Không ghi thêm bất kỳ object nào: mọi gốc của run trống, trừ đúng object đã đặt sẵn.
+    for other_layer, entities in (("silver", SILVER_ENTITIES), ("gold", GOLD_ENTITIES)):
+        for other in entities:
+            prefix = getattr(stack.cfg.paths, f"{other_layer}_prefix")
+            root = f"{prefix}/{stack.dataset_id}/{other}/run_id={run_id}/"
             keys = list_keys(stack.target, stack.bucket, root)
-            assert keys == ([stale] if entity == "transactions" else []), (entity, keys)
+            assert keys == ([stale] if (other_layer, other) == (layer, entity) else []), (
+                other_layer,
+                other,
+                keys,
+            )
     after = {k: v.run_id for k, v in _snapshots(stack, first_run["business_dates"]).items()}
     assert after == before
     run_row = stack.store.get_run(run_id)
     assert run_row is not None and run_row.status == "FAILED"
+
+
+def test_business_date_filter_writes_only_the_selected_day_but_reconciles_everything(
+    stack: Stack, first_run: dict[str, Any]
+) -> None:
+    dates = first_run["business_dates"]
+    assert len(dates) >= 2
+    before = {k: v.run_id for k, v in _snapshots(stack, dates).items()}
+    proc = stack.process_day("--business-date", dates[0])
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    result = _result(proc, "N06_PROCESS_DAY_RESULT=")
+    assert result["business_dates"] == [dates[0]]
+    # Đối soát chạy trên toàn dataset (không bị khóa "chưa phân loại" giả do lọc ngày).
+    assert result["reconciliation"]["unclassified_keys"] == 0
+    assert result["reconciliation"]["total_keys"] == first_run["reconciliation"]["total_keys"]
+    after = {k: v.run_id for k, v in _snapshots(stack, dates).items()}
+    for key, run in after.items():
+        if key[2] == dates[0]:
+            assert run == result["run_id"]
+        else:
+            assert run == before[key]  # ngày không chọn giữ nguyên run cũ

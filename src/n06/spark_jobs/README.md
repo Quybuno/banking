@@ -65,18 +65,37 @@ nhận hàm này, nên kiểm tra chạy trên bucket thật chứ không trên 
 thái đối soát (T33), số dư (T40), mart (T26, T41). Hệ quả cho bản T25:
 
 - Bản ghi mà T30 hoặc T31 sẽ xử lý làm job **dừng** với một dòng `N06_PROCESS_DAY_ERROR={"code":...}`
-  (mã `BUSINESS_KEY_CONFLICT`, `EVENT_ID_CONFLICT`, `BUSINESS_DATE_INVALID`, `STATEMENT_INVALID_ROWS`,
-  `STATEMENT_ID_CONFLICT`, `ACCOUNT_INVALID_ROWS`, `ACCOUNT_ID_CONFLICT`, `STATEMENT_FILE_MISMATCH`,
-  `RECEIPT_WITHOUT_FILE`, `RECEIPT_WITHOUT_MANIFEST`), mã thoát 14; không có dữ liệu nào bị bỏ im
-  lặng.
+  và mã thoát 14, không bị bỏ qua. Các mã: `PARSE_ERROR_PRESENT` (Bronze `parse_error` của dataset
+  hoặc không rõ dataset), `ENVELOPE_PAYLOAD_MISMATCH`, `BUSINESS_KEY_CONFLICT`, `EVENT_ID_CONFLICT`
+  (cùng `event_id` khác nội dung hoặc khác khóa nghiệp vụ), `BUSINESS_DATE_INVALID`,
+  `STATEMENT_INVALID_ROWS`, `STATEMENT_ID_CONFLICT`, `STATEMENT_FILE_MISMATCH` (sha256 hoặc số dòng
+  khác biên nhận; file rỗng có 0 dòng), `RECEIPT_WITHOUT_FILE`, `RECEIPT_WITHOUT_MANIFEST`,
+  `ACCOUNT_INVALID_ROWS`, `ACCOUNT_ID_CONFLICT`, `NO_*`. Phạm vi kiểm của T25 là các mã này; phần
+  còn lại của quality (null, referential integrity, balance, overflow) thuộc T30 đến T32.
 - `fact_reconciliation` chỉ chứa khóa MATCHED (đủ một giao dịch độc lập và một sao kê độc lập, trùng
   `currency`, `amount_minor`, `status`). Khóa còn lại chỉ được đếm trong
   `reconciliation.unclassified_keys` của kết quả, chưa được ghi và chưa có trạng thái (T33).
+  Đối soát luôn chạy trên toàn dataset; `--business-date` chỉ lọc phần được ghi.
+- Silver sao kê chứa mọi file có biên nhận (ADR-0006 D3: hàm đối soát nhận cột `file_available_at`
+  và lọc `file_available_at <= as_of_time` ở đầu hàm). Nếu người duyệt hiểu D3 là chỉ file nhìn thấy
+  mới vào Silver thì đổi một chỗ lọc ở `process_day_job.py`.
 - Một run commit nhiều `current_snapshot` bằng nhiều lần gọi `commit_run` (API của T24 chỉ nhận một
-  snapshot mỗi transaction): chết giữa chừng có thể để một phần snapshot trỏ sang run mới.
+  snapshot mỗi transaction): chết giữa chừng có thể để một phần snapshot trỏ sang run mới. Hệ quả
+  với T26 và T41: mọi snapshot của một run có cùng `semantic_hash` (hash cả run) và `row_count` bằng
+  tổng số dòng cả run (gồm `accounts` ghi dưới từng ngày), nên không dùng hai giá trị này để biết
+  riêng một entity có đổi hay không.
+- Chỉ đọc file sao kê bằng `binaryFile` (nguyên file thành một bản ghi): file lớn hơn 2 GB không đọc
+  được, và ghi dùng `coalesce(spark.cores)` nên giảm song song ở dữ liệu rất lớn. Chấp nhận cho
+  quy mô P0; E1 ở 5 triệu giao dịch cần đo lại.
+- `--run-id` và `--fail-at` là cờ kiểm thử (không hiện trong `--help`) nằm trong đường chạy thật;
+  `CODE_VERSION` và `RECON_RULE_VERSION` ở `plan.py` là hằng đặt tay, phải tăng khi đổi logic.
 
 **Cột `accounts`.** Theo `account.schema.json` của hợp đồng (`opening_business_date`); danh sách cột
-trong ADR-0004b 3.4 có `account_code`, `status`, `opening_date` mà hợp đồng không có.
+trong ADR-0004b 3.4 có `account_code`, `status`, `opening_date` mà hợp đồng không có, và ADR-0005
+mục 1 đòi `dim_account` có ba cột đó (NOT NULL). Cần một ADR chỉnh trước T26 và T41. `accounts.jsonl`
+được tải lên không kiểm sha256 theo manifest nguồn (file sao kê thì có).
 
 **Kiểm tra.** `tests/unit/spark_jobs/` (thuần Python: biên nhận, đường dẫn, kiểm run chưa dùng, hash,
-CLI) và `tests/integration/test_process_day_clean.py` (Kafka, MinIO, PostgreSQL, Spark thật).
+CLI), `tests/integration/test_process_day_transforms.py` (biến đổi Spark trên dữ liệu dựng tay:
+replay, xung đột, đối soát, hash) và `tests/integration/test_process_day_clean.py` (Kafka, MinIO,
+PostgreSQL, Spark thật).
