@@ -125,6 +125,20 @@ class ControlStore(Protocol):
     def list_committed_ingest_batches(self, *, query_name: str) -> list[IngestBatchRecord]:
         """Liệt kê các `ingest_batches` đã commit của một query, theo `batch_id`."""
 
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | None = None,
+        business_date_to: date | None = None,
+    ) -> list[SnapshotRecord]:
+        """Liệt kê snapshot hiện hành đã commit theo `dataset_id`, `layer` và bộ lọc tùy chọn."""
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        """Đánh dấu run đã commit là `MART_PUBLISHED` (idempotent nếu đã ở trạng thái này)."""
+
 
 def _scope_key(dataset_id: str, layer: str, entity: str, business_date: date) -> str:
     return f"{dataset_id}|{layer}|{entity}|{business_date.isoformat()}"
@@ -545,6 +559,91 @@ class PsycopgControlStore:
         finally:
             conn.close()
 
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | None = None,
+        business_date_to: date | None = None,
+    ) -> list[SnapshotRecord]:
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT cs.dataset_id, cs.layer, cs.entity, cs.business_date,
+                           cs.run_id, cs.output_path, cs.manifest_path, cs.semantic_hash
+                    FROM current_snapshot cs
+                    JOIN runs r ON r.run_id = cs.run_id
+                    WHERE cs.dataset_id = %s
+                      AND cs.layer = %s
+                      AND r.status IN ('SUCCEEDED', 'GOLD_COMMITTED', 'MART_PUBLISHED')
+                      AND (%s::text IS NULL OR cs.entity = %s)
+                      AND (%s::date IS NULL OR cs.business_date >= %s)
+                      AND (%s::date IS NULL OR cs.business_date <= %s)
+                    ORDER BY cs.entity ASC, cs.business_date ASC;
+                    """,
+                    (
+                        dataset_id,
+                        layer,
+                        entity,
+                        entity,
+                        business_date_from,
+                        business_date_from,
+                        business_date_to,
+                        business_date_to,
+                    ),
+                )
+                rows = cur.fetchall()
+            out: list[SnapshotRecord] = []
+            for row in rows:
+                biz_date = _to_date(row[3])
+                assert biz_date is not None
+                out.append(
+                    SnapshotRecord(
+                        dataset_id=row[0],
+                        layer=row[1],
+                        entity=row[2],
+                        business_date=biz_date,
+                        run_id=row[4],
+                        output_path=row[5],
+                        manifest_path=row[6],
+                        semantic_hash=row[7],
+                    )
+                )
+            return out
+        finally:
+            conn.close()
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        conn = self._conn_factory()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM runs WHERE run_id = %s FOR UPDATE;", (run_id,))
+                existing = cur.fetchone()
+                if existing is None:
+                    raise RunNotFoundError(f"Không tìm thấy run_id '{run_id}'.")
+                status = existing[0]
+                if status not in COMMITTED_RUN_STATUSES:
+                    raise RunStateError(
+                        f"Không thể đánh dấu MART_PUBLISHED cho run '{run_id}' đang ở '{status}'."
+                    )
+                cur.execute(
+                    "UPDATE runs SET status = 'MART_PUBLISHED' WHERE run_id = %s;",
+                    (run_id,),
+                )
+            conn.commit()
+        except CommitError:
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise CommitError(f"mark_run_mart_published thất bại cho '{run_id}': {exc}") from exc
+        finally:
+            conn.close()
+
 
 # Mọi giá trị đi vào SQL bằng MỘT biến JSON của psql, không ghép vào chuỗi câu lệnh (ADR-0012
 # quyết định 1). Biến được đặt bằng `\set` ở đầu kịch bản gửi qua **stdin**, nên giá trị không nằm
@@ -725,6 +824,48 @@ SELECT COALESCE(
     ) t),
     '[]'
 );
+"""
+
+_LIST_SNAPSHOTS_SQL = f"""
+SELECT COALESCE(
+    (SELECT json_agg(t ORDER BY entity ASC, business_date ASC)::text FROM (
+        SELECT cs.dataset_id, cs.layer, cs.entity, cs.business_date::text AS business_date,
+               cs.run_id, cs.output_path, cs.manifest_path, cs.semantic_hash
+        FROM current_snapshot cs
+        JOIN runs r ON r.run_id = cs.run_id
+        WHERE cs.dataset_id = {_PARAMS}->>'dataset_id'
+          AND cs.layer = {_PARAMS}->>'layer'
+          AND r.status IN {_COMMITTED_SQL}
+          AND (({_PARAMS}->>'entity') IS NULL OR cs.entity = {_PARAMS}->>'entity')
+          AND (({_PARAMS}->>'date_from') IS NULL
+               OR cs.business_date >= ({_PARAMS}->>'date_from')::date)
+          AND (({_PARAMS}->>'date_to') IS NULL
+               OR cs.business_date <= ({_PARAMS}->>'date_to')::date)
+    ) t),
+    '[]'
+);
+"""
+
+_MARK_MART_PUBLISHED_SQL = f"""
+BEGIN;
+{_PARAMS_TABLE}
+DO $$
+DECLARE
+    v jsonb;
+    v_status TEXT;
+BEGIN
+    SELECT j INTO v FROM n06_params;
+    SELECT status INTO v_status FROM runs WHERE run_id = v->>'run_id' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run_id % not found', v->>'run_id';
+    END IF;
+    IF v_status NOT IN {_COMMITTED_SQL} THEN
+        RAISE EXCEPTION 'cannot mark run_id % MART_PUBLISHED from status %',
+            v->>'run_id', v_status;
+    END IF;
+    UPDATE runs SET status = 'MART_PUBLISHED' WHERE run_id = v->>'run_id';
+END $$;
+COMMIT;
 """
 
 # Runner: `(kịch bản, tuples_only) -> stdout`; kịch bản đã gồm biến tham số.
@@ -958,6 +1099,48 @@ class PsqlCliControlStore:
             _LIST_INGEST_SQL, tuples_only=True, params={"query_name": query_name}
         ).strip()
         return [_ingest_record(row) for row in json.loads(raw or "[]")]
+
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | None = None,
+        business_date_to: date | None = None,
+    ) -> list[SnapshotRecord]:
+        raw = self._run_sql(
+            _LIST_SNAPSHOTS_SQL,
+            tuples_only=True,
+            params={
+                "dataset_id": dataset_id,
+                "layer": layer,
+                "entity": entity,
+                "date_from": _iso(business_date_from),
+                "date_to": _iso(business_date_to),
+            },
+        ).strip()
+        rows = json.loads(raw or "[]")
+        out: list[SnapshotRecord] = []
+        for data in rows:
+            biz_date = _to_date(data["business_date"])
+            assert biz_date is not None
+            out.append(
+                SnapshotRecord(
+                    dataset_id=data["dataset_id"],
+                    layer=data["layer"],
+                    entity=data["entity"],
+                    business_date=biz_date,
+                    run_id=data["run_id"],
+                    output_path=data["output_path"],
+                    manifest_path=data["manifest_path"],
+                    semantic_hash=data["semantic_hash"],
+                )
+            )
+        return out
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        self._run_sql(_MARK_MART_PUBLISHED_SQL, params={"run_id": run_id})
 
 
 def connect_control_store(db_config: PostgresDbConfig) -> ControlStore:

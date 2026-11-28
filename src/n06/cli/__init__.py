@@ -40,6 +40,7 @@ from n06.cli.init_local import (
     parse_dotenv_file,
     run_init_local,
 )
+from n06.cli.load_mart import run_load_mart
 from n06.cli.process_day import run_process_day
 from n06.cli.publish import run_publish
 from n06.cli.statements import run_ingest_statements
@@ -66,6 +67,7 @@ __all__ = [
     "run_generate",
     "run_ingest_statements",
     "run_init_local",
+    "run_load_mart",
     "run_publish",
     "run_validate",
 ]
@@ -108,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         title="commands",
         metavar=(
             "{init-local,doctor,validate,publish,generate,stream,wait-ingestion,"
-            "ingest-statements,process-day}"
+            "ingest-statements,process-day,load-mart}"
         ),
     )
 
@@ -500,6 +502,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--fail-at", choices=("after_write",), default=None, help=argparse.SUPPRESS
     )
 
+    load_mart_parser = subparsers.add_parser(
+        "load-mart",
+        help="Publish dữ liệu Gold đã commit sang PostgreSQL mart qua staging + 1 transaction.",
+        description=(
+            "Đọc snapshot Gold đã commit từ current_snapshot, nạp bảng staging, kiểm tra và "
+            "thay thế phạm vi ngày trên PostgreSQL mart trong một transaction, rồi đánh dấu "
+            "MART_PUBLISHED trong control DB."
+        ),
+    )
+    load_mart_parser.add_argument(
+        "--dataset-id", required=True, help="dataset_id cần publish vào mart."
+    )
+    load_mart_parser.add_argument(
+        "--from-date",
+        default=None,
+        help="Ngày bắt đầu phạm vi thay thế (YYYY-MM-DD; mặc định: ngày nhỏ nhất ở Gold).",
+    )
+    load_mart_parser.add_argument(
+        "--to-date",
+        default=None,
+        help="Ngày kết thúc phạm vi thay thế (YYYY-MM-DD; mặc định: ngày lớn nhất ở Gold).",
+    )
+    load_mart_parser.add_argument(
+        "--profile",
+        choices=("default", "demo", "benchmark", "test"),
+        default=None,
+        help="Profile cấu hình; địa chỉ phải dùng được trong mạng Docker.",
+    )
+    load_mart_parser.add_argument(
+        "--env-file", type=Path, default=None, help="File .env cần nạp (mặc định: ./.env)."
+    )
+    load_mart_parser.add_argument(
+        "--fail-at", choices=("after_stage",), default=None, help=argparse.SUPPRESS
+    )
+
     return parser
 
 
@@ -638,6 +675,17 @@ def main(
             as_of_time=parsed.as_of_time,
             business_dates=parsed.business_date or (),
             run_id=parsed.run_id,
+            fail_at=parsed.fail_at,
+            out=stdout,
+        )
+
+    if parsed.command == "load-mart":
+        return run_load_mart(
+            dataset_id=parsed.dataset_id,
+            from_date=parsed.from_date,
+            to_date=parsed.to_date,
+            profile=parsed.profile,
+            env_file=parsed.env_file,
             fail_at=parsed.fail_at,
             out=stdout,
         )
