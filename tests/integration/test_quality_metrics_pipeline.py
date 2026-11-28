@@ -17,7 +17,7 @@ from pathlib import Path
 
 from n06.cli.init_local import parse_dotenv_file
 from n06.config import load_config
-from n06.quality import evaluate_quality_gate
+from n06.quality import LayerCounts, evaluate_quality_gate
 from n06.storage import (
     BatchCommitCoordinator,
     PsqlCliControlStore,
@@ -121,21 +121,18 @@ def test_quality_metrics_postgres_upsert_and_spark_control_totals(tmp_path: Path
         eval_res = evaluate_quality_gate(
             run_id=run_id,
             dataset_id=dataset_id,
-            business_date=date(2026, 1, 1),
-            physical_records=36,
-            unique_business_records=34,
-            quarantine_records=0,
-            conflict_records=0,
+            default_date=date(2026, 1, 1),
+            layer_counts=[LayerCounts("transaction", date(2026, 1, 1), 36, 0, 34)],
         )
         # Ghi 2 lần -> idempotent theo unique constraint của bảng quality_metrics
         store.upsert_quality_metrics(eval_res.metrics)
         store.upsert_quality_metrics(eval_res.metrics)
         loaded = store.list_quality_metrics(run_id=run_id)
         assert len(loaded) == len(eval_res.metrics)
-        by_name = {m.metric_name: m for m in loaded}
-        assert by_name["physical_records"].metric_value == 36
-        assert by_name["unique_business_records"].metric_value == 34
-        assert by_name["quarantine_records"].status == "PASS"
+        by_name = {(m.layer, m.metric_name): m for m in loaded}
+        assert by_name[("bronze", "physical_records")].metric_value == 36
+        assert by_name[("silver", "unique_business_records")].metric_value == 34
+        assert by_name[("run", "publish_blocked")].status == "PASS"
     finally:
         runner(f"DELETE FROM runs WHERE run_id = '{run_id}';\n", False)
 

@@ -99,3 +99,57 @@ def test_source_without_accounts_uploads_none(
     result = _ingest(_source(tmp_path, accounts=None))
     assert result.accounts_key is None and result.accounts_status is None
     assert all(not str(key).endswith("accounts.jsonl") for key, _ in puts)
+
+
+# --- control_report.json (ADR-0014) ----------------------------------------------------------
+def _add_control_report(source: Path, *, dataset_id: str = DATASET, declared: bool = True) -> bytes:
+    report = {"schema_version": "1.0.0", "dataset_id": dataset_id, "totals": []}
+    data = (json.dumps(report) + "\n").encode("utf-8")
+    (source / "control_report.json").write_bytes(data)
+    if declared:
+        manifest = {
+            "schema_version": "1.0.0",
+            "dataset_id": DATASET,
+            "source_batch_id": "00000000-0000-0000-0000-000000000002",
+            "files": [
+                {
+                    "path": "control_report.json",
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "physical_rows": 1,
+                }
+            ],
+        }
+        (source / "manifests" / "events_000.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+    return data
+
+
+def test_control_report_is_uploaded_next_to_accounts(
+    tmp_path: Path, puts: list[tuple[str, Path | bytes]]
+) -> None:
+    source = _source(tmp_path, accounts=None)
+    _add_control_report(source)
+    result = _ingest(source)
+    prefix = load_config(profile="test", env=SECRETS).paths.statements_prefix
+    key = f"{prefix}/{DATASET}/control_report.json"
+    assert result.control_report_key == key and result.control_report_status == "uploaded"
+    assert (key, source / "control_report.json") in puts
+    assert key in result.uploaded_keys
+
+
+@pytest.mark.parametrize("problem", ["tampered", "undeclared", "other_dataset"])
+def test_bad_control_report_is_rejected_before_any_upload(
+    tmp_path: Path, puts: list[tuple[str, Path | bytes]], problem: str
+) -> None:
+    source = _source(tmp_path, accounts=None)
+    data = _add_control_report(
+        source,
+        dataset_id="other-dataset" if problem == "other_dataset" else DATASET,
+        declared=problem != "undeclared",
+    )
+    if problem == "tampered":
+        (source / "control_report.json").write_bytes(data + b" ")
+    with pytest.raises(statements.StatementIngestConfigError, match="control_report.json"):
+        _ingest(source)
+    assert puts == []

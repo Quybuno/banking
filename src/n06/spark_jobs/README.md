@@ -30,6 +30,9 @@ lần của image Spark (`spark-submit`, `spark.master` và `spark.driver_memory
   (ADR-0006 D3); đối soát chỉ dùng sao kê có `file_available_at <= as_of_time`.
 - Tài khoản: `<statements_prefix>/<dataset_id>/accounts.jsonl` (do `n06 ingest-statements` tải lên,
   ADR-0004b Q2).
+- Control report: `<statements_prefix>/<dataset_id>/control_report.json` (ADR-0014). Job đối chiếu
+  control totals, ghi `quality_metrics` và chặn publish khi vượt ngưỡng `[quality]` (mã
+  `QUALITY_GATE_BLOCKED`); xem `src/n06/quality/README.md`.
 - `--as-of-time` là đồng hồ giả lập; không đặt thì CLI đọc đồng hồ một lần ở host rồi truyền tường
   minh cho job. Mã Spark không bao giờ đọc đồng hồ.
 

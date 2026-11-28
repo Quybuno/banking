@@ -12,11 +12,14 @@ from n06.quality.conflicts import (
 from n06.quality.metrics import (
     ControlTotalComparison,
     ControlTotalRow,
+    LayerCounts,
     QualityEvaluation,
     QualityThresholds,
+    RejectedKey,
     compare_control_totals,
     compute_control_totals,
     evaluate_quality_gate,
+    is_explained,
     parse_control_report_totals,
 )
 from n06.quality.quarantine import (
@@ -45,9 +48,11 @@ __all__ = [
     "ControlTotalRow",
     "DedupOutcome",
     "KeyConflictRecord",
+    "LayerCounts",
     "QualityEvaluation",
     "QualityThresholds",
     "QuarantineRecord",
+    "RejectedKey",
     "check_ledger_groups_for_quarantine",
     "classify_account_line",
     "classify_raw_event_for_quarantine",
@@ -57,5 +62,6 @@ __all__ = [
     "dedup_and_detect_event_conflicts",
     "dedup_and_detect_statement_conflicts",
     "evaluate_quality_gate",
+    "is_explained",
     "parse_control_report_totals",
 ]

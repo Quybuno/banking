@@ -8,6 +8,7 @@ dẫn dựng lại bằng chuỗi. Đọc Parquet bằng Spark trong container (
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import io
 import json
@@ -18,7 +19,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -562,3 +563,94 @@ def test_business_date_filter_writes_only_the_selected_day_but_reconciles_everyt
             assert run == result["run_id"]
         else:
             assert run == before[key]  # ngày không chọn giữ nguyên run cũ
+
+
+# --- cổng chất lượng và control totals (T32) -------------------------------------------------
+def test_quality_metrics_match_every_control_report_row(
+    ingested: Stack, first_run: dict[str, Any]
+) -> None:
+    report = json.loads((ingested.source / "control_report.json").read_text("utf-8"))
+    metrics = ingested.store.list_quality_metrics(run_id=first_run["run_id"])
+    found = {(m.layer, m.entity, m.business_date.isoformat(), m.metric_name): m for m in metrics}
+
+    for row in report["totals"]:
+        suffix = f"{row['currency']}.{row['status_or_side']}"
+        key = (row["entity"], row["business_date"])
+        assert found[("silver", *key, f"record_count.{suffix}")].metric_value == row["record_count"]
+        assert (
+            found[("silver", *key, f"distinct_keys.{suffix}")].metric_value == (row["record_count"])
+        )
+        assert (
+            found[("silver", *key, f"amount_minor_total.{suffix}")].metric_value
+            == (row["amount_minor_total"])
+        )
+        for name in ("control_count_diff", "control_amount_diff"):
+            diff = found[("control", *key, f"{name}.{suffix}")]
+            assert (diff.metric_value, diff.status) == (0, "PASS")
+    assert first_run["quality"]["control_groups_checked"] == len(report["totals"])
+    assert first_run["quality"]["control_mismatches"] == 0
+
+    # Đếm vật lý độc lập từ file nguồn; bản sạch: không bản ghi nào bị loại.
+    envelopes = _lines(ingested.source, "events")
+    transactions = [e for e in envelopes if "entry_id" not in e["payload"]]
+    physical = sum(
+        m.metric_value
+        for m in metrics
+        if (m.layer, m.entity, m.metric_name) == ("bronze", "transaction", "physical_records")
+    )
+    assert physical == len(transactions)
+    blocked = [m for m in metrics if m.metric_name == "publish_blocked"]
+    assert [(m.metric_value, m.status) for m in blocked] == [(0, "PASS")]
+    assert first_run["quality"]["rejected_records"] == 0
+
+
+def test_unexplained_control_report_mismatch_blocks_publish(
+    ingested: Stack, first_run: dict[str, Any], tmp_path: Path
+) -> None:
+    """Nguồn khai nhiều hơn dữ liệu 1 đơn vị tiền: run bị chặn, current_snapshot giữ nguyên."""
+    source = tmp_path / "source"
+    shutil.copytree(ingested.source, source)
+    report_path = source / "control_report.json"
+    report = json.loads(report_path.read_text("utf-8"))
+    old_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    report["totals"][0]["amount_minor_total"] += 1
+    report_path.write_bytes((json.dumps(report, separators=(",", ":")) + "\n").encode("utf-8"))
+    new_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    for manifest in (source / "manifests").glob("*.json"):
+        text = manifest.read_text("utf-8")
+        if old_sha in text:
+            manifest.write_text(text.replace(old_sha, new_sha), encoding="utf-8")
+
+    # Prefix sao kê riêng: object của lần nạp sạch là bất biến, không ghi đè.
+    prefix = f"{ingested.cfg.paths.statements_prefix}-bad-{uuid.uuid4().hex[:8]}"
+    env = {**ingested.env, "N06__PATHS__STATEMENTS_PREFIX": prefix}
+    bad = replace(ingested, env=env, cfg=load_config(profile="demo", env=env))
+    out = io.StringIO()
+    code = run_ingest_statements(
+        source_dir=source,
+        as_of_time=AS_OF_LATE,
+        dataset_id=ingested.dataset_id,
+        profile="test",
+        env_file=REPO_ROOT / ".env",
+        env=env,
+        as_json=True,
+        out=out,
+    )
+    assert code == 0, out.getvalue()
+    days = first_run["business_dates"]
+    before = _snapshots(ingested, days)
+    run_id = f"run-it-blocked-{uuid.uuid4().hex[:8]}"
+    try:
+        proc = bad.process_day("--run-id", run_id)
+        assert proc.returncode != 0, proc.stdout[-3000:]
+        assert _result(proc, "N06_PROCESS_DAY_ERROR=")["code"] == "QUALITY_GATE_BLOCKED"
+        assert _snapshots(ingested, days) == before
+        run = ingested.store.get_run(run_id)
+        assert run is not None and run.status == "FAILED"
+        metrics = ingested.store.list_quality_metrics(run_id=run_id)
+        failed = {m.metric_name.split(".")[0] for m in metrics if m.status == "FAIL"}
+        assert {"control_amount_diff", "control_total_mismatches", "publish_blocked"} <= failed
+    finally:
+        ingested.spark(
+            {"action": "delete", "uris": [f"s3a://{ingested.bucket}/{prefix}/"]}, tmp_path
+        )

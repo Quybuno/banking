@@ -117,3 +117,15 @@ generator_bytes_per_tx = 4000
 #                         không đặt; khi chưa đặt, kiểm tra dung lượng chỉ cảnh báo, không PASS đủ.
 #   disk_probe_path       thư mục trên ổ Windows chứa đĩa ảo WSL (ví dụ /mnt/d); không đặt thì
 #                         tự xác định qua registry của WSL, không xác định được thì từ chối chạy.
+
+[quality]
+# Cổng chất lượng trước khi publish `current_snapshot` (đặc tả I.6, ADR-0014). Mặc định chặt:
+# bất kỳ bản ghi bị loại hoặc xung đột khóa nào cũng chặn publish.
+# Tỷ lệ bản ghi vật lý bị loại tối đa, tính theo bps (100 bps = 1 %).
+max_quarantine_rate_bps = 0
+# Số dòng `silver.key_conflicts` tối đa.
+max_conflict_count = 0
+# Chênh lệch với control report không giải thích được bằng bản ghi bị loại thì chặn publish.
+fail_on_unexplained_control_mismatch = true
+# Thiếu control_report.json trên object store thì process-day dừng.
+require_control_report = true

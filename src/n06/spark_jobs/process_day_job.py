@@ -27,6 +27,7 @@ from pyspark.sql import functions as F
 
 from n06.config import QUERY_NAME_PATTERN, AppConfig, ConfigValidationError, load_config
 from n06.control import connect_control_db, migrate_up
+from n06.domain import validate_control_report_data
 from n06.ingestion import layout
 from n06.ingestion.spark_session import build_spark
 from n06.quality import metrics as quality_metrics
@@ -198,6 +199,29 @@ def _statement_integrity(
             )
 
 
+def _load_control_report(
+    spark: SparkSession, cfg: AppConfig, dataset_id: str
+) -> dict[str, object] | None:
+    """Đọc `control_report.json` của nguồn (đặc tả II.4, ADR-0014); không phải ground truth."""
+    uri = receipts.control_report_uri(cfg, dataset_id)
+    if not s3_listing.exists(spark, uri):
+        if cfg.quality.require_control_report:
+            raise DataError(
+                "CONTROL_REPORT_MISSING", f"Chưa có {uri}; chạy `n06 ingest-statements`."
+            )
+        return None
+    row = transforms.read_binary_files(spark, [uri]).select("content").collect()[0]
+    result = validate_control_report_data(bytes(row["content"]))
+    if not result.is_valid or result.record is None:
+        raise DataError("CONTROL_REPORT_INVALID", f"{uri} không đúng hợp đồng: {result.issues}")
+    if result.record["dataset_id"] != dataset_id:
+        raise DataError(
+            "CONTROL_REPORT_DATASET_MISMATCH",
+            f"{uri} có dataset_id={result.record['dataset_id']} khác {dataset_id}.",
+        )
+    return dict(result.record)
+
+
 def run_job(
     cfg: AppConfig,
     store: ControlStore,
@@ -223,6 +247,7 @@ def run_job(
         raise DataError(
             "ACCOUNTS_MISSING", f"Chưa có {accounts_uri}; chạy `n06 ingest-statements`."
         )
+    control_report = _load_control_report(spark, cfg, dataset_id)
 
     input_versions = _input_versions(batches, ordered_receipts, args, with_paths=True)
 
@@ -260,6 +285,7 @@ def run_job(
             ordered_receipts,
             uris,
             accounts_uri,
+            control_report,
             filter_dates,
             visible,
             args,
@@ -286,6 +312,7 @@ def _build_and_write(
     ordered_receipts: Sequence[receipts.Receipt],
     uris: dict[str, str],
     accounts_uri: str,
+    control_report: dict[str, object] | None,
     filter_dates: set[date],
     visible: Sequence[receipts.Receipt],
     args: argparse.Namespace,
@@ -377,6 +404,7 @@ def _build_and_write(
 
     # --- Silver giao dịch và bút toán -------------------------------------------------------
     counts: dict[str, int] = {}
+    bronze_scoped: dict[str, DataFrame] = {}  # Bronze của dataset, trước mọi bước lọc
     silver_all: dict[str, DataFrame] = {}  # chưa lọc ngày: đối soát cần toàn bộ dataset
     silver: dict[str, DataFrame] = {}  # sau `--business-date`: phần được ghi
     for entity, bronze_entity, key, payload, build, validate_fn in (
@@ -400,6 +428,10 @@ def _build_and_write(
         bronze = _bronze_frame_with_raw(spark, batches, bronze_entity)
         if bronze is None:
             raise DataError("NO_BRONZE_DATA", f"Không có Bronze entity={bronze_entity}.")
+        bronze_scoped[entity] = bronze.where(
+            (F.col("dataset_id") == F.lit(dataset_id))
+            | (F.col("envelope_dataset_id") == F.lit(dataset_id))
+        )
         valid_bronze, q_df = validate_fn(
             bronze,
             accounts,
@@ -572,6 +604,7 @@ def _build_and_write(
 
     # --- Silver key_conflicts (T31): chỉ ghi nếu có xung đột khóa ----------------------------
     key_conflicts_total = 0
+    kc_frames: list[tuple[date, DataFrame, int]] = []
     if key_conflict_dfs:
         unioned_kc = key_conflict_dfs[0]
         for nxt in key_conflict_dfs[1:]:
@@ -596,8 +629,8 @@ def _build_and_write(
         ):
             quarantine_by_date.setdefault(pdate, []).append(qdf)
     quarantine_total = 0
+    q_frames: list[tuple[date, DataFrame, int]] = []
     if quarantine_by_date:
-        q_frames: list[tuple[date, DataFrame, int]] = []
         for pdate in sorted(quarantine_by_date):
             dfs = quarantine_by_date[pdate]
             merged_q = dfs[0]
@@ -615,27 +648,29 @@ def _build_and_write(
             quarantine_total = write_entity(state, plan.LAYER_QUARANTINE, "records", q_frames)
             total_rows += quarantine_total
 
-    # --- Quality metrics & control totals (T32) ---------------------------------------------
-    actual_totals = spark_metrics.compute_control_totals_spark(
-        silver_all["transactions"], silver_all["ledger_entries"]
+    # --- Cổng chất lượng và control totals (T32) --------------------------------------------
+    # Ghi metrics TRƯỚC khi quyết định, để run bị chặn vẫn còn bằng chứng vì sao.
+    evaluation = _evaluate_quality(
+        state,
+        silver_all=silver_all,
+        silver=silver,
+        bronze_scoped=bronze_scoped,
+        statement_lines=transforms.parse_statement_lines(spark, files, ordered_receipts, uris),
+        quarantine_dfs=quarantine_dfs,
+        parse_errors=[(day, count) for day, _, count in quarantine_parts],
+        quarantine_by_date={day: rows for day, _, rows in q_frames},
+        conflicts_by_date={day: rows for day, _, rows in kc_frames},
+        control_report=control_report,
+        filter_dates=filter_dates,
+        default_date=dates[0],
+        fallback_date=fallback_date,
     )
-    eval_res = quality_metrics.evaluate_quality_gate(
-        run_id=run_id,
-        dataset_id=dataset_id,
-        business_date=dates[0],
-        physical_records=sum(counts.values()),
-        unique_business_records=int(silver_all["transactions"].count())
-        + int(silver_all["ledger_entries"].count()),
-        quarantine_records=quarantine_total,
-        conflict_records=key_conflicts_total,
-        actual_totals=actual_totals,
-        thresholds=quality_metrics.QualityThresholds(
-            max_quarantine_rate=1.0,
-            max_conflict_count=1_000_000_000,
-            fail_on_control_total_mismatch=False,
-        ),
-    )
-    store.upsert_quality_metrics(eval_res.metrics)
+    store.upsert_quality_metrics(evaluation.metrics)
+    if evaluation.should_block_publish:
+        raise DataError(
+            "QUALITY_GATE_BLOCKED",
+            f"Run {run_id} không publish: " + "; ".join(evaluation.blocking_reasons),
+        )
 
     if args.fail_at == "after_write":  # chỉ cho kiểm thử: run thất bại không bao giờ được đọc
         raise DataError("INJECTED_FAILURE", "Tắt có chủ đích sau khi ghi output, trước commit.")
@@ -682,8 +717,106 @@ def _build_and_write(
         "physical_counts": counts,
         "quarantine_records": quarantine_total,
         "key_conflicts": key_conflicts_total,
+        "quality": {
+            "physical_records": evaluation.physical_records,
+            "rejected_records": evaluation.rejected_records,
+            "control_groups_checked": len(evaluation.comparisons),
+            "control_mismatches": len(evaluation.mismatches),
+            "unexplained_mismatches": len(evaluation.unexplained),
+        },
         "committed_snapshots": len(snapshots),
     }
+
+
+def _evaluate_quality(
+    state: RunState,
+    *,
+    silver_all: dict[str, DataFrame],
+    silver: dict[str, DataFrame],
+    bronze_scoped: dict[str, DataFrame],
+    statement_lines: DataFrame,
+    quarantine_dfs: Sequence[DataFrame],
+    parse_errors: Sequence[tuple[date, int]],
+    quarantine_by_date: dict[date, int],
+    conflicts_by_date: dict[date, int],
+    control_report: dict[str, object] | None,
+    filter_dates: set[date],
+    default_date: date,
+    fallback_date: date,
+) -> quality_metrics.QualityEvaluation:
+    """Đếm tầng, control totals và cổng chặn publish theo ngưỡng `[quality]` của cấu hình."""
+    quarantine = None
+    if quarantine_dfs:
+        quarantine = quarantine_dfs[0]
+        for nxt in quarantine_dfs[1:]:
+            quarantine = quarantine.unionByName(nxt)
+        quarantine = state.persist(quarantine)
+
+    layer_counts: list[quality_metrics.LayerCounts] = []
+    totals: list[quality_metrics.ControlTotalRow] = []
+    for entity, name, key, group in (
+        ("transactions", "transaction", "transaction_id", "status"),
+        ("ledger_entries", "ledger_entry", "entry_id", "side"),
+        ("statements", "statement", "statement_record_id", "status"),
+    ):
+        is_event = entity in bronze_scoped
+        layer_counts += spark_metrics.layer_counts_spark(
+            bronze_scoped[entity] if is_event else statement_lines,
+            silver_all[entity],
+            quarantine,
+            entity=name,
+            key_col=key,
+            pointer=(
+                transforms.pointer_column() if is_event else spark_metrics.statement_pointer()
+            ),
+            fallback_date=fallback_date,
+            event_col="event_id" if is_event else None,
+        )
+        totals += spark_metrics.compute_group_totals_spark(
+            silver[entity], entity=name, key_col=key, group_col=group
+        )
+    if filter_dates:
+        layer_counts = [c for c in layer_counts if c.business_date in filter_dates]
+    layer_counts += spark_metrics.parse_error_counts(parse_errors)
+
+    rejected: list[quality_metrics.RejectedKey] = []
+    if control_report is not None and any(
+        not c.matched
+        for c in quality_metrics.compare_control_totals(
+            totals, control_report, business_dates=filter_dates
+        )
+    ):
+        # Chỉ tìm khóa bị loại khi có chênh lệch cần giải thích.
+        for entity, name, key, group in (
+            ("transactions", "transaction", "transaction_id", "status"),
+            ("ledger_entries", "ledger_entry", "entry_id", "side"),
+        ):
+            rejected += spark_metrics.rejected_keys_spark(
+                bronze_scoped[entity],
+                silver_all[entity],
+                entity=name,
+                key_col=key,
+                group_col=group,
+            )
+
+    limits = state.cfg.quality
+    return quality_metrics.evaluate_quality_gate(
+        run_id=state.run_id,
+        dataset_id=state.dataset_id,
+        default_date=default_date,
+        layer_counts=layer_counts,
+        totals=totals,
+        quarantine_by_date=quarantine_by_date,
+        conflicts_by_date=conflicts_by_date,
+        control_report=control_report,
+        rejected_keys=rejected,
+        business_dates=filter_dates,
+        thresholds=quality_metrics.QualityThresholds(
+            max_quarantine_rate_bps=limits.max_quarantine_rate_bps,
+            max_conflict_count=limits.max_conflict_count,
+            fail_on_unexplained_control_mismatch=limits.fail_on_unexplained_control_mismatch,
+        ),
+    )
 
 
 def _input_versions(
