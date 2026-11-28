@@ -23,6 +23,7 @@ from n06.storage import (
     RunRecord,
     RunStateError,
     SnapshotRecord,
+    SnapshotSpec,
     build_run_output_path,
     compute_semantic_hash,
     require_unused_run_prefix,
@@ -64,6 +65,35 @@ class _InMemoryControlStore:
         target_status: str,
         after_run_update_hook: Callable[[], None] | None = None,
     ) -> SnapshotRecord:
+        return self.commit_run_snapshots_atomic(
+            run_id=run_id,
+            dataset_id=dataset_id,
+            snapshots=[
+                SnapshotSpec(
+                    layer=layer,
+                    entity=entity,
+                    business_date=business_date,
+                    output_path=output_path,
+                    manifest_path=manifest_path,
+                )
+            ],
+            row_count=row_count,
+            semantic_hash=semantic_hash,
+            target_status=target_status,
+            after_run_update_hook=after_run_update_hook,
+        )[0]
+
+    def commit_run_snapshots_atomic(
+        self,
+        *,
+        run_id: str,
+        dataset_id: str,
+        snapshots: Sequence[SnapshotSpec],
+        row_count: int,
+        semantic_hash: str,
+        target_status: str,
+        after_run_update_hook: Callable[[], None] | None = None,
+    ) -> list[SnapshotRecord]:
         with self._lock:
             runs_backup = dict(self.runs)
             snapshots_backup = dict(self.snapshots)
@@ -97,18 +127,21 @@ class _InMemoryControlStore:
                 if after_run_update_hook is not None:
                     after_run_update_hook()
 
-                snap = SnapshotRecord(
-                    dataset_id=dataset_id,
-                    layer=layer,
-                    entity=entity,
-                    business_date=business_date,
-                    run_id=run_id,
-                    output_path=output_path,
-                    manifest_path=manifest_path,
-                    semantic_hash=semantic_hash,
-                )
-                self.snapshots[(dataset_id, layer, entity, business_date)] = snap
-                return snap
+                out: list[SnapshotRecord] = []
+                for s in snapshots:
+                    snap = SnapshotRecord(
+                        dataset_id=dataset_id,
+                        layer=s.layer,
+                        entity=s.entity,
+                        business_date=s.business_date,
+                        run_id=run_id,
+                        output_path=s.output_path,
+                        manifest_path=s.manifest_path,
+                        semantic_hash=semantic_hash,
+                    )
+                    self.snapshots[(dataset_id, s.layer, s.entity, s.business_date)] = snap
+                    out.append(snap)
+                return out
             except Exception:
                 self.runs = runs_backup
                 self.snapshots = snapshots_backup
@@ -604,3 +637,62 @@ def test_atomic_rollback_preserves_old_snapshot_and_idempotent_rerun() -> None:
     assert current is not None
     assert current.run_id == "run-1"
     assert json.loads(json.dumps(current.semantic_hash)) == "hash-1"
+
+
+def test_commit_run_snapshots_atomic_never_mixes_runs_on_mid_commit_failure() -> None:
+    store = _InMemoryControlStore()
+    coord = BatchCommitCoordinator(store)
+    for rid in ("run-1", "run-2"):
+        coord.start_run(
+            run_id=rid,
+            dataset_id="ds-1",
+            job_name="process_day",
+            profile="test",
+            business_date_from="2026-01-01",
+            business_date_to="2026-01-01",
+            input_versions=["b1"],
+            config_hash="c1",
+            schema_version="1.0.0",
+            rule_version="1.0.0",
+            code_version="v1",
+        )
+
+    coord.commit_run_snapshots(
+        run_id="run-1",
+        dataset_id="ds-1",
+        snapshots=[
+            SnapshotSpec("silver", "transactions", date(2026, 1, 1), "s/run_id=run-1/t"),
+            SnapshotSpec("gold", "fact_transactions", date(2026, 1, 1), "g/run_id=run-1/ft"),
+            SnapshotSpec("gold", "fact_reconciliation", date(2026, 1, 1), "g/run_id=run-1/fr"),
+        ],
+        row_count=10,
+        semantic_hash="hash-1",
+    )
+
+    def _boom() -> None:
+        raise RuntimeError("chết giữa chừng khi commit")
+
+    with pytest.raises(RuntimeError, match="chết giữa chừng"):
+        coord.commit_run_snapshots(
+            run_id="run-2",
+            dataset_id="ds-1",
+            snapshots=[
+                SnapshotSpec("silver", "transactions", date(2026, 1, 1), "s/run_id=run-2/t"),
+                SnapshotSpec("gold", "fact_transactions", date(2026, 1, 1), "g/run_id=run-2/ft"),
+                SnapshotSpec("gold", "fact_reconciliation", date(2026, 1, 1), "g/run_id=run-2/fr"),
+            ],
+            row_count=12,
+            semantic_hash="hash-2",
+            after_run_update_hook=_boom,
+        )
+
+    assert store.get_run("run-2").status == "RUNNING"
+    for layer, entity in (
+        ("silver", "transactions"),
+        ("gold", "fact_transactions"),
+        ("gold", "fact_reconciliation"),
+    ):
+        snap = coord.resolve_current_snapshot(
+            dataset_id="ds-1", layer=layer, entity=entity, business_date="2026-01-01"
+        )
+        assert snap is not None and snap.run_id == "run-1"

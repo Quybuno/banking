@@ -66,6 +66,17 @@ class SnapshotRecord:
 
 
 @dataclass(frozen=True)
+class SnapshotSpec:
+    """Thông số một snapshot cần trỏ vào `current_snapshot` trong cùng transaction commit run."""
+
+    layer: str
+    entity: str
+    business_date: date
+    output_path: str
+    manifest_path: str | None = None
+
+
+@dataclass(frozen=True)
 class IngestBatchRecord:
     """Bản ghi batch streaming đã commit trong `ingest_batches`."""
 
@@ -117,6 +128,19 @@ class ControlStore(Protocol):
         after_run_update_hook: Callable[[], None] | None = None,
     ) -> SnapshotRecord:
         """Cập nhật `runs` và `current_snapshot` trong một transaction nguyên tử."""
+
+    def commit_run_snapshots_atomic(
+        self,
+        *,
+        run_id: str,
+        dataset_id: str,
+        snapshots: Sequence[SnapshotSpec],
+        row_count: int,
+        semantic_hash: str,
+        target_status: str,
+        after_run_update_hook: Callable[[], None] | None = None,
+    ) -> list[SnapshotRecord]:
+        """Cập nhật `runs` và mọi `current_snapshot` của run trong MỘT transaction nguyên tử."""
 
     def fail_run(self, *, run_id: str, error_summary: str) -> None:
         """Đánh dấu run `FAILED`; không thay đổi `current_snapshot`."""
@@ -282,12 +306,46 @@ class PsycopgControlStore:
         target_status: str,
         after_run_update_hook: Callable[[], None] | None = None,
     ) -> SnapshotRecord:
+        return self.commit_run_snapshots_atomic(
+            run_id=run_id,
+            dataset_id=dataset_id,
+            snapshots=[
+                SnapshotSpec(
+                    layer=layer,
+                    entity=entity,
+                    business_date=business_date,
+                    output_path=output_path,
+                    manifest_path=manifest_path,
+                )
+            ],
+            row_count=row_count,
+            semantic_hash=semantic_hash,
+            target_status=target_status,
+            after_run_update_hook=after_run_update_hook,
+        )[0]
+
+    def commit_run_snapshots_atomic(
+        self,
+        *,
+        run_id: str,
+        dataset_id: str,
+        snapshots: Sequence[SnapshotSpec],
+        row_count: int,
+        semantic_hash: str,
+        target_status: str,
+        after_run_update_hook: Callable[[], None] | None = None,
+    ) -> list[SnapshotRecord]:
+        if not snapshots:
+            raise CommitError("Cần ít nhất một snapshot để commit.")
         conn = self._conn_factory()
-        scope = _scope_key(dataset_id, layer, entity, business_date)
+        scopes = sorted(
+            {_scope_key(dataset_id, s.layer, s.entity, s.business_date) for s in snapshots}
+        )
         try:
             with conn.cursor() as cur:
-                # Tuần tự hóa mọi commit đồng thời trên cùng (dataset, layer, entity, business_date)
-                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0));", (scope,))
+                # Khóa theo thứ tự cố định để mọi commit nhiều snapshot không deadlock.
+                for scope in scopes:
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0));", (scope,))
 
                 cur.execute(
                     "SELECT status, semantic_hash FROM runs WHERE run_id = %s FOR UPDATE;",
@@ -301,7 +359,27 @@ class PsycopgControlStore:
                 if current_status in COMMITTED_RUN_STATUSES:
                     if existing_hash != semantic_hash:
                         raise RunStateError(f"run_id '{run_id}' đã commit với semantic_hash khác.")
-                    # Idempotent rerun cùng run_id: cập nhật/đảm bảo snapshot đồng bộ
+                elif current_status != "RUNNING":
+                    raise RunStateError(
+                        f"Không thể commit run_id '{run_id}' từ trạng thái '{current_status}'."
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE runs
+                        SET status = %s,
+                            row_count = %s,
+                            semantic_hash = %s,
+                            finished_at = NOW()
+                        WHERE run_id = %s;
+                        """,
+                        (target_status, row_count, semantic_hash, run_id),
+                    )
+                    if after_run_update_hook is not None:
+                        after_run_update_hook()
+
+                results: list[SnapshotRecord] = []
+                for s in snapshots:
                     cur.execute(
                         """
                         INSERT INTO current_snapshot (
@@ -317,88 +395,37 @@ class PsycopgControlStore:
                         """,
                         (
                             dataset_id,
-                            layer,
-                            entity,
-                            business_date,
+                            s.layer,
+                            s.entity,
+                            s.business_date,
                             run_id,
-                            output_path,
-                            manifest_path,
+                            s.output_path,
+                            s.manifest_path,
                             semantic_hash,
                         ),
                     )
-                    conn.commit()
-                    return SnapshotRecord(
-                        dataset_id=dataset_id,
-                        layer=layer,
-                        entity=entity,
-                        business_date=business_date,
-                        run_id=run_id,
-                        output_path=output_path,
-                        manifest_path=manifest_path,
-                        semantic_hash=semantic_hash,
+                    results.append(
+                        SnapshotRecord(
+                            dataset_id=dataset_id,
+                            layer=s.layer,
+                            entity=s.entity,
+                            business_date=s.business_date,
+                            run_id=run_id,
+                            output_path=s.output_path,
+                            manifest_path=s.manifest_path,
+                            semantic_hash=semantic_hash,
+                        )
                     )
-
-                if current_status != "RUNNING":
-                    raise RunStateError(
-                        f"Không thể commit run_id '{run_id}' từ trạng thái '{current_status}'."
-                    )
-
-                cur.execute(
-                    """
-                    UPDATE runs
-                    SET status = %s,
-                        row_count = %s,
-                        semantic_hash = %s,
-                        finished_at = NOW()
-                    WHERE run_id = %s;
-                    """,
-                    (target_status, row_count, semantic_hash, run_id),
-                )
-
-                if after_run_update_hook is not None:
-                    after_run_update_hook()
-
-                cur.execute(
-                    """
-                    INSERT INTO current_snapshot (
-                        dataset_id, layer, entity, business_date,
-                        run_id, output_path, manifest_path, semantic_hash
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (dataset_id, layer, entity, business_date) DO UPDATE
-                        SET run_id = EXCLUDED.run_id,
-                            output_path = EXCLUDED.output_path,
-                            manifest_path = EXCLUDED.manifest_path,
-                            semantic_hash = EXCLUDED.semantic_hash,
-                            updated_at = NOW();
-                    """,
-                    (
-                        dataset_id,
-                        layer,
-                        entity,
-                        business_date,
-                        run_id,
-                        output_path,
-                        manifest_path,
-                        semantic_hash,
-                    ),
-                )
             conn.commit()
-            return SnapshotRecord(
-                dataset_id=dataset_id,
-                layer=layer,
-                entity=entity,
-                business_date=business_date,
-                run_id=run_id,
-                output_path=output_path,
-                manifest_path=manifest_path,
-                semantic_hash=semantic_hash,
-            )
+            return results
         except CommitError:
             conn.rollback()
             raise
         except Exception as exc:
             conn.rollback()
-            raise CommitError(f"commit_run_atomic thất bại cho '{run_id}': {exc}") from exc
+            raise CommitError(
+                f"commit_run_snapshots_atomic thất bại cho '{run_id}': {exc}"
+            ) from exc
         finally:
             conn.close()
 
@@ -778,10 +805,11 @@ END $$;
 COMMIT;
 """
 
-_COMMIT_RUN_SQL = f"""
+_COMMIT_RUN_SNAPSHOTS_SQL = f"""
 BEGIN;
 {_PARAMS_TABLE}
-SELECT pg_advisory_xact_lock(hashtextextended(j->>'scope', 0)) FROM n06_params;
+SELECT pg_advisory_xact_lock(hashtextextended(scope_item, 0))
+FROM n06_params, jsonb_array_elements_text(j->'scopes') AS scope_item;
 DO $$
 DECLARE
     v jsonb;
@@ -817,10 +845,16 @@ INSERT INTO current_snapshot (
     dataset_id, layer, entity, business_date,
     run_id, output_path, manifest_path, semantic_hash
 )
-SELECT j->>'dataset_id', j->>'layer', j->>'entity', (j->>'business_date')::date,
-       j->>'run_id', j->>'output_path', j->>'manifest_path', j->>'semantic_hash'
-FROM n06_params
-WHERE true
+SELECT j->>'dataset_id', s.layer, s.entity, s.business_date,
+       j->>'run_id', s.output_path, s.manifest_path, j->>'semantic_hash'
+FROM n06_params,
+     jsonb_to_recordset(j->'snapshots') AS s(
+         layer TEXT,
+         entity TEXT,
+         business_date DATE,
+         output_path TEXT,
+         manifest_path TEXT
+     )
 ON CONFLICT (dataset_id, layer, entity, business_date) DO UPDATE
     SET run_id = EXCLUDED.run_id,
         output_path = EXCLUDED.output_path,
@@ -1112,37 +1146,79 @@ class PsqlCliControlStore:
         target_status: str,
         after_run_update_hook: Callable[[], None] | None = None,
     ) -> SnapshotRecord:
+        return self.commit_run_snapshots_atomic(
+            run_id=run_id,
+            dataset_id=dataset_id,
+            snapshots=[
+                SnapshotSpec(
+                    layer=layer,
+                    entity=entity,
+                    business_date=business_date,
+                    output_path=output_path,
+                    manifest_path=manifest_path,
+                )
+            ],
+            row_count=row_count,
+            semantic_hash=semantic_hash,
+            target_status=target_status,
+            after_run_update_hook=after_run_update_hook,
+        )[0]
+
+    def commit_run_snapshots_atomic(
+        self,
+        *,
+        run_id: str,
+        dataset_id: str,
+        snapshots: Sequence[SnapshotSpec],
+        row_count: int,
+        semantic_hash: str,
+        target_status: str,
+        after_run_update_hook: Callable[[], None] | None = None,
+    ) -> list[SnapshotRecord]:
+        if not snapshots:
+            raise CommitError("Cần ít nhất một snapshot để commit.")
         if after_run_update_hook is not None:
             # Thực thi hook trước bước upsert bên trong cùng kịch bản transaction không khả thi
             # qua subprocess một lần; gọi hook ngay trước khi commit khối SQL nguyên tử.
             after_run_update_hook()
 
+        scopes = sorted(
+            {_scope_key(dataset_id, s.layer, s.entity, s.business_date) for s in snapshots}
+        )
         self._run_sql(
-            _COMMIT_RUN_SQL,
+            _COMMIT_RUN_SNAPSHOTS_SQL,
             params={
-                "scope": _scope_key(dataset_id, layer, entity, business_date),
+                "scopes": scopes,
                 "run_id": run_id,
                 "dataset_id": dataset_id,
-                "layer": layer,
-                "entity": entity,
-                "business_date": business_date.isoformat(),
-                "output_path": output_path,
-                "manifest_path": manifest_path,
                 "row_count": row_count,
                 "semantic_hash": semantic_hash,
                 "target_status": target_status,
+                "snapshots": [
+                    {
+                        "layer": s.layer,
+                        "entity": s.entity,
+                        "business_date": s.business_date.isoformat(),
+                        "output_path": s.output_path,
+                        "manifest_path": s.manifest_path,
+                    }
+                    for s in snapshots
+                ],
             },
         )
-        return SnapshotRecord(
-            dataset_id=dataset_id,
-            layer=layer,
-            entity=entity,
-            business_date=business_date,
-            run_id=run_id,
-            output_path=output_path,
-            manifest_path=manifest_path,
-            semantic_hash=semantic_hash,
-        )
+        return [
+            SnapshotRecord(
+                dataset_id=dataset_id,
+                layer=s.layer,
+                entity=s.entity,
+                business_date=s.business_date,
+                run_id=run_id,
+                output_path=s.output_path,
+                manifest_path=s.manifest_path,
+                semantic_hash=semantic_hash,
+            )
+            for s in snapshots
+        ]
 
     def fail_run(self, *, run_id: str, error_summary: str) -> None:
         self._run_sql(_FAIL_RUN_SQL, params={"run_id": run_id, "error_summary": error_summary})
