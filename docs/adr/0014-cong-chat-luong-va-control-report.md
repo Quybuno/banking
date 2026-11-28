@@ -1,8 +1,8 @@
 # ADR-0014: Cổng chất lượng trước publish và đối chiếu control report
 
-- Trạng thái: Proposed
+- Trạng thái: Accepted
 - Người viết: agent giám sát (Claude), task T32
-- Người duyệt: chủ repo
+- Người duyệt: agent giám sát theo ủy quyền của chủ repo (2026-11-28: "tôi cho bạn toàn quyền xử lý mà commit lên main"); chủ repo có thể đổi ngưỡng ở mục 6 bằng cấu hình
 - Ngày: 2026-11-28
 - Mục đặc tả liên quan (docs/spec.md): Phần I mục 6 ("Kiểm tra chất lượng và control totals"), Phần II mục 4
 
