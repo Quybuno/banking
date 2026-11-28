@@ -155,6 +155,137 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  airflow-init:
+    # ADR-0013: Image Airflow 3.4.0 dựng từ n06-spark:3.5.8-py311, profile orchestration.
+    image: n06-airflow:3.4.0-py311
+    build:
+      context: .
+      dockerfile: infra/airflow/Dockerfile
+    profiles:
+      - orchestration
+    networks:
+      - n06-net
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg://${N06_POSTGRES_AIRFLOW_USER:-n06_airflow_user}:${N06_POSTGRES_AIRFLOW_PASSWORD:?N06_POSTGRES_AIRFLOW_PASSWORD is required in .env}@postgres:5432/${N06_POSTGRES_AIRFLOW_DB:-n06_airflow}"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: "${N06_AIRFLOW_FERNET_KEY:?N06_AIRFLOW_FERNET_KEY is required in .env}"
+      AIRFLOW__API_AUTH__JWT_SECRET: "${N06_AIRFLOW_JWT_SECRET:?N06_AIRFLOW_JWT_SECRET is required in .env}"
+    command: ["airflow", "db", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  airflow-api-server:
+    image: n06-airflow:3.4.0-py311
+    profiles:
+      - orchestration
+    hostname: airflow-api-server
+    networks:
+      - n06-net
+    ports:
+      - "${N06_AIRFLOW_HOST_PORT:-18081}:8080"
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg://${N06_POSTGRES_AIRFLOW_USER:-n06_airflow_user}:${N06_POSTGRES_AIRFLOW_PASSWORD:?N06_POSTGRES_AIRFLOW_PASSWORD is required in .env}@postgres:5432/${N06_POSTGRES_AIRFLOW_DB:-n06_airflow}"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: "Asia/Ho_Chi_Minh"
+      AIRFLOW__CORE__FERNET_KEY: "${N06_AIRFLOW_FERNET_KEY:?N06_AIRFLOW_FERNET_KEY is required in .env}"
+      AIRFLOW__API_AUTH__JWT_SECRET: "${N06_AIRFLOW_JWT_SECRET:?N06_AIRFLOW_JWT_SECRET is required in .env}"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "admin:admin"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: "/opt/airflow/simple_auth_passwords.json"
+    command: ["airflow", "api-server", "--port", "8080"]
+    volumes:
+      - n06_airflow_logs:/opt/airflow/logs
+      - ./dags:/opt/airflow/dags:ro
+    mem_limit: 1024m
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl -fsS http://127.0.0.1:8080/api/v2/monitor/health > /dev/null"
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: n06-airflow:3.4.0-py311
+    profiles:
+      - orchestration
+    hostname: airflow-scheduler
+    networks:
+      - n06-net
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg://${N06_POSTGRES_AIRFLOW_USER:-n06_airflow_user}:${N06_POSTGRES_AIRFLOW_PASSWORD:?N06_POSTGRES_AIRFLOW_PASSWORD is required in .env}@postgres:5432/${N06_POSTGRES_AIRFLOW_DB:-n06_airflow}"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: "Asia/Ho_Chi_Minh"
+      AIRFLOW__CORE__PARALLELISM: "${N06_AIRFLOW_PARALLELISM:-1}"
+      AIRFLOW__CORE__FERNET_KEY: "${N06_AIRFLOW_FERNET_KEY:?N06_AIRFLOW_FERNET_KEY is required in .env}"
+      AIRFLOW__API_AUTH__JWT_SECRET: "${N06_AIRFLOW_JWT_SECRET:?N06_AIRFLOW_JWT_SECRET is required in .env}"
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-api-server:8080/execution/"
+      N06_OBJECT_STORE_ACCESS_KEY: "${N06_OBJECT_STORE_ACCESS_KEY:?N06_OBJECT_STORE_ACCESS_KEY is required in .env}"
+      N06_OBJECT_STORE_SECRET_KEY: "${N06_OBJECT_STORE_SECRET_KEY:?N06_OBJECT_STORE_SECRET_KEY is required in .env}"
+      N06_POSTGRES_MART_PASSWORD: "${N06_POSTGRES_MART_PASSWORD:?N06_POSTGRES_MART_PASSWORD is required in .env}"
+      N06_POSTGRES_CONTROL_PASSWORD: "${N06_POSTGRES_CONTROL_PASSWORD:?N06_POSTGRES_CONTROL_PASSWORD is required in .env}"
+      N06_POSTGRES_AIRFLOW_PASSWORD: "${N06_POSTGRES_AIRFLOW_PASSWORD:?N06_POSTGRES_AIRFLOW_PASSWORD is required in .env}"
+      N06_POSTGRES_METABASE_PASSWORD: "${N06_POSTGRES_METABASE_PASSWORD:?N06_POSTGRES_METABASE_PASSWORD is required in .env}"
+    command: ["airflow", "scheduler"]
+    volumes:
+      - n06_airflow_logs:/opt/airflow/logs
+      - n06_spark_data:/workspace/data
+      - ./dags:/opt/airflow/dags:ro
+    mem_limit: 4096m
+    depends_on:
+      airflow-api-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "airflow jobs check --job-type SchedulerJob --local"
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    image: n06-airflow:3.4.0-py311
+    profiles:
+      - orchestration
+    hostname: airflow-dag-processor
+    networks:
+      - n06-net
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg://${N06_POSTGRES_AIRFLOW_USER:-n06_airflow_user}:${N06_POSTGRES_AIRFLOW_PASSWORD:?N06_POSTGRES_AIRFLOW_PASSWORD is required in .env}@postgres:5432/${N06_POSTGRES_AIRFLOW_DB:-n06_airflow}"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: "Asia/Ho_Chi_Minh"
+      AIRFLOW__CORE__FERNET_KEY: "${N06_AIRFLOW_FERNET_KEY:?N06_AIRFLOW_FERNET_KEY is required in .env}"
+      AIRFLOW__API_AUTH__JWT_SECRET: "${N06_AIRFLOW_JWT_SECRET:?N06_AIRFLOW_JWT_SECRET is required in .env}"
+    command: ["airflow", "dag-processor"]
+    volumes:
+      - n06_airflow_logs:/opt/airflow/logs
+      - ./dags:/opt/airflow/dags:ro
+    mem_limit: 768m
+    depends_on:
+      airflow-api-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl -fsS http://airflow-api-server:8080/api/v2/monitor/health | grep -q healthy"
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
 networks:
   n06-net:
     name: n06_network
@@ -169,3 +300,5 @@ volumes:
     name: n06_postgres_data
   n06_spark_data:
     name: n06_spark_data
+  n06_airflow_logs:
+    name: n06_airflow_logs

@@ -52,7 +52,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T51 | C | TODO | | | Cách đo: ADR-0007 (Accepted) |
 | T52 | C + A | TODO | | | |
 | T53 | cả nhóm | TODO | | | |
-| T60 | C | TODO | | | P1, thuộc bản nộp; Airflow 3.4.0, profile `orchestration`, BashOperator gọi `n06` (ADR-0013) |
+| T60 | C | IN_REVIEW | | `verify_contract` (14/14), `check_rules`, `ruff`, `pytest tests/unit/dags/` PASS | Image `n06-airflow:3.4.0-py311` (`FROM n06-spark:3.5.8-py311`, `constraints-3.4.0-3.11.txt`), 4 service Compose profile `orchestration` (không mount Docker socket), DAG `n06_daily_pipeline` + `n06_backfill_pipeline` (`BashOperator` + retry); chưa build/chạy live DAG run trên Docker |
 | T61 | B | TODO | | | P1, thuộc bản nộp; Late correction, `first_seen_at`, `resolved_at` (ADR-0006) |
 | T62 | C | TODO | | | P1, thuộc bản nộp; Drill-down và runbook |
 | T63 | A | TODO | | | P1, thuộc bản nộp; E6 (ADR-0007) |
