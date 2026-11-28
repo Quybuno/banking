@@ -29,7 +29,7 @@ from n06.config import QUERY_NAME_PATTERN, AppConfig, ConfigValidationError, loa
 from n06.control import connect_control_db, migrate_up
 from n06.ingestion import layout
 from n06.ingestion.spark_session import build_spark
-from n06.quality import spark_quarantine
+from n06.quality import spark_conflicts, spark_quarantine
 from n06.spark_jobs import plan, receipts, s3_listing, transforms
 from n06.storage import (
     BatchCommitCoordinator,
@@ -298,13 +298,37 @@ def _build_and_write(
     # --- Silver tài khoản (đọc trước để kiểm UNKNOWN_ACCOUNT và ACCOUNT_CURRENCY_MISMATCH) ---
     quarantine_parts: list[tuple[date, DataFrame, int]] = []
     quarantine_dfs: list[DataFrame] = []
+    key_conflict_dfs: list[DataFrame] = []
     fallback_date = min(b.ingestion_date for b in batches)
 
     account_files = transforms.read_binary_files(spark, [accounts_uri])
     accounts, bad_accounts, conflicting = transforms.silver_accounts(
         spark, account_files, dataset_id=dataset_id, source_file="accounts.jsonl", run_id=run_id
     )
-    _require_zero(conflicting, "ACCOUNT_ID_CONFLICT", "cùng account_id khác nội dung (T31 chưa có)")
+    conflicting = state.persist(conflicting)
+    if conflicting.count() > 0:
+        quarantine_dfs.append(
+            conflicting.select(
+                F.col("dataset_id").cast("string").alias("dataset_id"),
+                F.lit(None).cast("date").alias("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.lit("SILVER_DEDUP").alias("stage"),
+                F.lit("account").alias("entity"),
+                F.col("account_id").cast("string").alias("business_key"),
+                F.lit("BUSINESS_KEY_CONFLICT").alias("error_code"),
+                F.array(F.lit("BUSINESS_KEY_CONFLICT")).alias("issue_codes"),
+                F.lit("Xung đột khóa tài khoản: cùng account_id khác nội dung").alias(
+                    "error_detail"
+                ),
+                F.lit("accounts.jsonl").alias("source_pointer"),
+                F.lit(accounts_uri).alias("raw_reference"),
+            )
+        )
+        accounts = accounts.join(
+            conflicting.select("dataset_id", "account_id"),
+            ["dataset_id", "account_id"],
+            "left_anti",
+        )
     bad_accounts = state.persist(bad_accounts)
     if bad_accounts.count() > 0:
         quarantine_dfs.append(
@@ -385,24 +409,22 @@ def _build_and_write(
         q_df = state.persist(q_df)
         if q_df.count() > 0:
             quarantine_dfs.append(q_df)
-        grouped, source = transforms.dedup_event_bronze(
-            valid_bronze.drop("_raw_path", "_ingestion_date"),
+        grouped, source, dedup_q, dedup_kc = spark_conflicts.split_event_conflicts_spark(
+            valid_bronze,
             dataset_id=dataset_id,
-            key=key,
-            payload=payload,
+            entity=bronze_entity,
+            key_col=key,
+            payload_cols=payload,
+            run_id=run_id,
         )
         grouped = state.persist(grouped)
         source = state.persist(source)
-        _require_zero(
-            grouped.where(F.col("variants") > 1),
-            "BUSINESS_KEY_CONFLICT",
-            f"{entity}: cùng khóa nghiệp vụ khác nội dung (T31 chưa có)",
-        )
-        _require_zero(
-            transforms.event_id_conflicts(source),
-            "EVENT_ID_CONFLICT",
-            f"{entity}: cùng event_id khác nội dung (T31 chưa có)",
-        )
+        dedup_q = state.persist(dedup_q)
+        dedup_kc = state.persist(dedup_kc)
+        if dedup_q.count() > 0:
+            quarantine_dfs.append(dedup_q)
+        if dedup_kc.count() > 0:
+            key_conflict_dfs.append(dedup_kc)
         frame = build(grouped, run_id=run_id)
         silver_all[entity] = state.persist(frame)
         silver[entity] = date_filter(silver_all[entity])
@@ -462,12 +484,16 @@ def _build_and_write(
             )
         )
     flat = state.persist(flat)
-    _require_zero(
-        flat.where(F.col("variants") > 1),
-        "STATEMENT_ID_CONFLICT",
-        "cùng statement_record_id khác nội dung (T31 chưa có)",
+    clean_flat, stmt_q, stmt_kc = spark_conflicts.split_statement_conflicts_spark(
+        flat, run_id=run_id
     )
-    statements = transforms.finish_silver_statements(flat, run_id=run_id)
+    stmt_q = state.persist(stmt_q)
+    stmt_kc = state.persist(stmt_kc)
+    if stmt_q.count() > 0:
+        quarantine_dfs.append(stmt_q)
+    if stmt_kc.count() > 0:
+        key_conflict_dfs.append(stmt_kc)
+    statements = transforms.finish_silver_statements(clean_flat, run_id=run_id)
     bad_stmt_dates = state.persist(transforms.invalid_event_rows(statements, tz))
     if bad_stmt_dates.count() > 0:
         quarantine_dfs.append(
@@ -542,6 +568,19 @@ def _build_and_write(
         (d, accounts.withColumn("business_date", F.lit(d)), account_rows) for d in dates
     ]
     total_rows += write_entity(state, plan.LAYER_SILVER, "accounts", account_frames)
+
+    # --- Silver key_conflicts (T31): chỉ ghi nếu có xung đột khóa ----------------------------
+    key_conflicts_total = 0
+    if key_conflict_dfs:
+        unioned_kc = key_conflict_dfs[0]
+        for nxt in key_conflict_dfs[1:]:
+            unioned_kc = unioned_kc.unionByName(nxt)
+        kc_filtered = state.persist(date_filter(unioned_kc))
+        kc_frames = list(transforms.split_by_date(kc_filtered))
+        if kc_frames:
+            state.digests["silver.key_conflicts"] = transforms.entity_digest(kc_filtered)
+            key_conflicts_total = write_entity(state, plan.LAYER_SILVER, "key_conflicts", kc_frames)
+            total_rows += key_conflicts_total
 
     # --- Quarantine (T30): chỉ ghi nếu có bản ghi lỗi; không ghi đè lỗi run cũ --------------
     quarantine_by_date: dict[date, list[DataFrame]] = {}
@@ -619,6 +658,7 @@ def _build_and_write(
         },
         "physical_counts": counts,
         "quarantine_records": quarantine_total,
+        "key_conflicts": key_conflicts_total,
         "committed_snapshots": len(snapshots),
     }
 
