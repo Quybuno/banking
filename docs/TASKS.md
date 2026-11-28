@@ -39,7 +39,7 @@ Ba người làm song song chỉ an toàn khi các điểm nối đã chốt b�
 | ADR-001 | Bộ phiên bản Spark/Hadoop/AWS SDK/Kafka connector/Java/Python (đặc tả I.2) | A | C | T04 |
 | ADR-002 | Cấu trúc đường dẫn MinIO: Raw, Bronze, Silver, Gold, statement, tiền tố benchmark | A | B | T22 |
 | ADR-003 | Schema bảng control: `ingest_batches`, `current_snapshot`, `runs`, `quality_metrics` | B | A, C | T21 |
-| ADR-004 | Schema Bronze/Silver theo entity (tên cột, kiểu, cột lineage) | B | A | T25 |
+| ADR-004 | Schema Raw, Bronze, Silver theo entity (tên cột, kiểu, cột lineage) | B | A | Raw và Bronze: T22; Silver: T25 |
 | ADR-005 | Schema Gold và mart: grain, khóa, cột của 3 fact + 4 dim (đặc tả I.9) | C | B | T41 |
 | ADR-006 | Quy tắc đối soát, cutoff, `discrepancy_age_seconds` (đặc tả I.7) | B | A, C | T33 |
 | ADR-007 | Cách đo và định dạng file kết quả benchmark (đặc tả I.14.2–14.3) | C | A, B | T51 |
