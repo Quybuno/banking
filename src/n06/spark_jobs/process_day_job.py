@@ -15,6 +15,7 @@ Chạy trong image Spark bằng `spark-submit` (xem `n06.cli.process_day`).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -31,6 +32,8 @@ from n06.ingestion import layout
 from n06.ingestion.spark_session import build_spark
 from n06.quality import metrics as quality_metrics
 from n06.quality import spark_conflicts, spark_metrics, spark_quarantine
+from n06.reconciliation import ReconciliationSettings
+from n06.reconciliation.reconcile import reconcile
 from n06.spark_jobs import plan, receipts, s3_listing, transforms
 from n06.storage import (
     BatchCommitCoordinator,
@@ -541,14 +544,36 @@ def _build_and_write(
     gold_tx = state.persist(
         transforms.gold_fact_transactions(silver["transactions"], run_id=run_id)
     )
-    # Đối soát chạy trên toàn bộ giao dịch và sao kê của dataset; `--business-date` chỉ lọc đầu ra.
-    recon_all, recon_summary = transforms.reconcile_matched(
-        silver_all["transactions"],
-        silver_all["statements"],
-        as_of_time=state.as_of_time,
-        run_id=run_id,
+    # Đối soát đủ 8 trạng thái (T33, ADR-0006) trên toàn bộ dataset; `--business-date` lọc đầu ra.
+    if key_conflict_dfs:
+        kc_all = key_conflict_dfs[0]
+        for nxt in key_conflict_dfs[1:]:
+            kc_all = kc_all.unionByName(nxt)
+    else:
+        kc_all = spark_conflicts.empty_key_conflicts_df(spark)
+    input_snapshot_id = hashlib.sha256(
+        json.dumps(
+            _input_versions(batches, ordered_receipts, args, with_paths=False),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    recon_all = state.persist(
+        reconcile(
+            silver_all["transactions"],
+            silver_all["statements"],
+            kc_all,
+            as_of_time=state.as_of_time,
+            settings=ReconciliationSettings.from_config(cfg),
+            run_id=run_id,
+            input_snapshot_id=input_snapshot_id,
+        )
     )
     recon = state.persist(date_filter(recon_all))
+    recon_summary = recon_all.agg(
+        F.count(F.lit(1)).alias("total_keys"),
+        F.sum(F.when(F.col("recon_status") == "MATCHED", 1).otherwise(0)).alias("matched_keys"),
+    )
 
     outputs: dict[tuple[str, str], DataFrame] = {
         (plan.LAYER_SILVER, "transactions"): silver["transactions"],

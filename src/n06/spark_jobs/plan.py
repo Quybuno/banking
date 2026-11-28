@@ -30,10 +30,10 @@ OUTPUTS: tuple[tuple[str, str], ...] = tuple(
 )
 
 SCHEMA_VERSION = "silver-gold-1.0.0"
-# Phiên bản quy tắc đối soát: T25 chỉ phân loại MATCHED; T33 đổi sang bộ 8 trạng thái đầy đủ.
-RECON_RULE_VERSION = "recon-1.0.0-matched-only"
+# Phiên bản quy tắc đối soát đủ 8 trạng thái (T33, ADR-0006).
+RECON_RULE_VERSION = "1.0.0"
 # Tăng khi đổi logic biến đổi; vào semantic hash (đặc tả I.8.1 batch bước 5).
-CODE_VERSION = "process-day-3"
+CODE_VERSION = "process-day-4"
 RUN_LEVEL_LAYER = "silver+gold"
 RUN_LEVEL_ENTITY = "process-day"
 
