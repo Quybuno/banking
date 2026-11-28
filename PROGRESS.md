@@ -51,7 +51,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T50 | B | TODO | | | |
 | T51 | C | TODO | | | Cách đo: ADR-0007 (Accepted) |
 | T52 | C + A | TODO | | | |
-| T53 | cả nhóm | TODO | | | |
+| T53 | cả nhóm | IN_REVIEW | | `verify_contract` (14/14), `check_rules`, `ruff`, `pytest tests/unit` PASS | Cập nhật `README.md` (clean clone + sơ đồ Mermaid), `docs/data-dictionary.md`, `docs/demo-scenarios.md` (5 kịch bản demo), `docs/test-report.md`; chưa gồm phần benchmark (T52/T63–T65) |
 | T60 | C | TODO | | | P1, thuộc bản nộp; Airflow 3.4.0, profile `orchestration`, BashOperator gọi `n06` (ADR-0013) |
 | T61 | B | TODO | | | P1, thuộc bản nộp; Late correction, `first_seen_at`, `resolved_at` (ADR-0006) |
 | T62 | C | TODO | | | P1, thuộc bản nộp; Drill-down và runbook |
