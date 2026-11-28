@@ -229,3 +229,25 @@ class BatchCommitCoordinator:
         Lọc theo query vì streaming ghi `dataset_id` NULL (ADR-0004 Q1).
         """
         return self._store.list_committed_ingest_batches(query_name=query_name)
+
+    def list_current_snapshots(
+        self,
+        *,
+        dataset_id: str,
+        layer: str,
+        entity: str | None = None,
+        business_date_from: date | str | None = None,
+        business_date_to: date | str | None = None,
+    ) -> list[SnapshotRecord]:
+        """Reader: liệt kê các snapshot đã commit trong `current_snapshot` theo phạm vi."""
+        return self._store.list_current_snapshots(
+            dataset_id=dataset_id,
+            layer=layer,
+            entity=entity,
+            business_date_from=_normalize_date(business_date_from) if business_date_from else None,
+            business_date_to=_normalize_date(business_date_to) if business_date_to else None,
+        )
+
+    def mark_run_mart_published(self, *, run_id: str) -> None:
+        """Cập nhật trạng thái run đã commit sang `MART_PUBLISHED` sau khi publish mart xong."""
+        self._store.mark_run_mart_published(run_id=run_id)

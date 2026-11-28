@@ -14,30 +14,32 @@ from typing import Any
 from urllib.parse import urlunsplit
 
 from n06.config import AppConfig
+from n06.reconciliation.rules import RECON_RULE_VERSION
 from n06.storage import build_run_output_path, compute_semantic_hash, require_unused_run_prefix
 
 LAYER_SILVER = "silver"
 LAYER_GOLD = "gold"
-SILVER_ENTITIES = ("transactions", "ledger_entries", "statements", "accounts")
+LAYER_QUARANTINE = "quarantine"
+SILVER_ENTITIES = ("transactions", "ledger_entries", "statements", "accounts", "key_conflicts")
 GOLD_ENTITIES = ("fact_transactions", "fact_reconciliation")
-# Thứ tự ghi và commit; quarantine, key_conflicts và dimension là việc của task khác.
+QUARANTINE_ENTITIES = ("records",)
+# Thứ tự ghi và commit; dimension bổ sung và fact_daily_balances là việc của task khác.
 OUTPUTS: tuple[tuple[str, str], ...] = tuple(
     [(LAYER_SILVER, entity) for entity in SILVER_ENTITIES]
     + [(LAYER_GOLD, entity) for entity in GOLD_ENTITIES]
+    + [(LAYER_QUARANTINE, entity) for entity in QUARANTINE_ENTITIES]
 )
 
 SCHEMA_VERSION = "silver-gold-1.0.0"
-# Phiên bản quy tắc đối soát: T25 chỉ phân loại MATCHED; T33 đổi sang bộ 8 trạng thái đầy đủ.
-RECON_RULE_VERSION = "recon-1.0.0-matched-only"
 # Tăng khi đổi logic biến đổi; vào semantic hash (đặc tả I.8.1 batch bước 5).
-CODE_VERSION = "process-day-1"
+CODE_VERSION = "process-day-4"
 RUN_LEVEL_LAYER = "silver+gold"
 RUN_LEVEL_ENTITY = "process-day"
 
 
 def tier_uri(cfg: AppConfig, layer: str) -> str:
     """`s3a://<bucket>/<paths.<layer>_prefix>` (ADR-0002 quy ước chung và mục 3)."""
-    if layer not in (LAYER_SILVER, LAYER_GOLD):
+    if layer not in (LAYER_SILVER, LAYER_GOLD, LAYER_QUARANTINE):
         raise ValueError(f"Tầng không được ghi bởi process-day: {layer!r}")
     prefix = getattr(cfg.paths, f"{layer}_prefix").strip("/")
     return urlunsplit(("s3a", cfg.object_store.bucket, "/" + prefix, "", ""))
@@ -85,10 +87,29 @@ def claim_run_prefixes(
 
 def config_hash(cfg: AppConfig) -> str:
     """Băm phần cấu hình nghiệp vụ ảnh hưởng kết quả; không gồm endpoint, bucket hay executor."""
-    payload = {"business_timezone": cfg.business_timezone}
+    payload = {
+        "business_timezone": cfg.business_timezone,
+        # Bốn tham số quyết định trạng thái đối soát (ADR-0006 Q10).
+        "allowed_lateness_seconds": cfg.dataset.allowed_lateness_seconds,
+        "reconciliation_statuses": list(cfg.reconciliation.statuses),
+        "reconciliation_channels": list(cfg.reconciliation.channels),
+    }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def input_snapshot_id(input_versions: Sequence[Any]) -> str:
+    """Định danh tập input của một lần đối soát (đặc tả I.7.3).
+
+    Chỉ phụ thuộc dữ liệu đầu vào: bỏ `as_of_time` và bộ lọc `business_date` của lần chạy.
+    """
+    run_options = ("as_of_time", "business_dates")
+    items = [
+        i for i in input_versions if not (isinstance(i, dict) and i.get("kind") in run_options)
+    ]
+    text = json.dumps(items, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "in-" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def run_semantic_hash(

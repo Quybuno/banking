@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -190,6 +192,22 @@ def _cleanup_kafka_topic(bootstrap_servers: str, topic: str) -> None:
         pass
 
 
+def _parse_prefixed_json(output: str, prefix: str) -> dict[str, Any] | None:
+    """Tìm dòng cuối cùng bắt đầu bằng `prefix` và parse JSON object."""
+    for line in reversed(output.splitlines()):
+        if not line.startswith(prefix):
+            continue
+        raw = line[len(prefix) :].strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    return None
+
+
 def _run_ingest_stages(
     cfg: AppConfig,
     dataset: DatasetPrepResult,
@@ -296,6 +314,13 @@ def _run_ingest_stages(
             )
 
         scope = "ingest"
+        unique_key_count: int | None = None
+        status_counts: dict[str, int] = {}
+        semantic_hash: str | None = None
+        extra_metrics: list[tuple[str, float | int | str, str, str]] = [
+            ("producer_target_rate", cfg.producer.rate, "events/s", "producer"),
+            ("kafka_partitions", partitions, "count", "kafka"),
+        ]
         if params.get("run_process_day"):
             as_of = str(params.get("as_of_time") or f"{cfg.dataset.to_date}T23:59:59Z")
             if (dataset.source_dir / "statement_deliveries.jsonl").is_file():
@@ -319,6 +344,25 @@ def _run_ingest_stages(
                         error_type="IngestStatementsError",
                         error_message=f"n06 ingest-statements failed with exit code {stmt_code}",
                     )
+            pday_out = io.StringIO()
+            pday_captured: list[str] = []
+
+            def _capture_pday_runner(
+                cmd: Sequence[str], **kwargs: Any
+            ) -> subprocess.CompletedProcess[str]:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=kwargs.get("cwd"),
+                    env=kwargs.get("env"),
+                    check=bool(kwargs.get("check", False)),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                if proc.stdout:
+                    pday_captured.append(proc.stdout)
+                return proc
+
             t_pday0 = time.monotonic()
             pday_code = run_process_day(
                 dataset_id=dataset.dataset_id,
@@ -328,11 +372,25 @@ def _run_ingest_stages(
                 as_of_time=as_of,
                 run_id=run_id,
                 env={**env, "N06__KAFKA__QUERY_NAME": query_name},
+                runner=_capture_pday_runner,
+                out=pday_out,
             )
             pday_sec = round(time.monotonic() - t_pday0, 4)
             phases["process_day"] = pday_sec
             scope = "ingest + process-day"
+            pday_stdout = pday_out.getvalue() + "\n" + "\n".join(pday_captured)
             if pday_code != int(ExitCode.OK):
+                err_payload = _parse_prefixed_json(pday_stdout, "N06_PROCESS_DAY_ERROR=")
+                err_type = (
+                    str(err_payload.get("code") or "ProcessDayError")
+                    if err_payload
+                    else "ProcessDayError"
+                )
+                err_msg = (
+                    str(err_payload.get("message") or f"n06 process-day failed ({pday_code})")
+                    if err_payload
+                    else f"n06 process-day failed with exit code {pday_code}"
+                )
                 return WorkloadResult(
                     exit_code=pday_code,
                     status="error",
@@ -341,8 +399,64 @@ def _run_ingest_stages(
                     throughput_entity="transaction",
                     throughput_scope=scope,
                     correctness_ok=False,
-                    error_type="ProcessDayError",
-                    error_message=f"n06 process-day failed with exit code {pday_code}",
+                    error_type=err_type,
+                    error_message=err_msg,
+                )
+
+            res_payload = _parse_prefixed_json(pday_stdout, "N06_PROCESS_DAY_RESULT=")
+            if res_payload is None:
+                return WorkloadResult(
+                    exit_code=pday_code,
+                    status="invalid",
+                    phase_seconds=phases,
+                    records_processed=0,
+                    throughput_entity="transaction",
+                    throughput_scope=scope,
+                    correctness_ok=False,
+                    error_type="InvalidProcessDayOutput",
+                    error_message="process-day không trả về N06_PROCESS_DAY_RESULT hợp lệ.",
+                )
+            recon = res_payload.get("reconciliation")
+            if isinstance(recon, Mapping):
+                raw_counts = recon.get("status_counts")
+                if isinstance(raw_counts, Mapping):
+                    status_counts = {str(k): int(v) for k, v in raw_counts.items()}
+                if recon.get("total_keys") is not None:
+                    unique_key_count = int(recon["total_keys"])
+            if res_payload.get("semantic_hash"):
+                semantic_hash = str(res_payload["semantic_hash"])
+            committed_snapshots = int(res_payload.get("committed_snapshots") or 0)
+            quality = res_payload.get("quality")
+            if isinstance(quality, Mapping):
+                for qkey in ("rejected_records", "control_mismatches", "unexplained_mismatches"):
+                    if quality.get(qkey) is not None:
+                        extra_metrics.append(
+                            (f"quality_{qkey}", int(quality[qkey]), "count", "quality")
+                        )
+            if (
+                committed_snapshots <= 0
+                or not status_counts
+                or (
+                    dataset.transaction_count > 0
+                    and (unique_key_count is None or unique_key_count <= 0)
+                )
+            ):
+                return WorkloadResult(
+                    exit_code=pday_code,
+                    status="invalid",
+                    phase_seconds=phases,
+                    records_processed=dataset.transaction_count,
+                    throughput_entity="transaction",
+                    throughput_scope=scope,
+                    correctness_ok=False,
+                    unique_key_count=unique_key_count,
+                    status_counts=status_counts,
+                    semantic_hash=semantic_hash,
+                    error_type="InvalidProcessDayResult",
+                    error_message=(
+                        "process-day trả kết quả rỗng hoặc thiếu status_counts/committed_snapshots."
+                    ),
+                    extra_metrics=extra_metrics,
                 )
 
         return WorkloadResult(
@@ -353,10 +467,10 @@ def _run_ingest_stages(
             throughput_entity="transaction",
             throughput_scope=scope,
             correctness_ok=True,
-            extra_metrics=[
-                ("producer_target_rate", cfg.producer.rate, "events/s", "producer"),
-                ("kafka_partitions", partitions, "count", "kafka"),
-            ],
+            unique_key_count=unique_key_count,
+            status_counts=status_counts,
+            semantic_hash=semantic_hash,
+            extra_metrics=extra_metrics,
         )
     finally:
         _cleanup_kafka_topic(host_bootstrap, topic)
@@ -371,9 +485,7 @@ def default_workload_registry() -> WorkloadRegistry:
             variable_name="transaction_count",
             variable2_name=None,
             ram_scope="host",
-            description=(
-                "Quy mô giao dịch (hiện chạy ingest thật; process-day nối khi T25 vào main)"
-            ),
+            description="Quy mô giao dịch (ingest + ingest-statements + process-day)",
             runner=_run_ingest_stages,
         )
     )

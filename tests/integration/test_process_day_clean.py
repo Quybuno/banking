@@ -8,6 +8,7 @@ dẫn dựng lại bằng chuỗi. Đọc Parquet bằng Spark trong container (
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import io
 import json
@@ -18,7 +19,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from n06.cli.statements import run_ingest_statements
 from n06.config import AppConfig, load_config
 from n06.generator import build_dataset
 from n06.ingestion.launcher import job_command
+from n06.reconciliation import ReconStatus
 from n06.storage import PsqlCliControlStore, make_compose_psql_runner
 from n06.storage.object_store import (
     EMPTY_PAYLOAD_SHA256,
@@ -92,6 +94,15 @@ try:
                                     F.size("issue_codes").alias("issues")).collect()
                 result[name] = [[r["channel"], r["external_reference"], r["recon_status"],
                                  r["d"], r["issues"]] for r in rows]
+            elif spec["kind"] == "reconciliation_full":
+                iso = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+                result[name] = [r.asDict() for r in frame.select(
+                    "dataset_id", "channel", "external_reference", "recon_status",
+                    "discrepancy_age_seconds",
+                    F.date_format("anchor_event_time", iso).alias("anchor_event_time"),
+                    "internal_amount_minor", "internal_currency", "internal_status",
+                    "statement_amount_minor", "statement_currency",
+                    "statement_status").collect()]
             else:
                 result[name] = {"columns": frame.columns, "rows": frame.count()}
     print("N06_IT_RESULT=" + json.dumps(result))
@@ -217,6 +228,15 @@ def _lines(source: Path, subdir: str) -> list[dict[str, Any]]:
 
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
+    yield from build_stack(tmp_path_factory, "generator.demo-clean.json", {})
+
+
+def build_stack(
+    tmp_path_factory: pytest.TempPathFactory,
+    generator_file: str,
+    overrides: dict[str, Any],
+) -> Iterator[Stack]:
+    """Sinh dataset từ cấu hình hợp đồng `generator_file`, dựng tài nguyên riêng, dọn khi xong."""
     docker = shutil.which("docker")
     assert docker is not None, "Test tích hợp cần docker; không bỏ qua."
     dotenv = parse_dotenv_file(REPO_ROOT / ".env")
@@ -233,7 +253,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
         **host_env,
         "N06__KAFKA__EVENTS_TOPIC": topic,
         "N06__KAFKA__QUERY_NAME": query,
-        "N06__KAFKA__MAX_OFFSETS_PER_TRIGGER": "100",
+        "N06__KAFKA__MAX_OFFSETS_PER_TRIGGER": overrides.pop("max_offsets", "100"),
         "N06__OBJECT_STORE__BUCKET": bucket,
         "N06__PATHS__STATEMENTS_PREFIX": demo_prefixes.statements_prefix,
         "N06__SPARK__SHUFFLE_PARTITIONS": "4",
@@ -246,7 +266,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
     store = PsqlCliControlStore(cfg.postgres.control, psql_runner=runner)
 
     # Quy mô, số tài khoản và khoảng ngày lấy từ profile `test` (không hardcode trong test).
-    generator = json.loads((CONTRACT_DIR / "config/generator.demo-clean.json").read_text("utf-8"))
+    generator = json.loads((CONTRACT_DIR / "config" / generator_file).read_text("utf-8"))
     generator.update(
         dataset_id=dataset_id,
         transaction_count=test_cfg.dataset.transaction_count,
@@ -254,6 +274,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
         from_date=test_cfg.dataset.from_date,
         to_date=test_cfg.dataset.to_date,
     )
+    generator.update(overrides)
     out_dir = tmp_path_factory.mktemp("pd") / "data"
     build_dataset(generator, out_dir, validate_outputs=False)
     source = out_dir / "source"
@@ -290,6 +311,10 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
 @pytest.fixture(scope="module")
 def ingested(stack: Stack, tmp_path_factory: pytest.TempPathFactory) -> Stack:
     """publish -> stream --available-now -> wait-ingestion -> ingest-statements."""
+    return ingest(stack)
+
+
+def ingest(stack: Stack) -> Stack:
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("N06__KAFKA__NUM_PARTITIONS", "3")
         out = io.StringIO()
@@ -430,8 +455,12 @@ def test_every_expected_key_is_matched_and_totals_equal_control_report(
     assert all(issues == 0 for *_, issues in recon)
     assert first_run["reconciliation"] == {
         "total_keys": len(expected_keys),
-        "matched_keys": len(expected_keys),
-        "unclassified_keys": 0,
+        "status_counts": {
+            status: (len(expected_keys) if status == "MATCHED" else 0)
+            for status in (s.value for s in ReconStatus)
+        },
+        "business_date_disagreements": 0,
+        "age_clamped": 0,
     }
     # Gold fact_transactions: cùng tổng với control_report, đúng cột theo ADR-0005 mục 2.1/2.3.
     assert {(d, c, s): (n, total) for d, c, s, n, total, k in answer["fact"]} == expected_tx
@@ -444,7 +473,7 @@ def test_every_expected_key_is_matched_and_totals_equal_control_report(
         "dataset_id", "channel", "external_reference", "business_date", "date_key",
         "recon_status", "issue_codes",
     ]  # fmt: skip
-    assert len(answer["recon_cols"]["columns"]) == 25
+    assert len(answer["recon_cols"]["columns"]) == 26  # ADR-0005 mục 2.3 + input_snapshot_id
 
     # Silver sao kê và tài khoản so với byte nguồn (số dòng khác nhau, loại trùng theo ID).
     source_statements = [
@@ -554,11 +583,101 @@ def test_business_date_filter_writes_only_the_selected_day_but_reconciles_everyt
     result = _result(proc, "N06_PROCESS_DAY_RESULT=")
     assert result["business_dates"] == [dates[0]]
     # Đối soát chạy trên toàn dataset (không bị khóa "chưa phân loại" giả do lọc ngày).
-    assert result["reconciliation"]["unclassified_keys"] == 0
-    assert result["reconciliation"]["total_keys"] == first_run["reconciliation"]["total_keys"]
+    assert result["reconciliation"] == first_run["reconciliation"]
     after = {k: v.run_id for k, v in _snapshots(stack, dates).items()}
     for key, run in after.items():
         if key[2] == dates[0]:
             assert run == result["run_id"]
         else:
             assert run == before[key]  # ngày không chọn giữ nguyên run cũ
+
+
+# --- cổng chất lượng và control totals (T32) -------------------------------------------------
+def test_quality_metrics_match_every_control_report_row(
+    ingested: Stack, first_run: dict[str, Any]
+) -> None:
+    report = json.loads((ingested.source / "control_report.json").read_text("utf-8"))
+    metrics = ingested.store.list_quality_metrics(run_id=first_run["run_id"])
+    found = {(m.layer, m.entity, m.business_date.isoformat(), m.metric_name): m for m in metrics}
+
+    for row in report["totals"]:
+        suffix = f"{row['currency']}.{row['status_or_side']}"
+        key = (row["entity"], row["business_date"])
+        assert found[("silver", *key, f"record_count.{suffix}")].metric_value == row["record_count"]
+        assert (
+            found[("silver", *key, f"distinct_keys.{suffix}")].metric_value == (row["record_count"])
+        )
+        assert (
+            found[("silver", *key, f"amount_minor_total.{suffix}")].metric_value
+            == (row["amount_minor_total"])
+        )
+        for name in ("control_count_diff", "control_amount_diff"):
+            diff = found[("control", *key, f"{name}.{suffix}")]
+            assert (diff.metric_value, diff.status) == (0, "PASS")
+    assert first_run["quality"]["control_groups_checked"] == len(report["totals"])
+    assert first_run["quality"]["control_mismatches"] == 0
+
+    # Đếm vật lý độc lập từ file nguồn; bản sạch: không bản ghi nào bị loại.
+    envelopes = _lines(ingested.source, "events")
+    transactions = [e for e in envelopes if "entry_id" not in e["payload"]]
+    physical = sum(
+        m.metric_value
+        for m in metrics
+        if (m.layer, m.entity, m.metric_name) == ("bronze", "transaction", "physical_records")
+    )
+    assert physical == len(transactions)
+    blocked = [m for m in metrics if m.metric_name == "publish_blocked"]
+    assert [(m.metric_value, m.status) for m in blocked] == [(0, "PASS")]
+    assert first_run["quality"]["rejected_records"] == 0
+
+
+def test_unexplained_control_report_mismatch_blocks_publish(
+    ingested: Stack, first_run: dict[str, Any], tmp_path: Path
+) -> None:
+    """Nguồn khai nhiều hơn dữ liệu 1 đơn vị tiền: run bị chặn, current_snapshot giữ nguyên."""
+    source = tmp_path / "source"
+    shutil.copytree(ingested.source, source)
+    report_path = source / "control_report.json"
+    report = json.loads(report_path.read_text("utf-8"))
+    old_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    report["totals"][0]["amount_minor_total"] += 1
+    report_path.write_bytes((json.dumps(report, separators=(",", ":")) + "\n").encode("utf-8"))
+    new_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    for manifest in (source / "manifests").glob("*.json"):
+        text = manifest.read_text("utf-8")
+        if old_sha in text:
+            manifest.write_text(text.replace(old_sha, new_sha), encoding="utf-8")
+
+    # Prefix sao kê riêng: object của lần nạp sạch là bất biến, không ghi đè.
+    prefix = f"{ingested.cfg.paths.statements_prefix}-bad-{uuid.uuid4().hex[:8]}"
+    env = {**ingested.env, "N06__PATHS__STATEMENTS_PREFIX": prefix}
+    bad = replace(ingested, env=env, cfg=load_config(profile="demo", env=env))
+    out = io.StringIO()
+    code = run_ingest_statements(
+        source_dir=source,
+        as_of_time=AS_OF_LATE,
+        dataset_id=ingested.dataset_id,
+        profile="test",
+        env_file=REPO_ROOT / ".env",
+        env=env,
+        as_json=True,
+        out=out,
+    )
+    assert code == 0, out.getvalue()
+    days = first_run["business_dates"]
+    before = _snapshots(ingested, days)
+    run_id = f"run-it-blocked-{uuid.uuid4().hex[:8]}"
+    try:
+        proc = bad.process_day("--run-id", run_id)
+        assert proc.returncode != 0, proc.stdout[-3000:]
+        assert _result(proc, "N06_PROCESS_DAY_ERROR=")["code"] == "QUALITY_GATE_BLOCKED"
+        assert _snapshots(ingested, days) == before
+        run = ingested.store.get_run(run_id)
+        assert run is not None and run.status == "FAILED"
+        metrics = ingested.store.list_quality_metrics(run_id=run_id)
+        failed = {m.metric_name.split(".")[0] for m in metrics if m.status == "FAIL"}
+        assert {"control_amount_diff", "control_total_mismatches", "publish_blocked"} <= failed
+    finally:
+        ingested.spark(
+            {"action": "delete", "uris": [f"s3a://{ingested.bucket}/{prefix}/"]}, tmp_path
+        )

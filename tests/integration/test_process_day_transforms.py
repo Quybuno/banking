@@ -148,65 +148,10 @@ flat2, invalid2, _ = silver_statements([
 s1_rows = flat2.where(F.col("statement_record_id") == "s1").collect()
 OUT["stmt_conflict_variants"] = [r["variants"] for r in s1_rows]
 OUT["stmt_invalid_rows"] = invalid2.count()
+OUT["stmt_ids_with_invalid_input"] = sorted(r["statement_record_id"] for r in flat2.collect())
 
 empty = spark.createDataFrame([("s3a://b/e", bytearray(b""))], "path string, content binary")
 OUT["empty_file_rows"] = [r["rows"] for r in transforms.file_stats(empty).collect()]
-
-# --- đối soát MATCHED -----------------------------------------------------------------------
-def internal(tx, ref, amount=100, status="SUCCESS", currency="VND", date="2026-01-01"):
-    return {
-        "dataset_id": DS, "transaction_id": tx, "external_reference": ref,
-        "channel": "SIM_CHANNEL_A", "currency": currency, "status": status,
-        "amount_minor": amount, "business_date": datetime.strptime(date, "%Y-%m-%d").date(),
-        "source_pointers": ["t:0:" + tx],
-    }
-
-
-tx_df = spark.createDataFrame([
-    internal("a", "REF-A"), internal("b", "REF-B", 200), internal("c", "REF-C"),
-    internal("d", "REF-D"), internal("e", "REF-E"), internal("f", "REF-F", status="FAILED"),
-    internal("g1", "REF-G"), internal("g2", "REF-G"),
-])
-st_rows = []
-for sid, ref, amount, delivery, available, status in [
-    ("x1", "REF-A", 100, 0, "2026-01-01T18:00:00Z", "SUCCESS"),
-    ("x2", "REF-B", 201, 0, "2026-01-01T18:00:00Z", "SUCCESS"),
-    ("x3", "REF-C", 100, 1, "2026-01-03T00:00:00Z", "SUCCESS"),   # chưa nhìn thấy ở mốc sớm
-    ("x4", "REF-D", 100, 0, "2026-01-01T18:00:00Z", "SUCCESS"),
-    ("x5", "REF-D", 100, 0, "2026-01-01T18:00:00Z", "SUCCESS"),   # hai sao kê độc lập cùng khóa
-    ("x6", "REF-F", 100, 0, "2026-01-01T18:00:00Z", "FAILED"),
-    ("x7", "REF-G", 100, 0, "2026-01-01T18:00:00Z", "SUCCESS"),   # hai giao dịch cùng khóa
-    ("x8", "REF-Z", 100, 0, "2026-01-01T18:00:00Z", "SUCCESS"),   # chỉ có sao kê
-]:
-    st_rows.append({
-        "dataset_id": DS, "statement_record_id": sid, "external_reference": ref,
-        "channel": "SIM_CHANNEL_A", "currency": "VND", "status": status, "amount_minor": amount,
-        "file_available_at": ts(available), "source_file": "f" + str(delivery),
-        "source_sha256": "0" * 64, "source_line": 1,
-    })
-st_all = spark.createDataFrame(st_rows)
-
-
-def reconcile(as_of):
-    gold, summary = transforms.reconcile_matched(
-        tx_df, st_all, as_of_time=ts(as_of), run_id="run-x")
-    s = summary.collect()[0]
-    return gold, [s["total_keys"], s["matched_keys"]]
-
-
-gold_early, summary_early = reconcile("2026-01-02T00:00:00Z")
-gold_late, summary_late = reconcile("2026-01-03T00:00:00Z")   # đúng mốc: có mặt
-OUT["recon_early"] = [summary_early, sorted(r["external_reference"] for r in gold_early.collect())]
-OUT["recon_late"] = [summary_late, sorted(r["external_reference"] for r in gold_late.collect())]
-row = gold_early.where(F.col("external_reference") == "REF-A").collect()[0].asDict()
-OUT["recon_row"] = {k: (str(v) if v is not None else None) for k, v in row.items()
-                    if k in ("recon_status", "issue_codes", "internal_amount_minor",
-                             "statement_amount_minor", "anchor_event_time",
-                             "discrepancy_age_seconds", "first_seen_at", "resolved_at",
-                             "internal_record_count", "statement_record_count", "date_key",
-                             "as_of_time", "last_evaluated_at")}
-OUT["recon_columns"] = gold_early.columns
-OUT["failed_matched_as_success"] = "REF-F" in OUT["recon_early"][1]
 
 # --- hash nội dung --------------------------------------------------------------------------
 base = silver.withColumn("run_id", F.lit("run-A"))
@@ -294,46 +239,9 @@ def test_statement_dedup_receipt_columns_and_invalid_rows(result: dict[str, Any]
     assert result["file_rows"] == [3, 3]
     assert result["stmt_conflict_variants"] == [2]  # s1 hai nội dung khác nhau
     assert result["stmt_invalid_rows"] == 3  # JSON hỏng, channel ngoài enum, amount = 0
+    # Dòng sai (s6 kênh lạ, s7 amount = 0) chỉ đi quarantine, không vào Silver/đối soát.
+    assert result["stmt_ids_with_invalid_input"] == ["s1"]
     assert result["empty_file_rows"] == [0]  # file rỗng có 0 dòng chứ không "không có"
-
-
-def test_matched_only_reconciliation_visibility_and_unclassified_keys(
-    result: dict[str, Any],
-) -> None:
-    # Khóa: A, B, C, D, E, F, G, Z. Mốc sớm: C chưa có sao kê nhìn thấy.
-    early_summary, early_keys = result["recon_early"]
-    assert early_summary == [8, 2]
-    assert early_keys == ["REF-A", "REF-F"]  # FAILED/FAILED được đối soát như SUCCESS
-    # Tại đúng mốc `file_available_at` thì sao kê đã có mặt (inclusive).
-    late_summary, late_keys = result["recon_late"]
-    assert late_summary == [8, 3]
-    assert late_keys == ["REF-A", "REF-C", "REF-F"]
-    assert result["failed_matched_as_success"] is True
-    row = result["recon_row"]
-    assert row == {
-        "recon_status": "MATCHED",
-        "issue_codes": "[]",
-        "internal_amount_minor": "100",
-        "statement_amount_minor": "100",
-        "internal_record_count": "1",
-        "statement_record_count": "1",
-        "anchor_event_time": None,
-        "discrepancy_age_seconds": None,
-        "first_seen_at": None,
-        "resolved_at": None,
-        "date_key": "20260101",
-        "as_of_time": "2026-01-02 00:00:00",
-        "last_evaluated_at": "2026-01-02 00:00:00",
-    }
-    assert result["recon_columns"] == [
-        "dataset_id", "channel", "external_reference", "business_date", "date_key",
-        "recon_status", "issue_codes", "transaction_id", "internal_amount_minor",
-        "internal_currency", "internal_status", "statement_amount_minor",
-        "statement_currency", "statement_status", "internal_record_count",
-        "statement_record_count", "anchor_event_time", "discrepancy_age_seconds", "as_of_time",
-        "last_evaluated_at", "first_seen_at", "resolved_at", "recon_rule_version",
-        "source_pointers", "run_id",
-    ]  # fmt: skip
 
 
 def test_content_digest_ignores_row_order_and_run_id_but_not_content(

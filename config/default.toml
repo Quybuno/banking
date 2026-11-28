@@ -129,3 +129,22 @@ smoke_level = 1000
 latency_min_samples_p50_p95 = 100
 latency_min_samples_p99 = 1000
 noise_min_free_ram_overhead_mb = 2048
+
+[quality]
+# Cổng chất lượng trước khi publish `current_snapshot` (đặc tả I.6, ADR-0014). Mặc định chặt:
+# bất kỳ bản ghi bị loại hoặc xung đột khóa nào cũng chặn publish.
+# Tỷ lệ bản ghi vật lý bị loại tối đa, tính theo bps (100 bps = 1 %).
+max_quarantine_rate_bps = 0
+# Số dòng `silver.key_conflicts` tối đa.
+max_conflict_count = 0
+# Chênh lệch với control report không giải thích được bằng bản ghi bị loại thì chặn publish.
+fail_on_unexplained_control_mismatch = true
+# Thiếu control_report.json trên object store thì process-day dừng.
+require_control_report = true
+
+[reconciliation]
+# Tập status và channel đưa vào đối soát (docs/spec.md Phần I mục 7.2; ADR-0006 Q10). Chuỗi phân
+# tách bằng dấu phẩy; đặt lại qua N06__RECONCILIATION__STATUSES và N06__RECONCILIATION__CHANNELS.
+# Giao dịch FAILED không có ledger nhưng có bản ghi xác nhận từ kênh nên mặc định vẫn đối soát.
+statuses = "SUCCESS,FAILED"
+channels = "SIM_CHANNEL_A,SIM_CHANNEL_B"

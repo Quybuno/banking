@@ -133,3 +133,79 @@ def test_makeup_runs_triggered_when_measured_run_fails(
     # 2 lần chính (1 lỗi, 1 ok) + 1 lần chạy bù (ok) = 3 lần chạy, 2 lần đếm được
     assert summary.total_runs == 3
     assert summary.counted_runs == 2
+
+
+def test_ingest_stages_parses_process_day_result_and_blocks_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from n06.config import load_config
+    from n06.observability.workloads import DatasetPrepResult, _run_ingest_stages
+
+    test_env = {
+        "N06_OBJECT_STORE_ACCESS_KEY": "ak",
+        "N06_OBJECT_STORE_SECRET_KEY": "sk",
+        "N06_POSTGRES_MART_PASSWORD": "pw",
+        "N06_POSTGRES_CONTROL_PASSWORD": "pw",
+        "N06_POSTGRES_AIRFLOW_PASSWORD": "pw",
+        "N06_POSTGRES_METABASE_PASSWORD": "pw",
+    }
+    cfg = load_config(profile="test", env=test_env)
+    ds_dir = tmp_path / "ds"
+    src_dir = ds_dir / "source"
+    src_dir.mkdir(parents=True)
+    ds = DatasetPrepResult(0, "ds-100-42", ds_dir, src_dir, 0.1, 10.0, "", "", 100, 42)
+
+    monkeypatch.setattr("n06.observability.workloads.run_publish", lambda **kw: 0)
+    monkeypatch.setattr("n06.observability.workloads.run_stream", lambda **kw: 0)
+    monkeypatch.setattr("n06.observability.workloads.run_wait_ingestion", lambda **kw: 0)
+    monkeypatch.setattr("n06.observability.workloads._cleanup_kafka_topic", lambda *a: None)
+
+    # Case 1: process-day thành công, có status_counts + semantic_hash
+    def fake_pday_ok(**kw):  # type: ignore[no-untyped-def]
+        kw["out"].write(
+            "N06_PROCESS_DAY_RESULT="
+            + json.dumps(
+                {
+                    "committed_snapshots": 4,
+                    "semantic_hash": "abc123",
+                    "reconciliation": {
+                        "total_keys": 100,
+                        "status_counts": {"MATCHED": 98, "UNMATCHED_INTERNAL": 2},
+                    },
+                    "quality": {
+                        "rejected_records": 0,
+                        "control_mismatches": 0,
+                        "unexplained_mismatches": 0,
+                    },
+                }
+            )
+            + "\n"
+        )
+        return 0
+
+    monkeypatch.setattr("n06.observability.workloads.run_process_day", fake_pday_ok)
+    res_ok = _run_ingest_stages(cfg, ds, "run-1", 100, {"run_process_day": True, "env": test_env})
+    assert res_ok.status == "ok"
+    assert res_ok.correctness_ok is True
+    assert res_ok.unique_key_count == 100
+    assert res_ok.status_counts == {"MATCHED": 98, "UNMATCHED_INTERNAL": 2}
+    assert res_ok.semantic_hash == "abc123"
+
+    # Case 2: process-day bị cổng chất lượng chặn -> error_type="QUALITY_GATE_BLOCKED"
+    def fake_pday_blocked(**kw):  # type: ignore[no-untyped-def]
+        kw["out"].write(
+            'N06_PROCESS_DAY_ERROR={"code": "QUALITY_GATE_BLOCKED", "message": "conflict > 0"}\n'
+        )
+        return 14
+
+    monkeypatch.setattr("n06.observability.workloads.run_process_day", fake_pday_blocked)
+    res_blk = _run_ingest_stages(cfg, ds, "run-2", 100, {"run_process_day": True, "env": test_env})
+    assert res_blk.status == "error"
+    assert res_blk.correctness_ok is False
+    assert res_blk.error_type == "QUALITY_GATE_BLOCKED"
+
+    # Case 3: process-day thoát 0 nhưng không có N06_PROCESS_DAY_RESULT -> status="invalid"
+    monkeypatch.setattr("n06.observability.workloads.run_process_day", lambda **kw: 0)
+    res_inv = _run_ingest_stages(cfg, ds, "run-3", 100, {"run_process_day": True, "env": test_env})
+    assert res_inv.status == "invalid"
+    assert res_inv.correctness_ok is False

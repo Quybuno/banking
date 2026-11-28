@@ -1,4 +1,4 @@
-"""Job `n06 process-day` (T25): Bronze -> Silver -> đối soát MATCHED -> Gold, commit theo `run_id`.
+"""Job `n06 process-day`: Bronze -> Silver -> đối soát 8 trạng thái -> Gold, commit theo `run_id`.
 
 Giao thức (đặc tả I.8.1 batch, ADR-0002 mục 3 và 6):
 1. đọc input theo danh sách `ingest_batches` và biên nhận `_ingest/`, không glob toàn bucket;
@@ -27,8 +27,14 @@ from pyspark.sql import functions as F
 
 from n06.config import QUERY_NAME_PATTERN, AppConfig, ConfigValidationError, load_config
 from n06.control import connect_control_db, migrate_up
+from n06.domain import validate_control_report_data
 from n06.ingestion import layout
 from n06.ingestion.spark_session import build_spark
+from n06.quality import metrics as quality_metrics
+from n06.quality import spark_conflicts, spark_metrics, spark_quarantine
+from n06.reconciliation import ReconciliationSettings, ReconStatus
+from n06.reconciliation import reconcile as reconciliation
+from n06.reconciliation.rules import KEY_CONFLICT_COLUMNS
 from n06.spark_jobs import plan, receipts, s3_listing, transforms
 from n06.storage import (
     BatchCommitCoordinator,
@@ -121,15 +127,24 @@ def _require_zero(df: DataFrame, code: str, message: str) -> None:
         raise DataError(code, f"{message} ({count} bản ghi).")
 
 
-def _bronze_frame(
+def _bronze_frame_with_raw(
     spark: SparkSession, batches: Sequence[IngestBatchRecord], entity: str
 ) -> DataFrame | None:
-    uris = [
-        layout.bronze_entity_uri(b.bronze_path, entity)
-        for b in batches
-        if s3_listing.exists(spark, layout.bronze_entity_uri(b.bronze_path, entity))
-    ]
-    return spark.read.parquet(*uris) if uris else None
+    frames: list[DataFrame] = []
+    for batch in batches:
+        uri = layout.bronze_entity_uri(batch.bronze_path, entity)
+        if s3_listing.exists(spark, uri):
+            frames.append(
+                spark.read.parquet(uri)
+                .withColumn("_raw_path", F.lit(batch.raw_path))
+                .withColumn("_ingestion_date", F.lit(batch.ingestion_date).cast("date"))
+            )
+    if not frames:
+        return None
+    result = frames[0]
+    for nxt in frames[1:]:
+        result = result.unionByName(nxt, allowMissingColumns=True)
+    return result
 
 
 def _load_receipts(
@@ -187,6 +202,29 @@ def _statement_integrity(
             )
 
 
+def _load_control_report(
+    spark: SparkSession, cfg: AppConfig, dataset_id: str
+) -> dict[str, object] | None:
+    """Đọc `control_report.json` của nguồn (đặc tả II.4, ADR-0014); không phải ground truth."""
+    uri = receipts.control_report_uri(cfg, dataset_id)
+    if not s3_listing.exists(spark, uri):
+        if cfg.quality.require_control_report:
+            raise DataError(
+                "CONTROL_REPORT_MISSING", f"Chưa có {uri}; chạy `n06 ingest-statements`."
+            )
+        return None
+    row = transforms.read_binary_files(spark, [uri]).select("content").collect()[0]
+    result = validate_control_report_data(bytes(row["content"]))
+    if not result.is_valid or result.record is None:
+        raise DataError("CONTROL_REPORT_INVALID", f"{uri} không đúng hợp đồng: {result.issues}")
+    if result.record["dataset_id"] != dataset_id:
+        raise DataError(
+            "CONTROL_REPORT_DATASET_MISMATCH",
+            f"{uri} có dataset_id={result.record['dataset_id']} khác {dataset_id}.",
+        )
+    return dict(result.record)
+
+
 def run_job(
     cfg: AppConfig,
     store: ControlStore,
@@ -212,6 +250,7 @@ def run_job(
         raise DataError(
             "ACCOUNTS_MISSING", f"Chưa có {accounts_uri}; chạy `n06 ingest-statements`."
         )
+    control_report = _load_control_report(spark, cfg, dataset_id)
 
     input_versions = _input_versions(batches, ordered_receipts, args, with_paths=True)
 
@@ -249,6 +288,7 @@ def run_job(
             ordered_receipts,
             uris,
             accounts_uri,
+            control_report,
             filter_dates,
             visible,
             args,
@@ -275,6 +315,7 @@ def _build_and_write(
     ordered_receipts: Sequence[receipts.Receipt],
     uris: dict[str, str],
     accounts_uri: str,
+    control_report: dict[str, object] | None,
     filter_dates: set[date],
     visible: Sequence[receipts.Receipt],
     args: argparse.Namespace,
@@ -285,24 +326,98 @@ def _build_and_write(
     def date_filter(df: DataFrame) -> DataFrame:
         return df.where(F.col("business_date").isin(*filter_dates)) if filter_dates else df
 
+    # --- Silver tài khoản (đọc trước để kiểm UNKNOWN_ACCOUNT và ACCOUNT_CURRENCY_MISMATCH) ---
+    quarantine_parts: list[tuple[date, DataFrame, int]] = []
+    quarantine_dfs: list[DataFrame] = []
+    key_conflict_dfs: list[DataFrame] = []
+    fallback_date = min(b.ingestion_date for b in batches)
+
+    account_files = transforms.read_binary_files(spark, [accounts_uri])
+    accounts, bad_accounts, conflicting = transforms.silver_accounts(
+        spark, account_files, dataset_id=dataset_id, source_file="accounts.jsonl", run_id=run_id
+    )
+    conflicting = state.persist(conflicting)
+    if conflicting.count() > 0:
+        quarantine_dfs.append(
+            conflicting.select(
+                F.col("dataset_id").cast("string").alias("dataset_id"),
+                F.lit(None).cast("date").alias("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.lit("SILVER_DEDUP").alias("stage"),
+                F.lit("account").alias("entity"),
+                F.col("account_id").cast("string").alias("business_key"),
+                F.lit("BUSINESS_KEY_CONFLICT").alias("error_code"),
+                F.array(F.lit("BUSINESS_KEY_CONFLICT")).alias("issue_codes"),
+                F.lit("Xung đột khóa tài khoản: cùng account_id khác nội dung").alias(
+                    "error_detail"
+                ),
+                F.lit("accounts.jsonl").alias("source_pointer"),
+                F.lit(accounts_uri).alias("raw_reference"),
+            )
+        )
+        accounts = accounts.join(
+            conflicting.select("dataset_id", "account_id"),
+            ["dataset_id", "account_id"],
+            "left_anti",
+        )
+    bad_accounts = state.persist(bad_accounts)
+    if bad_accounts.count() > 0:
+        quarantine_dfs.append(
+            bad_accounts.select(
+                F.coalesce(F.col("dataset_id"), F.lit(dataset_id)).alias("dataset_id"),
+                F.lit(None).cast("date").alias("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.when(F.col("unparsable"), F.lit("BRONZE_PARSE"))
+                .otherwise(F.lit("SILVER_BUSINESS"))
+                .alias("stage"),
+                F.lit("account").alias("entity"),
+                F.col("account_id").cast("string").alias("business_key"),
+                F.when(F.col("unparsable"), F.lit("INVALID_JSON"))
+                .otherwise(F.lit("SCHEMA_VALUE"))
+                .alias("error_code"),
+                F.array(
+                    F.when(F.col("unparsable"), F.lit("INVALID_JSON")).otherwise(
+                        F.lit("SCHEMA_VALUE")
+                    )
+                ).alias("issue_codes"),
+                F.lit("Dòng tài khoản không hợp lệ trong accounts.jsonl").alias("error_detail"),
+                F.concat_ws(
+                    ":", F.lit("accounts.jsonl"), F.col("source_line").cast("string")
+                ).alias("source_pointer"),
+                F.lit(accounts_uri).alias("raw_reference"),
+            )
+        )
+    accounts = state.persist(accounts)
+
+    # --- Quarantine từ Bronze parse_error (ADR-0004b Q1: phân vùng theo ingestion_date) ------
+    for batch in batches:
+        pe_uri = layout.bronze_entity_uri(batch.bronze_path, "parse_error")
+        if s3_listing.exists(spark, pe_uri):
+            pe_q = state.persist(
+                spark_quarantine.bronze_parse_errors_to_quarantine(
+                    spark.read.parquet(pe_uri),
+                    dataset_id=dataset_id,
+                    run_id=run_id,
+                    raw_path=batch.raw_path,
+                )
+            )
+            pe_count = pe_q.count()
+            if pe_count > 0:
+                quarantine_parts.append((batch.ingestion_date, pe_q, pe_count))
+
     # --- Silver giao dịch và bút toán -------------------------------------------------------
     counts: dict[str, int] = {}
+    bronze_scoped: dict[str, DataFrame] = {}  # Bronze của dataset, trước mọi bước lọc
     silver_all: dict[str, DataFrame] = {}  # chưa lọc ngày: đối soát cần toàn bộ dataset
     silver: dict[str, DataFrame] = {}  # sau `--business-date`: phần được ghi
-    parse_errors = _bronze_frame(spark, batches, "parse_error")
-    if parse_errors is not None:
-        _require_zero(
-            parse_errors.where(F.col("dataset_id").isNull() | (F.col("dataset_id") == dataset_id)),
-            "PARSE_ERROR_PRESENT",
-            "Bronze có bản ghi parse lỗi của dataset này hoặc không rõ dataset (T30 chưa có)",
-        )
-    for entity, bronze_entity, key, payload, build in (
+    for entity, bronze_entity, key, payload, build, validate_fn in (
         (
             "transactions",
             "transaction",
             "transaction_id",
             transforms.TRANSACTION_PAYLOAD,
             transforms.silver_transactions,
+            spark_quarantine.validate_bronze_transactions_spark,
         ),
         (
             "ledger_entries",
@@ -310,40 +425,59 @@ def _build_and_write(
             "entry_id",
             transforms.LEDGER_PAYLOAD,
             transforms.silver_ledger_entries,
+            spark_quarantine.validate_bronze_ledger_spark,
         ),
     ):
-        bronze = _bronze_frame(spark, batches, bronze_entity)
+        bronze = _bronze_frame_with_raw(spark, batches, bronze_entity)
         if bronze is None:
             raise DataError("NO_BRONZE_DATA", f"Không có Bronze entity={bronze_entity}.")
-        grouped, source = transforms.dedup_event_bronze(
-            bronze, dataset_id=dataset_id, key=key, payload=payload
+        bronze_scoped[entity] = bronze.where(
+            (F.col("dataset_id") == F.lit(dataset_id))
+            | (F.col("envelope_dataset_id") == F.lit(dataset_id))
+        )
+        valid_bronze, q_df = validate_fn(
+            bronze,
+            accounts,
+            dataset_id=dataset_id,
+            business_timezone=tz,
+            run_id=run_id,
+        )
+        q_df = state.persist(q_df)
+        if q_df.count() > 0:
+            quarantine_dfs.append(q_df)
+        grouped, source, dedup_q, dedup_kc = spark_conflicts.split_event_conflicts_spark(
+            valid_bronze,
+            dataset_id=dataset_id,
+            entity=bronze_entity,
+            key_col=key,
+            payload_cols=payload,
+            run_id=run_id,
         )
         grouped = state.persist(grouped)
         source = state.persist(source)
-        _require_zero(
-            transforms.envelope_mismatch(source, dataset_id),
-            "ENVELOPE_PAYLOAD_MISMATCH",
-            f"{entity}: envelope và payload lệch dataset_id hoặc event_time (T30 chưa có)",
-        )
-        _require_zero(
-            grouped.where(F.col("variants") > 1),
-            "BUSINESS_KEY_CONFLICT",
-            f"{entity}: cùng khóa nghiệp vụ khác nội dung (T31 chưa có)",
-        )
-        _require_zero(
-            transforms.event_id_conflicts(source),
-            "EVENT_ID_CONFLICT",
-            f"{entity}: cùng event_id khác nội dung (T31 chưa có)",
-        )
+        dedup_q = state.persist(dedup_q)
+        dedup_kc = state.persist(dedup_kc)
+        if dedup_q.count() > 0:
+            quarantine_dfs.append(dedup_q)
+        if dedup_kc.count() > 0:
+            key_conflict_dfs.append(dedup_kc)
         frame = build(grouped, run_id=run_id)
-        _require_zero(
-            transforms.invalid_event_rows(frame, tz),
-            "BUSINESS_DATE_INVALID",
-            f"{entity}: event_time/business_date sai hoặc lệch ngày Asia/Ho_Chi_Minh (T30 chưa có)",
-        )
         silver_all[entity] = state.persist(frame)
         silver[entity] = date_filter(silver_all[entity])
         counts[f"bronze_physical_{entity}"] = int(source.count())
+
+    # Kiểm nhóm sổ cái (LEDGER_INCOMPLETE, LEDGER_UNBALANCED, LEDGER_TRANSACTION_MISMATCH)
+    clean_ledger, ledger_grp_q = spark_quarantine.validate_ledger_groups_spark(
+        silver_all["transactions"],
+        silver_all["ledger_entries"],
+        run_id=run_id,
+        raw_reference=batches[0].raw_path,
+    )
+    ledger_grp_q = state.persist(ledger_grp_q)
+    if ledger_grp_q.count() > 0:
+        quarantine_dfs.append(ledger_grp_q)
+        silver_all["ledger_entries"] = state.persist(clean_ledger)
+        silver["ledger_entries"] = date_filter(silver_all["ledger_entries"])
 
     # --- Silver sao kê ----------------------------------------------------------------------
     if not ordered_receipts:
@@ -355,30 +489,78 @@ def _build_and_write(
     flat, invalid = transforms.silver_statements(
         spark, files, ordered_receipts, uris, dataset_id=dataset_id
     )
-    _require_zero(invalid, "STATEMENT_INVALID_ROWS", "sao kê không hợp lệ (T30 chưa có)")
+    invalid = state.persist(invalid)
+    if invalid.count() > 0:
+        quarantine_dfs.append(
+            invalid.select(
+                F.coalesce(F.col("dataset_id"), F.lit(dataset_id)).alias("dataset_id"),
+                F.to_date(F.col("business_date"), "yyyy-MM-dd").alias("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.when(F.col("unparsable"), F.lit("BRONZE_PARSE"))
+                .otherwise(F.lit("SILVER_BUSINESS"))
+                .alias("stage"),
+                F.lit("statement").alias("entity"),
+                F.col("statement_record_id").cast("string").alias("business_key"),
+                F.when(F.col("unparsable"), F.lit("INVALID_JSON"))
+                .otherwise(F.lit("SCHEMA_VALUE"))
+                .alias("error_code"),
+                F.array(
+                    F.when(F.col("unparsable"), F.lit("INVALID_JSON")).otherwise(
+                        F.lit("SCHEMA_VALUE")
+                    )
+                ).alias("issue_codes"),
+                F.lit("Dòng sao kê không hợp lệ").alias("error_detail"),
+                F.concat_ws(
+                    ":",
+                    F.col("source_file"),
+                    F.col("source_sha256"),
+                    F.col("source_line").cast("string"),
+                ).alias("source_pointer"),
+                F.col("source_file").alias("raw_reference"),
+            )
+        )
     flat = state.persist(flat)
-    _require_zero(
-        flat.where(F.col("variants") > 1),
-        "STATEMENT_ID_CONFLICT",
-        "cùng statement_record_id khác nội dung (T31 chưa có)",
+    clean_flat, stmt_q, stmt_kc = spark_conflicts.split_statement_conflicts_spark(
+        flat, run_id=run_id
     )
-    statements = transforms.finish_silver_statements(flat, run_id=run_id)
-    _require_zero(
-        transforms.invalid_event_rows(statements, tz),
-        "BUSINESS_DATE_INVALID",
-        "sao kê: event_time/business_date lệch ngày Asia/Ho_Chi_Minh (T30 chưa có)",
-    )
+    stmt_q = state.persist(stmt_q)
+    stmt_kc = state.persist(stmt_kc)
+    if stmt_q.count() > 0:
+        quarantine_dfs.append(stmt_q)
+    if stmt_kc.count() > 0:
+        key_conflict_dfs.append(stmt_kc)
+    statements = transforms.finish_silver_statements(clean_flat, run_id=run_id)
+    bad_stmt_dates = state.persist(transforms.invalid_event_rows(statements, tz))
+    if bad_stmt_dates.count() > 0:
+        quarantine_dfs.append(
+            bad_stmt_dates.select(
+                F.col("dataset_id"),
+                F.col("business_date"),
+                F.lit(run_id).alias("run_id"),
+                F.lit("SILVER_BUSINESS").alias("stage"),
+                F.lit("statement").alias("entity"),
+                F.col("statement_record_id").alias("business_key"),
+                F.lit("BUSINESS_DATE_MISMATCH").alias("error_code"),
+                F.array(F.lit("BUSINESS_DATE_MISMATCH")).alias("issue_codes"),
+                F.lit("sao kê: event_time/business_date lệch ngày theo múi giờ nghiệp vụ").alias(
+                    "error_detail"
+                ),
+                F.concat_ws(
+                    ":",
+                    F.col("source_file"),
+                    F.col("source_sha256"),
+                    F.col("source_line").cast("string"),
+                ).alias("source_pointer"),
+                F.col("source_file").alias("raw_reference"),
+            )
+        )
+        statements = statements.where(
+            ~transforms.business_date_mismatch("event_time", "business_date", tz)
+            & F.col("event_time").isNotNull()
+            & F.col("business_date").isNotNull()
+        )
     silver_all["statements"] = state.persist(statements)
     silver["statements"] = date_filter(silver_all["statements"])
-
-    # --- Silver tài khoản --------------------------------------------------------------------
-    account_files = transforms.read_binary_files(spark, [accounts_uri])
-    accounts, bad_accounts, conflicting = transforms.silver_accounts(
-        spark, account_files, dataset_id=dataset_id, source_file="accounts.jsonl", run_id=run_id
-    )
-    _require_zero(bad_accounts, "ACCOUNT_INVALID_ROWS", "tài khoản không hợp lệ (T30 chưa có)")
-    _require_zero(conflicting, "ACCOUNT_ID_CONFLICT", "cùng account_id khác nội dung (T31 chưa có)")
-    accounts = state.persist(accounts)
 
     dates = sorted(
         {
@@ -395,13 +577,26 @@ def _build_and_write(
         transforms.gold_fact_transactions(silver["transactions"], run_id=run_id)
     )
     # Đối soát chạy trên toàn bộ giao dịch và sao kê của dataset; `--business-date` chỉ lọc đầu ra.
-    recon_all, recon_summary = transforms.reconcile_matched(
-        silver_all["transactions"],
-        silver_all["statements"],
-        as_of_time=state.as_of_time,
-        run_id=run_id,
+    recon_all = state.persist(
+        reconciliation.reconcile_with_diagnostics(
+            silver_all["transactions"],
+            silver_all["statements"],
+            _key_conflicts_for_reconciliation(spark, key_conflict_dfs),
+            as_of_time=state.as_of_time,
+            settings=ReconciliationSettings.from_config(cfg),
+            run_id=run_id,
+            input_snapshot_id=plan.input_snapshot_id(
+                _input_versions(batches, ordered_receipts, args, with_paths=False)
+            ),
+        )
     )
-    recon = state.persist(date_filter(recon_all))
+    # Fact phân vùng theo business_date: dòng thiếu ngày sẽ mất im lặng khi ghi.
+    _require_zero(
+        recon_all.where(F.col("business_date").isNull()),
+        "RECON_BUSINESS_DATE_MISSING",
+        "Match key không xác định được business_date",
+    )
+    recon = state.persist(date_filter(recon_all).select(*reconciliation.RESULT_COLUMNS))
 
     outputs: dict[tuple[str, str], DataFrame] = {
         (plan.LAYER_SILVER, "transactions"): silver["transactions"],
@@ -422,6 +617,76 @@ def _build_and_write(
         (d, accounts.withColumn("business_date", F.lit(d)), account_rows) for d in dates
     ]
     total_rows += write_entity(state, plan.LAYER_SILVER, "accounts", account_frames)
+
+    # --- Silver key_conflicts (T31): chỉ ghi nếu có xung đột khóa ----------------------------
+    key_conflicts_total = 0
+    kc_frames: list[tuple[date, DataFrame, int]] = []
+    if key_conflict_dfs:
+        unioned_kc = key_conflict_dfs[0]
+        for nxt in key_conflict_dfs[1:]:
+            unioned_kc = unioned_kc.unionByName(nxt)
+        kc_filtered = state.persist(date_filter(unioned_kc))
+        kc_frames = list(transforms.split_by_date(kc_filtered))
+        if kc_frames:
+            state.digests["silver.key_conflicts"] = transforms.entity_digest(kc_filtered)
+            key_conflicts_total = write_entity(state, plan.LAYER_SILVER, "key_conflicts", kc_frames)
+            total_rows += key_conflicts_total
+
+    # --- Quarantine (T30): chỉ ghi nếu có bản ghi lỗi; không ghi đè lỗi run cũ --------------
+    quarantine_by_date: dict[date, list[DataFrame]] = {}
+    for pdate, qdf, _ in quarantine_parts:
+        quarantine_by_date.setdefault(pdate, []).append(qdf)
+    if quarantine_dfs:
+        unioned_q = quarantine_dfs[0]
+        for nxt in quarantine_dfs[1:]:
+            unioned_q = unioned_q.unionByName(nxt)
+        for pdate, qdf, _ in spark_quarantine.partition_quarantine_by_date(
+            unioned_q, fallback_date=fallback_date
+        ):
+            quarantine_by_date.setdefault(pdate, []).append(qdf)
+    quarantine_total = 0
+    q_frames: list[tuple[date, DataFrame, int]] = []
+    if quarantine_by_date:
+        for pdate in sorted(quarantine_by_date):
+            dfs = quarantine_by_date[pdate]
+            merged_q = dfs[0]
+            for nxt in dfs[1:]:
+                merged_q = merged_q.unionByName(nxt)
+            merged_q = state.persist(merged_q)
+            cnt = merged_q.count()
+            if cnt > 0:
+                q_frames.append((pdate, merged_q, cnt))
+        if q_frames:
+            all_q_for_digest = q_frames[0][1]
+            for _, nxt, _ in q_frames[1:]:
+                all_q_for_digest = all_q_for_digest.unionByName(nxt)
+            state.digests["quarantine.records"] = transforms.entity_digest(all_q_for_digest)
+            quarantine_total = write_entity(state, plan.LAYER_QUARANTINE, "records", q_frames)
+            total_rows += quarantine_total
+
+    # --- Cổng chất lượng và control totals (T32) --------------------------------------------
+    # Ghi metrics TRƯỚC khi quyết định, để run bị chặn vẫn còn bằng chứng vì sao.
+    evaluation = _evaluate_quality(
+        state,
+        silver_all=silver_all,
+        silver=silver,
+        bronze_scoped=bronze_scoped,
+        statement_lines=transforms.parse_statement_lines(spark, files, ordered_receipts, uris),
+        quarantine_dfs=quarantine_dfs,
+        parse_errors=[(day, count) for day, _, count in quarantine_parts],
+        quarantine_by_date={day: rows for day, _, rows in q_frames},
+        conflicts_by_date={day: rows for day, _, rows in kc_frames},
+        control_report=control_report,
+        filter_dates=filter_dates,
+        default_date=dates[0],
+        fallback_date=fallback_date,
+    )
+    store.upsert_quality_metrics(evaluation.metrics)
+    if evaluation.should_block_publish:
+        raise DataError(
+            "QUALITY_GATE_BLOCKED",
+            f"Run {run_id} không publish: " + "; ".join(evaluation.blocking_reasons),
+        )
 
     if args.fail_at == "after_write":  # chỉ cho kiểm thử: run thất bại không bao giờ được đọc
         raise DataError("INJECTED_FAILURE", "Tắt có chủ đích sau khi ghi output, trước commit.")
@@ -447,8 +712,8 @@ def _build_and_write(
         )
         snapshots.append(snap)
 
-    summary_row = recon_summary.collect()[0]
-    total_keys, matched_keys = int(summary_row["total_keys"]), int(summary_row["matched_keys"] or 0)
+    # Đếm trên toàn dataset: `--business-date` chỉ lọc phần được ghi, không lọc đối soát.
+    counters = reconciliation.quality_counters(recon_all)
     return {
         "run_id": run_id,
         "dataset_id": dataset_id,
@@ -461,13 +726,130 @@ def _build_and_write(
             f"{w.layer}.{w.entity}.{w.business_date.isoformat()}": w.rows for w in state.written
         },
         "reconciliation": {
-            "total_keys": total_keys,
-            "matched_keys": matched_keys,
-            "unclassified_keys": total_keys - matched_keys,
+            "total_keys": counters["keys"],
+            "status_counts": {s.value: counters[s.value] for s in ReconStatus},
+            "business_date_disagreements": counters["business_date_disagreements"],
+            "age_clamped": counters["age_clamped"],
         },
         "physical_counts": counts,
+        "quarantine_records": quarantine_total,
+        "key_conflicts": key_conflicts_total,
+        "quality": {
+            "physical_records": evaluation.physical_records,
+            "rejected_records": evaluation.rejected_records,
+            "control_groups_checked": len(evaluation.comparisons),
+            "control_mismatches": len(evaluation.mismatches),
+            "unexplained_mismatches": len(evaluation.unexplained),
+        },
         "committed_snapshots": len(snapshots),
     }
+
+
+def _key_conflicts_for_reconciliation(
+    spark: SparkSession, frames: Sequence[DataFrame]
+) -> DataFrame:
+    """Bằng chứng xung đột khóa của TOÀN BỘ dataset (không lọc ngày); không có thì bảng rỗng."""
+    if not frames:
+        return spark.createDataFrame(
+            [],
+            "dataset_id string, business_date date, entity string, channel string, "
+            "external_reference string, conflict_code string, source_pointers array<string>",
+        )
+    merged = frames[0]
+    for nxt in frames[1:]:
+        merged = merged.unionByName(nxt)
+    return merged.select(*KEY_CONFLICT_COLUMNS)
+
+
+def _evaluate_quality(
+    state: RunState,
+    *,
+    silver_all: dict[str, DataFrame],
+    silver: dict[str, DataFrame],
+    bronze_scoped: dict[str, DataFrame],
+    statement_lines: DataFrame,
+    quarantine_dfs: Sequence[DataFrame],
+    parse_errors: Sequence[tuple[date, int]],
+    quarantine_by_date: dict[date, int],
+    conflicts_by_date: dict[date, int],
+    control_report: dict[str, object] | None,
+    filter_dates: set[date],
+    default_date: date,
+    fallback_date: date,
+) -> quality_metrics.QualityEvaluation:
+    """Đếm tầng, control totals và cổng chặn publish theo ngưỡng `[quality]` của cấu hình."""
+    quarantine = None
+    if quarantine_dfs:
+        quarantine = quarantine_dfs[0]
+        for nxt in quarantine_dfs[1:]:
+            quarantine = quarantine.unionByName(nxt)
+        quarantine = state.persist(quarantine)
+
+    layer_counts: list[quality_metrics.LayerCounts] = []
+    totals: list[quality_metrics.ControlTotalRow] = []
+    for entity, name, key, group in (
+        ("transactions", "transaction", "transaction_id", "status"),
+        ("ledger_entries", "ledger_entry", "entry_id", "side"),
+        ("statements", "statement", "statement_record_id", "status"),
+    ):
+        is_event = entity in bronze_scoped
+        layer_counts += spark_metrics.layer_counts_spark(
+            bronze_scoped[entity] if is_event else statement_lines,
+            silver_all[entity],
+            quarantine,
+            entity=name,
+            key_col=key,
+            pointer=(
+                transforms.pointer_column() if is_event else spark_metrics.statement_pointer()
+            ),
+            fallback_date=fallback_date,
+            event_col="event_id" if is_event else None,
+        )
+        totals += spark_metrics.compute_group_totals_spark(
+            silver[entity], entity=name, key_col=key, group_col=group
+        )
+    if filter_dates:
+        layer_counts = [c for c in layer_counts if c.business_date in filter_dates]
+    layer_counts += spark_metrics.parse_error_counts(parse_errors)
+
+    rejected: list[quality_metrics.RejectedKey] = []
+    if control_report is not None and any(
+        not c.matched
+        for c in quality_metrics.compare_control_totals(
+            totals, control_report, business_dates=filter_dates
+        )
+    ):
+        # Chỉ tìm khóa bị loại khi có chênh lệch cần giải thích.
+        for entity, name, key, group in (
+            ("transactions", "transaction", "transaction_id", "status"),
+            ("ledger_entries", "ledger_entry", "entry_id", "side"),
+        ):
+            rejected += spark_metrics.rejected_keys_spark(
+                bronze_scoped[entity],
+                silver_all[entity],
+                entity=name,
+                key_col=key,
+                group_col=group,
+            )
+
+    limits = state.cfg.quality
+    return quality_metrics.evaluate_quality_gate(
+        run_id=state.run_id,
+        dataset_id=state.dataset_id,
+        default_date=default_date,
+        layer_counts=layer_counts,
+        totals=totals,
+        quarantine_by_date=quarantine_by_date,
+        conflicts_by_date=conflicts_by_date,
+        control_report=control_report,
+        rejected_keys=rejected,
+        business_dates=filter_dates,
+        thresholds=quality_metrics.QualityThresholds(
+            max_quarantine_rate_bps=limits.max_quarantine_rate_bps,
+            max_conflict_count=limits.max_conflict_count,
+            fail_on_unexplained_control_mismatch=limits.fail_on_unexplained_control_mismatch,
+        ),
+    )
 
 
 def _input_versions(

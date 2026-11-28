@@ -146,6 +146,12 @@ FIELD_TYPES: dict[str, type] = {
     "benchmark.latency_min_samples_p50_p95": int,
     "benchmark.latency_min_samples_p99": int,
     "benchmark.noise_min_free_ram_overhead_mb": int,
+    "quality.max_quarantine_rate_bps": int,
+    "quality.max_conflict_count": int,
+    "quality.fail_on_unexplained_control_mismatch": bool,
+    "quality.require_control_report": bool,
+    "reconciliation.statuses": str,
+    "reconciliation.channels": str,
 }
 
 
@@ -298,6 +304,31 @@ class BenchmarkConfig:
 
 
 @dataclass(frozen=True)
+class QualityConfig:
+    """Ngưỡng cổng chất lượng trước khi publish (đặc tả I.6, ADR-0014).
+
+    `max_quarantine_rate_bps` tính theo điểm cơ bản (1 bps = 0,01 %), số nguyên để không dùng float.
+    """
+
+    max_quarantine_rate_bps: int
+    max_conflict_count: int
+    fail_on_unexplained_control_mismatch: bool
+    require_control_report: bool
+
+
+@dataclass(frozen=True)
+class ReconciliationConfig:
+    """Tập status và channel được đối soát (ADR-0006 Q10, spec Phần I mục 7.2).
+
+    Trong tệp cấu hình và biến môi trường hai khóa là chuỗi phân tách bằng dấu phẩy
+    (`"SUCCESS,FAILED"`); ở đây là tuple đã tách, bỏ khoảng trắng, giữ thứ tự, không trùng.
+    """
+
+    statuses: tuple[str, ...]
+    channels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: str
     business_timezone: str
@@ -311,6 +342,8 @@ class AppConfig:
     paths: PathsConfig
     limits: LimitsConfig
     benchmark: BenchmarkConfig
+    quality: QualityConfig
+    reconciliation: ReconciliationConfig
 
 
 def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -526,6 +559,19 @@ def _optional_typed(data: Mapping[str, Any], field_path: str) -> Any:
     if isinstance(value, str) and not value.strip():
         return None  # biến môi trường rỗng (`N06__LIMITS__X=`) nghĩa là không đặt
     return _require_typed(data, field_path)
+
+
+def _require_csv_set(data: Mapping[str, Any], field_path: str) -> tuple[str, ...]:
+    """Tách chuỗi phân tách bằng dấu phẩy thành tuple không rỗng, không phần tử trống hay trùng."""
+    raw = _require_typed(data, field_path)
+    items = tuple(part.strip() for part in raw.split(","))
+    if any(not item for item in items):
+        raise ConfigValidationError(
+            field_path, raw, "Có phần tử rỗng trong danh sách phân tách bằng dấu phẩy."
+        )
+    if len(set(items)) != len(items):
+        raise ConfigValidationError(field_path, raw, "Danh sách có phần tử trùng nhau.")
+    return items
 
 
 def _require_min_int(field_path: str, value: int, minimum: int) -> int:
@@ -872,6 +918,33 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         ),
     )
 
+    quarantine_bps = _require_min_int(
+        "quality.max_quarantine_rate_bps",
+        _require_typed(merged, "quality.max_quarantine_rate_bps"),
+        0,
+    )
+    if quarantine_bps > 10_000:
+        raise ConfigValidationError(
+            "quality.max_quarantine_rate_bps", quarantine_bps, "Giá trị phải <= 10000."
+        )
+    quality = QualityConfig(
+        max_quarantine_rate_bps=quarantine_bps,
+        max_conflict_count=_require_min_int(
+            "quality.max_conflict_count",
+            _require_typed(merged, "quality.max_conflict_count"),
+            0,
+        ),
+        fail_on_unexplained_control_mismatch=_require_typed(
+            merged, "quality.fail_on_unexplained_control_mismatch"
+        ),
+        require_control_report=_require_typed(merged, "quality.require_control_report"),
+    )
+
+    reconciliation = ReconciliationConfig(
+        statuses=_require_csv_set(merged, "reconciliation.statuses"),
+        channels=_require_csv_set(merged, "reconciliation.channels"),
+    )
+
     operational_prefixes = [
         paths.raw_prefix,
         paths.bronze_prefix,
@@ -902,6 +975,8 @@ def validate_config_dict(merged: Mapping[str, Any]) -> AppConfig:
         paths=paths,
         limits=limits,
         benchmark=benchmark,
+        quality=quality,
+        reconciliation=reconciliation,
     )
 
 

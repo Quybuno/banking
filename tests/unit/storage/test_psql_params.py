@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from n06.config import PostgresDbConfig
-from n06.storage import IngestBatchRecord, PsqlCliControlStore, RunRecord
+from n06.storage import IngestBatchRecord, PsqlCliControlStore, QualityMetricRecord, RunRecord
 from n06.storage import control_store as module
 
 CONFIG = PostgresDbConfig(host="db", port=5432, database="d", user="u", password="pw-9917")
@@ -64,7 +64,7 @@ def test_values_travel_on_stdin_only(monkeypatch: pytest.MonkeyPatch) -> None:
         },
         ensure_ascii=False,
     )
-    calls = _capture(monkeypatch, ["", "[]", "", run_row, "", "", "", ""])
+    calls = _capture(monkeypatch, ["", "[]", "", run_row, "", "", "", "", "[]", "", "", "[]"])
     store = PsqlCliControlStore(CONFIG)
     store.upsert_ingest_batch(
         IngestBatchRecord(
@@ -117,8 +117,32 @@ def test_values_travel_on_stdin_only(monkeypatch: pytest.MonkeyPatch) -> None:
         entity=MARKER,
         business_date=date(2026, 1, 1),
     )
+    store.list_current_snapshots(
+        dataset_id=MARKER,
+        layer=MARKER,
+        entity=MARKER,
+        business_date_from=date(2026, 1, 1),
+        business_date_to=date(2026, 1, 2),
+    )
+    store.mark_run_mart_published(run_id=MARKER)
+    store.upsert_quality_metrics(
+        [
+            QualityMetricRecord(
+                run_id=MARKER,
+                dataset_id=MARKER,
+                layer="silver",
+                entity="all",
+                business_date=date(2026, 1, 1),
+                metric_name=MARKER,
+                metric_value=1,
+                status="PASS",
+                details={"note": MARKER},
+            )
+        ]
+    )
+    store.list_quality_metrics(run_id=MARKER)
 
-    assert len(calls) == 8
+    assert len(calls) == 12
     _assert_stdin_only(calls)
 
 

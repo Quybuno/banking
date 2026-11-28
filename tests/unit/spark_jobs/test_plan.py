@@ -57,16 +57,19 @@ def test_output_paths_use_tier_prefix_dataset_entity_and_run_id() -> None:
 def test_tier_uri_follows_configured_prefix_and_bucket() -> None:
     cfg = _cfg(N06__PATHS__SILVER_PREFIX="s-x", N06__OBJECT_STORE__BUCKET="other-bucket")
     assert plan.tier_uri(cfg, "silver") == "s3a://other-bucket/s-x"
+    assert plan.tier_uri(cfg, "quarantine") == "s3a://other-bucket/quarantine"
     with pytest.raises(ValueError):
-        plan.tier_uri(cfg, "quarantine")
+        plan.tier_uri(cfg, "bronze")
 
 
 def test_every_output_has_a_distinct_layer_entity_pair() -> None:
-    assert len(set(plan.OUTPUTS)) == len(plan.OUTPUTS) == 6
+    assert len(set(plan.OUTPUTS)) == len(plan.OUTPUTS) == 8
     assert {entity for layer, entity in plan.OUTPUTS if layer == "gold"} == {
         "fact_transactions",
         "fact_reconciliation",
     }
+    assert ("silver", "key_conflicts") in plan.OUTPUTS
+    assert ("quarantine", "records") in plan.OUTPUTS
 
 
 def test_claim_checks_every_run_root_with_a_trailing_slash_before_any_write() -> None:
@@ -82,8 +85,10 @@ def test_claim_checks_every_run_root_with_a_trailing_slash_before_any_write() ->
         "s3a://n06-lakehouse/silver/n06-demo-clean/ledger_entries/run_id=run-1/",
         "s3a://n06-lakehouse/silver/n06-demo-clean/statements/run_id=run-1/",
         "s3a://n06-lakehouse/silver/n06-demo-clean/accounts/run_id=run-1/",
+        "s3a://n06-lakehouse/silver/n06-demo-clean/key_conflicts/run_id=run-1/",
         "s3a://n06-lakehouse/gold/n06-demo-clean/fact_transactions/run_id=run-1/",
         "s3a://n06-lakehouse/gold/n06-demo-clean/fact_reconciliation/run_id=run-1/",
+        "s3a://n06-lakehouse/quarantine/n06-demo-clean/records/run_id=run-1/",
     ]
 
 
@@ -140,9 +145,34 @@ def test_semantic_hash_changes_with_content_input_or_config(override: dict[str, 
     assert _hash(**override) != _hash()
 
 
+def test_input_snapshot_id_ignores_run_options_but_not_inputs() -> None:
+    batch = {"kind": "ingest_batch", "query_name": "q", "batch_id": 0, "record_count": 3}
+    base = plan.input_snapshot_id([batch, {"kind": "as_of_time", "value": "a"}])
+    assert base == plan.input_snapshot_id(
+        [batch, {"kind": "as_of_time", "value": "b"}, {"kind": "business_dates", "value": ["d"]}]
+    )
+    assert base != plan.input_snapshot_id([{**batch, "record_count": 4}])
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("N06__DATASET__ALLOWED_LATENESS_SECONDS", "3600"),
+        ("N06__RECONCILIATION__STATUSES", "SUCCESS"),
+        ("N06__RECONCILIATION__CHANNELS", "SIM_CHANNEL_A"),
+    ],
+)
+def test_config_hash_changes_with_reconciliation_settings(name: str, value: str) -> None:
+    assert plan.config_hash(_cfg()) != plan.config_hash(_cfg(**{name: value}))
+
+
 def test_config_hash_covers_only_business_configuration() -> None:
     base = plan.config_hash(_cfg())
-    expected = hashlib.sha256(b'{"business_timezone":"Asia/Ho_Chi_Minh"}').hexdigest()
+    expected = hashlib.sha256(
+        b'{"allowed_lateness_seconds":86400,"business_timezone":"Asia/Ho_Chi_Minh",'
+        b'"reconciliation_channels":["SIM_CHANNEL_A","SIM_CHANNEL_B"],'
+        b'"reconciliation_statuses":["SUCCESS","FAILED"]}'
+    ).hexdigest()
     assert base == expected
     assert base == plan.config_hash(_cfg(N06__OBJECT_STORE__BUCKET="elsewhere"))
     assert base == plan.config_hash(_cfg(N06__SPARK__CORES="4"))
