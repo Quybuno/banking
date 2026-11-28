@@ -63,11 +63,12 @@ def test_tier_uri_follows_configured_prefix_and_bucket() -> None:
 
 
 def test_every_output_has_a_distinct_layer_entity_pair() -> None:
-    assert len(set(plan.OUTPUTS)) == len(plan.OUTPUTS) == 7
+    assert len(set(plan.OUTPUTS)) == len(plan.OUTPUTS) == 8
     assert {entity for layer, entity in plan.OUTPUTS if layer == "gold"} == {
         "fact_transactions",
         "fact_reconciliation",
     }
+    assert ("silver", "key_conflicts") in plan.OUTPUTS
     assert ("quarantine", "records") in plan.OUTPUTS
 
 
@@ -84,6 +85,7 @@ def test_claim_checks_every_run_root_with_a_trailing_slash_before_any_write() ->
         "s3a://n06-lakehouse/silver/n06-demo-clean/ledger_entries/run_id=run-1/",
         "s3a://n06-lakehouse/silver/n06-demo-clean/statements/run_id=run-1/",
         "s3a://n06-lakehouse/silver/n06-demo-clean/accounts/run_id=run-1/",
+        "s3a://n06-lakehouse/silver/n06-demo-clean/key_conflicts/run_id=run-1/",
         "s3a://n06-lakehouse/gold/n06-demo-clean/fact_transactions/run_id=run-1/",
         "s3a://n06-lakehouse/gold/n06-demo-clean/fact_reconciliation/run_id=run-1/",
         "s3a://n06-lakehouse/quarantine/n06-demo-clean/records/run_id=run-1/",
