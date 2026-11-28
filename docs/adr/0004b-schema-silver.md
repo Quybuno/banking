@@ -108,7 +108,9 @@ Căn cứ đặc tả (`docs/spec.md`):
 
 #### 3.4. `silver.accounts` — Khóa duy nhất: `(dataset_id, account_id)`
 
-Các cột theo `contracts/N06_INPUT_CONTRACT_V1/schemas/account.schema.json`: `dataset_id`, `account_id`, `account_code`, `account_type`, `currency`, `opening_balance_minor` (long), `opening_date` (date), `status`, kèm `source_file`, `run_id`.
+Các cột theo `contracts/N06_INPUT_CONTRACT_V1/schemas/account.schema.json`: `dataset_id`, `account_id`, `account_type`, `currency`, `opening_balance_minor` (long), `opening_business_date` (date), kèm `source_file`, `run_id`.
+
+*Đính chính 2026-11-28:* bản đầu liệt kê `account_code`, `status`, `opening_date` — các trường này không có trong hợp đồng (required: `schema_version`, `dataset_id`, `account_id`, `currency`, `opening_balance_minor`, `opening_business_date`, `account_type`). Hợp đồng là bất biến nên danh sách cột theo hợp đồng; phát hiện ở T25 (PR #33).
 
 #### 3.5. `silver.key_conflicts`
 
