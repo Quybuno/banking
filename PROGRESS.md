@@ -47,7 +47,7 @@ Trạng thái: `TODO`, `IN_PROGRESS`, `IN_REVIEW`, `DONE`, `BLOCKED`. Milestone 
 | T40 | B | TODO | | | |
 | T41 | C | DONE | #35 | `ruff` PASS, `check_rules.py` OK, `verify_contract.py` (14/14 PASS), `pytest tests/unit` (813 passed), `pytest tests/integration` (55 passed, 0 skip, gồm `test_mart_postgres.py` 28/28 trên Postgres thật), `bash scripts/smoke.sh` (2/2 PASS), CI xanh | DDL mart đủ 4 dim + 3 fact + `mart_publish_metadata` (ADR-0005, `dim_account` khớp `account.schema.json`, `fact_reconciliation.input_snapshot_id` theo S361), role `n06_mart_ro` chỉ SELECT (ADR-0013 Q6), `MartPublisher` staging → validate → 1 transaction thay thế phạm vi ngày xóa được dòng cũ. Dùng dữ liệu dựng ADR-0005 theo ADR-0008 (chưa nối Gold thật T26/T40) |
 | T42 | C | TODO | | | |
-| T43 | C | TODO | | | Metabase v0.64.9 LTS, profile `bi` (ADR-0013) |
+| T43 | C | IN_REVIEW | | `verify_contract` (14/14), `check_rules`, `ruff`, `pytest tests/unit`, `test_dashboard_queries.py` PASS | Metabase `v0.64.9` LTS profile `bi` (ADR-0013), 6 file SQL không tham số đọc `n06_mart` qua `n06_mart_ro`, hướng dẫn dựng thủ công; dừng phần `quality_metrics` (`n06_control`) và đề xuất ADR-0017 |
 | T50 | B | TODO | | | |
 | T51 | C | TODO | | | Cách đo: ADR-0007 (Accepted) |
 | T52 | C + A | TODO | | | |
