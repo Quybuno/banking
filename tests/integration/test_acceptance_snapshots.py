@@ -44,6 +44,42 @@ SNAPSHOTS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _fixture_rows(name: str) -> list[dict[str, Any]]:
+    text = (ACCEPTANCE_DIR / name).read_text("utf-8")
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def _expected_sides(as_of: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """Giá trị hai phía của từng match key tại `as_of`, tính thẳng từ file tham chiếu.
+
+    Một phía chỉ có giá trị khi khóa có đúng một bản ghi độc lập ở phía đó (ADR-0006); sao kê chỉ
+    tính khi đã được giao (`file_available_at <= as_of`, so chuỗi UTC cùng định dạng).
+    """
+    available = {
+        d["statement_record_id"]: d["file_available_at"]
+        for d in _fixture_rows("statement_deliveries.jsonl")
+    }
+    internal: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    for tx in _fixture_rows("transactions.jsonl"):
+        key = (tx["channel"], tx["external_reference"])
+        internal.setdefault(key, {})[tx["transaction_id"]] = tx
+    external: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    for row in _fixture_rows("statements.jsonl"):
+        if available[row["statement_record_id"]] <= as_of:
+            key = (row["channel"], row["external_reference"])
+            external.setdefault(key, {})[row["statement_record_id"]] = row
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for key in set(internal) | set(external):
+        sides: dict[str, Any] = {}
+        for prefix, source in (("internal", internal), ("statement", external)):
+            records = list(source.get(key, {}).values())
+            only = records[0] if len(records) == 1 else None
+            for field in ("amount_minor", "currency", "status"):
+                sides[f"{prefix}_{field}"] = only[field] if only else None
+        out[key] = sides
+    return out
+
+
 def _sha256_and_rows(path: Path) -> tuple[str, int]:
     raw = path.read_bytes()
     rows = len([line for line in raw.splitlines() if line.strip()])
@@ -323,6 +359,16 @@ def test_t34_three_acceptance_snapshots_end_to_end(acceptance_stack: Stack, tmp_
         assert {k: v for k, v in res2["reconciliation"]["status_counts"].items() if v} == exp_snap[
             "expected_counts"
         ]
+
+        # Số tiền, currency và status hai phía của TỪNG khóa (spec II.6).
+        expected_sides = _expected_sides(as_of_str)
+        actual_sides = {
+            (r["channel"], r["external_reference"]): {
+                name: r[name] for name in next(iter(expected_sides.values()))
+            }
+            for r in rows
+        }
+        assert actual_sides == expected_sides, label
 
         assert by_ref["REF-T003"]["internal_amount_minor"] == 300
         assert by_ref["REF-T003"]["statement_amount_minor"] == 301
